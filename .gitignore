@@ -1,0 +1,12 @@
+echo "packages/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+runs/
+result/
+test_img/
+fol_dataset/
+ultra/
+*.pt
+" > .gitignore

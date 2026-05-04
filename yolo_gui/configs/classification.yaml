@@ -1,0 +1,22 @@
+# YOLO Classification Dataset Config
+# Dùng cho bài toán phân loại ảnh (Image Classification)
+task: classify
+path: /path/to/dataset  # Thư mục gốc của dataset
+train: train            # Thư mục ảnh huấn luyện (subfolder = class name)
+val: val                # Thư mục ảnh validation
+
+# Số lượng classes (cập nhật theo dataset của bạn)
+nc: 10
+
+# Tên các class (subfolder names)
+names:
+  0: class_0
+  1: class_1
+  2: class_2
+  3: class_3
+  4: class_4
+  5: class_5
+  6: class_6
+  7: class_7
+  8: class_8
+  9: class_9

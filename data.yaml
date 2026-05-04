@@ -1,0 +1,17 @@
+# YOLO Object Detection Dataset Config
+# Dùng cho bài toán phát hiện đối tượng (Object Detection)
+task: detect
+train: fol_dataset/clk_dataset/train/images     # Thư mục ảnh train
+val: fol_dataset/clk_dataset/val/images        # Thư mục ảnh validation
+
+# Số lượng classes
+nc: 3
+
+# Tên các class
+names:
+  0: C
+  1: K
+  2: L
+
+# Lưu ý: Labels phải ở định dạng YOLO (.txt)
+# Mỗi dòng: class_id x_center y_center width height (normalized 0-1)
