@@ -1,4 +1,4 @@
-echo "packages/
+packages/
 venv/
 __pycache__/
 *.pyc
@@ -9,4 +9,3 @@ test_img/
 fol_dataset/
 ultra/
 *.pt
-" > .gitignore
