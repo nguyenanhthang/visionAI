@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
 )
@@ -39,6 +40,7 @@ class ImageCanvas(QGraphicsView):
     """Canvas hiển thị ảnh với zoom + pan + vẽ segment để measure."""
 
     measure_segment_drawn = Signal(int, int, int, int)  # row1, col1, row2, col2
+    roi_drawn = Signal(int, int, int, int)  # x, y, w, h (image coords)
     mouse_moved = Signal(int, int, object)  # row, col, pixel value (int|tuple|None)
 
     def __init__(self, parent=None):
@@ -64,6 +66,11 @@ class ImageCanvas(QGraphicsView):
         self._segment_start: Optional[QPointF] = None
         self._segment_item: Optional[QGraphicsLineItem] = None
 
+        # ROI rectangle tools
+        self._roi_mode = False
+        self._roi_start: Optional[QPointF] = None
+        self._roi_item: Optional[QGraphicsRectItem] = None
+
     # -- public API ---------------------------------------------------------
     def set_image(self, img: np.ndarray) -> None:
         self._image = img
@@ -85,10 +92,33 @@ class ImageCanvas(QGraphicsView):
 
     def set_measure_mode(self, enabled: bool) -> None:
         self._measure_mode = enabled
+        if enabled:
+            self._roi_mode = False
         self.setDragMode(
-            QGraphicsView.NoDrag if enabled else QGraphicsView.ScrollHandDrag
+            QGraphicsView.NoDrag
+            if (enabled or self._roi_mode)
+            else QGraphicsView.ScrollHandDrag
         )
-        self.setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
+        self.setCursor(
+            Qt.CrossCursor
+            if (enabled or self._roi_mode)
+            else Qt.ArrowCursor
+        )
+
+    def set_roi_mode(self, enabled: bool) -> None:
+        self._roi_mode = enabled
+        if enabled:
+            self._measure_mode = False
+        self.setDragMode(
+            QGraphicsView.NoDrag
+            if (enabled or self._measure_mode)
+            else QGraphicsView.ScrollHandDrag
+        )
+        self.setCursor(
+            Qt.CrossCursor
+            if (enabled or self._measure_mode)
+            else Qt.ArrowCursor
+        )
 
     def has_image(self) -> bool:
         return self._image is not None
@@ -123,6 +153,22 @@ class ImageCanvas(QGraphicsView):
                 pen,
             )
             return
+        if (
+            self._roi_mode
+            and event.button() == Qt.LeftButton
+            and self._pixmap_item is not None
+        ):
+            self._roi_start = self.mapToScene(event.position().toPoint())
+            if self._roi_item is not None:
+                self._scene.removeItem(self._roi_item)
+            pen = QPen(QColor("#6ea8ff"), 0)
+            pen.setCosmetic(True)
+            pen.setWidth(2)
+            pen.setStyle(Qt.DashLine)
+            self._roi_item = self._scene.addRect(
+                QRectF(self._roi_start, self._roi_start), pen
+            )
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):  # type: ignore[override]
@@ -144,6 +190,13 @@ class ImageCanvas(QGraphicsView):
             self._segment_item.setLine(
                 self._segment_start.x(), self._segment_start.y(), end.x(), end.y()
             )
+        if (
+            self._roi_mode
+            and self._roi_start is not None
+            and self._roi_item is not None
+        ):
+            end = self.mapToScene(event.position().toPoint())
+            self._roi_item.setRect(QRectF(self._roi_start, end).normalized())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):  # type: ignore[override]
@@ -161,4 +214,24 @@ class ImageCanvas(QGraphicsView):
             self._segment_start = None
             self.measure_segment_drawn.emit(r1, c1, r2, c2)
             return
+        if (
+            self._roi_mode
+            and event.button() == Qt.LeftButton
+            and self._roi_start is not None
+            and self._image is not None
+        ):
+            end = self.mapToScene(event.position().toPoint())
+            rect = QRectF(self._roi_start, end).normalized()
+            self._roi_start = None
+            x = int(np.clip(rect.x(), 0, self._image.shape[1] - 1))
+            y = int(np.clip(rect.y(), 0, self._image.shape[0] - 1))
+            w = int(np.clip(rect.width(), 1, self._image.shape[1] - x))
+            h = int(np.clip(rect.height(), 1, self._image.shape[0] - y))
+            self.roi_drawn.emit(x, y, w, h)
+            return
         super().mouseReleaseEvent(event)
+
+    def clear_roi(self) -> None:
+        if self._roi_item is not None:
+            self._scene.removeItem(self._roi_item)
+            self._roi_item = None

@@ -1,7 +1,10 @@
 """Panel chứa các tab parameter cho từng operator HALCON."""
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+import cv2
+import numpy as np
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -118,6 +121,9 @@ class _EdgesTab(QWidget):
 class _ShapeMatchTab(QWidget):
     run_requested = Signal(dict)
     template_load_requested = Signal()
+    pick_roi_toggled = Signal(bool)
+    template_save_requested = Signal()
+    template_clear_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -145,19 +151,53 @@ class _ShapeMatchTab(QWidget):
         form.addRow("Angle Extent (rad)", self.angle_extent)
         layout.addWidget(group)
 
-        self.template_label = QLabel("Template: <chưa chọn>")
+        # --- Template picking ---
+        tpl_group = QGroupBox("Template")
+        tpl_v = QVBoxLayout(tpl_group)
+        self.template_label = QLabel("<chưa chọn>")
         self.template_label.setProperty("muted", True)
-        layout.addWidget(self.template_label)
+        tpl_v.addWidget(self.template_label)
 
-        row = QHBoxLayout()
-        load_btn = QPushButton("📂  Load Template…")
+        self.template_preview = QLabel()
+        self.template_preview.setAlignment(Qt.AlignCenter)
+        self.template_preview.setMinimumHeight(110)
+        self.template_preview.setStyleSheet(
+            "background-color: #0e1117; border: 1px dashed #2a3140; border-radius: 6px;"
+        )
+        self.template_preview.setText("(preview)")
+        tpl_v.addWidget(self.template_preview)
+
+        tpl_btns = QHBoxLayout()
+        self.pick_btn = QPushButton("✎  Pick từ ảnh (ROI)")
+        self.pick_btn.setCheckable(True)
+        self.pick_btn.setProperty("secondary", True)
+        self.pick_btn.toggled.connect(self.pick_roi_toggled.emit)
+
+        load_btn = QPushButton("📂  Load file…")
         load_btn.setProperty("secondary", True)
         load_btn.clicked.connect(self.template_load_requested.emit)
+
+        save_btn = QPushButton("💾")
+        save_btn.setToolTip("Lưu template hiện tại ra file")
+        save_btn.setProperty("secondary", True)
+        save_btn.clicked.connect(self.template_save_requested.emit)
+
+        clear_btn = QPushButton("✕")
+        clear_btn.setToolTip("Xoá template")
+        clear_btn.setProperty("secondary", True)
+        clear_btn.clicked.connect(self.template_clear_requested.emit)
+
+        tpl_btns.addWidget(self.pick_btn, 2)
+        tpl_btns.addWidget(load_btn, 2)
+        tpl_btns.addWidget(save_btn, 0)
+        tpl_btns.addWidget(clear_btn, 0)
+        tpl_v.addLayout(tpl_btns)
+
+        layout.addWidget(tpl_group)
+
         run_btn = QPushButton("▶  Run Match")
         run_btn.clicked.connect(self._on_run)
-        row.addWidget(load_btn)
-        row.addWidget(run_btn)
-        layout.addLayout(row)
+        layout.addWidget(run_btn)
 
         hint = QLabel(
             "HALCON: create_shape_model + find_shape_model. Fallback dùng "
@@ -169,9 +209,29 @@ class _ShapeMatchTab(QWidget):
         layout.addStretch()
 
     def set_template_name(self, name: str | None):
-        self.template_label.setText(
-            f"Template: {name}" if name else "Template: <chưa chọn>"
+        self.template_label.setText(name if name else "<chưa chọn>")
+
+    def set_template_preview(self, img: np.ndarray | None):
+        if img is None:
+            self.template_preview.clear()
+            self.template_preview.setText("(preview)")
+            return
+        if img.ndim == 2:
+            disp = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        else:
+            disp = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w, _ = disp.shape
+        qimg = QImage(disp.data, w, h, w * 3, QImage.Format_RGB888).copy()
+        pix = QPixmap.fromImage(qimg).scaled(
+            self.template_preview.width() or 200,
+            120,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
         )
+        self.template_preview.setPixmap(pix)
+
+    def reset_pick_button(self):
+        self.pick_btn.setChecked(False)
 
     def _on_run(self):
         self.run_requested.emit(
@@ -254,6 +314,9 @@ class OperatorPanel(QTabWidget):
     edges_run = Signal(dict)
     shape_match_run = Signal(dict)
     shape_template_load = Signal()
+    shape_template_save = Signal()
+    shape_template_clear = Signal()
+    shape_pick_roi_toggled = Signal(bool)
     measure_run = Signal(dict)
     measure_mode_toggled = Signal(bool)
 
@@ -273,11 +336,23 @@ class OperatorPanel(QTabWidget):
         self.edges_tab.run_requested.connect(self.edges_run.emit)
         self.shape_tab.run_requested.connect(self.shape_match_run.emit)
         self.shape_tab.template_load_requested.connect(self.shape_template_load.emit)
+        self.shape_tab.template_save_requested.connect(self.shape_template_save.emit)
+        self.shape_tab.template_clear_requested.connect(self.shape_template_clear.emit)
+        self.shape_tab.pick_roi_toggled.connect(self.shape_pick_roi_toggled.emit)
         self.measure_tab.run_requested.connect(self.measure_run.emit)
         self.measure_tab.measure_mode_toggled.connect(self.measure_mode_toggled.emit)
 
     def set_template_name(self, name: str | None):
         self.shape_tab.set_template_name(name)
+
+    def set_template_preview(self, img):
+        self.shape_tab.set_template_preview(img)
+
+    def reset_pick_button(self):
+        self.shape_tab.reset_pick_button()
+
+    def focus_match_tab(self):
+        self.setCurrentWidget(self.shape_tab)
 
     def set_measure_segment(self, r1: int, c1: int, r2: int, c2: int):
         self.measure_tab.set_segment(r1, c1, r2, c2)
