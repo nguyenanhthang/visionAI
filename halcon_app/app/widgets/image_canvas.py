@@ -36,6 +36,27 @@ def numpy_to_qpixmap(img: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(qimg.copy())
 
 
+def _blend_mask(img: np.ndarray, mask: np.ndarray,
+                color: tuple[int, int, int] = (54, 197, 214),
+                alpha: float = 0.45) -> np.ndarray:
+    """Trộn mask (uint8) lên ảnh BGR/GRAY -> ảnh BGR có vùng mask tô màu."""
+    if img.ndim == 2:
+        base = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    else:
+        base = img.copy()
+    if mask is None:
+        return base
+    if mask.shape[:2] != base.shape[:2]:
+        mask = cv2.resize(mask, (base.shape[1], base.shape[0]),
+                          interpolation=cv2.INTER_NEAREST)
+    overlay = base.copy()
+    overlay[mask > 0] = (
+        np.array(color, dtype=np.uint8) * alpha
+        + base[mask > 0].astype(np.float32) * (1 - alpha)
+    ).astype(np.uint8)
+    return overlay
+
+
 class ImageCanvas(QGraphicsView):
     """Canvas hiển thị ảnh với zoom + pan + vẽ segment để measure."""
 
@@ -60,6 +81,8 @@ class ImageCanvas(QGraphicsView):
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._image: Optional[np.ndarray] = None
+        self._mask: Optional[np.ndarray] = None
+        self._show_mask: bool = True
 
         # Measure-segment tools
         self._measure_mode = False
@@ -74,13 +97,34 @@ class ImageCanvas(QGraphicsView):
     # -- public API ---------------------------------------------------------
     def set_image(self, img: np.ndarray) -> None:
         self._image = img
-        pixmap = numpy_to_qpixmap(img)
+        self._render()
+        self.fit_to_view()
+
+    def set_mask(self, mask: Optional[np.ndarray]) -> None:
+        self._mask = mask
+        self._render()
+
+    def set_show_mask(self, show: bool) -> None:
+        self._show_mask = show
+        self._render()
+
+    def get_mask(self) -> Optional[np.ndarray]:
+        return self._mask
+
+    def _render(self) -> None:
+        if self._image is None:
+            return
+        if self._mask is not None and self._show_mask:
+            display = _blend_mask(self._image, self._mask)
+        else:
+            display = self._image
+        pixmap = numpy_to_qpixmap(display)
         self._scene.clear()
         self._segment_item = None
+        self._roi_item = None
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._pixmap_item.setTransformationMode(Qt.SmoothTransformation)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
-        self.fit_to_view()
 
     def fit_to_view(self) -> None:
         if self._pixmap_item is None:

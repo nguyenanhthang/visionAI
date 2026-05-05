@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QStatusBar,
     QToolBar,
@@ -25,12 +26,19 @@ from app.operators import (
     HALCON_AVAILABLE,
     HALCON_VERSION,
     Grabber,
+    adaptive_threshold,
     apply_filter,
+    apply_mask,
     color_stats,
+    contour_analysis,
     decode_codes,
     edges_sub_pix,
     histogram,
+    image_diff,
+    mask_from_gray_range,
+    mask_from_roi,
     measure_pairs,
+    morphology,
     read_image,
     shape_match,
     threshold_blob,
@@ -51,12 +59,14 @@ class MainWindow(QMainWindow):
         self._original_image: Optional[np.ndarray] = None
         self._template_path: Optional[Path] = None
         self._template_image: Optional[np.ndarray] = None
+        self._reference_image: Optional[np.ndarray] = None
+        self._mask: Optional[np.ndarray] = None
 
         self._grabber = Grabber()
         self._live_timer = QTimer(self)
         self._live_timer.timeout.connect(self._on_live_tick)
 
-        # ROI mode state — phân biệt mục đích lấy ROI: "template" hay "color"
+        # ROI mode state — phân biệt mục đích lấy ROI: "template" / "color" / "mask"
         self._roi_purpose: Optional[str] = None
 
         self._build_ui()
@@ -80,37 +90,58 @@ class MainWindow(QMainWindow):
         self.sidebar.setMaximumWidth(440)
         h_split.addWidget(self.sidebar)
 
-        # ---- CENTER: canvas + results (vertical) ----
-        center = QSplitter(Qt.Vertical)
-        canvas_holder = QWidget()
-        cv_lay = QVBoxLayout(canvas_holder)
-        cv_lay.setContentsMargins(0, 0, 0, 0)
-        cv_lay.setSpacing(6)
+        # ---- CENTER: canvas (large) + collapsible results panel ----
+        center = QWidget()
+        center_lay = QVBoxLayout(center)
+        center_lay.setContentsMargins(0, 0, 0, 0)
+        center_lay.setSpacing(6)
+
+        # Header row above viewer
         title_row = QHBoxLayout()
         title = QLabel("Image Viewer")
         title.setProperty("heading", True)
         self.viewer_badge = QLabel("idle")
         self.viewer_badge.setProperty("badge", True)
+        self.mask_badge = QLabel("no mask")
+        self.mask_badge.setProperty("badge", True)
         title_row.addWidget(title)
         title_row.addStretch()
+        title_row.addWidget(self.mask_badge)
         title_row.addWidget(self.viewer_badge)
-        cv_lay.addLayout(title_row)
+        center_lay.addLayout(title_row)
+
+        # Vertical splitter — canvas chiếm phần lớn, results nhỏ ở dưới
+        v_split = QSplitter(Qt.Vertical)
+        v_split.setChildrenCollapsible(True)
+        self._v_split = v_split
+
         self.canvas = ImageCanvas()
-        cv_lay.addWidget(self.canvas, 1)
-        center.addWidget(canvas_holder)
+        v_split.addWidget(self.canvas)
 
         results_holder = QWidget()
         r_lay = QVBoxLayout(results_holder)
-        r_lay.setContentsMargins(0, 6, 0, 0)
+        r_lay.setContentsMargins(0, 4, 0, 0)
         r_lay.setSpacing(6)
+        r_header = QHBoxLayout()
         r_title = QLabel("Results")
         r_title.setProperty("heading", True)
-        r_lay.addWidget(r_title)
+        self.results_toggle_btn = QPushButton("▾  Hide")
+        self.results_toggle_btn.setProperty("ghost", True)
+        self.results_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.results_toggle_btn.clicked.connect(self._toggle_results_panel)
+        r_header.addWidget(r_title)
+        r_header.addStretch()
+        r_header.addWidget(self.results_toggle_btn)
+        r_lay.addLayout(r_header)
         self.results_view = ResultsView()
         r_lay.addWidget(self.results_view, 1)
-        center.addWidget(results_holder)
-        center.setStretchFactor(0, 3)
-        center.setStretchFactor(1, 2)
+        v_split.addWidget(results_holder)
+
+        # Tỷ lệ ban đầu: canvas ≈ 78%, results ≈ 22%
+        v_split.setStretchFactor(0, 5)
+        v_split.setStretchFactor(1, 1)
+        v_split.setSizes([800, 220])
+        center_lay.addWidget(v_split, 1)
 
         h_split.addWidget(center)
         h_split.setStretchFactor(0, 0)
@@ -118,6 +149,18 @@ class MainWindow(QMainWindow):
 
         root.addWidget(h_split)
         self.setCentralWidget(central)
+
+    def _toggle_results_panel(self):
+        sizes = self._v_split.sizes()
+        if sizes[1] > 8:
+            self._results_prev_size = sizes[1]
+            self._v_split.setSizes([sizes[0] + sizes[1], 0])
+            self.results_toggle_btn.setText("▴  Show")
+        else:
+            prev = getattr(self, "_results_prev_size", 220)
+            total = sizes[0]
+            self._v_split.setSizes([max(100, total - prev), prev])
+            self.results_toggle_btn.setText("▾  Hide")
 
     def _build_menu(self):
         bar = self.menuBar()
@@ -196,8 +239,11 @@ class MainWindow(QMainWindow):
         s = self.sidebar
         # Tools
         s.filter_run.connect(self._run_filter)
+        s.morphology_run.connect(self._run_morphology)
         s.threshold_run.connect(self._run_threshold)
+        s.adaptive_run.connect(self._run_adaptive)
         s.edges_run.connect(self._run_edges)
+        s.contour_run.connect(self._run_contours)
         s.shape_match_run.connect(self._run_shape_match)
         s.shape_template_load.connect(self._on_open_template)
         s.shape_template_save.connect(self._on_save_template)
@@ -209,6 +255,19 @@ class MainWindow(QMainWindow):
         s.idread_run.connect(self._run_idread)
         s.color_pick_roi_toggled.connect(self._on_pick_color_roi)
         s.color_run.connect(self._run_color)
+        s.diff_run.connect(self._run_diff)
+        s.diff_load_reference.connect(self._on_load_reference)
+        s.diff_clear_reference.connect(self._on_clear_reference)
+
+        # Mask
+        s.mask_gen_gray.connect(self._on_mask_from_gray)
+        s.mask_gen_hsv.connect(self._on_mask_from_hsv)
+        s.mask_pick_roi_toggled.connect(self._on_pick_mask_roi)
+        s.mask_invert.connect(self._on_mask_invert)
+        s.mask_clear.connect(self._on_mask_clear)
+        s.mask_show_toggled.connect(self.canvas.set_show_mask)
+        s.mask_save.connect(self._on_mask_save)
+        s.mask_load.connect(self._on_mask_load)
 
         # Acquisition
         s.acq_connect.connect(self._on_acq_connect)
@@ -327,9 +386,22 @@ class MainWindow(QMainWindow):
             self.sidebar.reset_pick_button()
         elif self._roi_purpose == "color":
             self.sidebar.set_color_roi(x, y, w, h)
+        elif self._roi_purpose == "mask":
+            mask = mask_from_roi(self._original_image, x, y, w, h)
+            self._set_mask(mask, source=f"ROI({x},{y},{w}×{h})")
+            self.sidebar.reset_mask_pick()
         self._roi_purpose = None
         self.canvas.set_roi_mode(False)
         self.canvas.clear_roi()
+
+    def _on_pick_mask_roi(self, on: bool):
+        self._roi_purpose = "mask" if on else None
+        self.canvas.set_roi_mode(on)
+        if on:
+            self.results_view.append_log("Pick mode: kéo chuột chọn vùng làm mask…")
+            self.sidebar.mask_section.set_expanded(True)
+        else:
+            self.canvas.clear_roi()
 
     # ==================================================================
     # Operator runs
@@ -340,22 +412,45 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def _input_image(self) -> np.ndarray:
+        """Ảnh đầu vào cho operator: áp mask nếu có."""
+        if self._mask is not None:
+            return apply_mask(self._original_image, self._mask)
+        return self._original_image
+
     def _run_filter(self, params: dict):
         if not self._ensure_image():
             return
-        result = apply_filter(self._original_image, **params)
+        result = apply_filter(self._input_image(), **params)
         self._original_image = result.image  # filter ghi đè ảnh nguồn để xếp chuỗi tool
         self._show_result(result, title="Filter")
+
+    def _run_morphology(self, params: dict):
+        if not self._ensure_image():
+            return
+        result = morphology(self._input_image(), **params)
+        self._original_image = result.image
+        self._show_result(result, title="Morphology")
 
     def _run_threshold(self, params: dict):
         if not self._ensure_image():
             return
-        self._show_result(threshold_blob(self._original_image, **params), title="Blob")
+        self._show_result(threshold_blob(self._input_image(), **params), title="Blob")
+
+    def _run_adaptive(self, params: dict):
+        if not self._ensure_image():
+            return
+        self._show_result(adaptive_threshold(self._input_image(), **params), title="Adaptive Threshold")
 
     def _run_edges(self, params: dict):
         if not self._ensure_image():
             return
-        self._show_result(edges_sub_pix(self._original_image, **params), title="Edges")
+        self._show_result(edges_sub_pix(self._input_image(), **params), title="Edges")
+
+    def _run_contours(self, params: dict):
+        if not self._ensure_image():
+            return
+        self._show_result(contour_analysis(self._input_image(), **params), title="Contours")
 
     def _run_shape_match(self, params: dict):
         if not self._ensure_image():
@@ -363,28 +458,128 @@ class MainWindow(QMainWindow):
         if self._template_image is None:
             QMessageBox.information(self, "Template", "Hãy chọn template trước (Pick ROI hoặc Load file).")
             return
-        self._show_result(shape_match(self._original_image, self._template_image, **params), title="Pattern Match")
+        self._show_result(shape_match(self._input_image(), self._template_image, **params), title="Pattern Match")
 
     def _run_measure(self, params: dict):
         if not self._ensure_image():
             return
-        self._show_result(measure_pairs(self._original_image, **params), title="Caliper")
+        self._show_result(measure_pairs(self._input_image(), **params), title="Caliper")
 
     def _run_histogram(self):
         if not self._ensure_image():
             return
-        self._show_result(histogram(self._original_image), title="Histogram")
+        self._show_result(histogram(self._input_image()), title="Histogram")
 
     def _run_idread(self):
         if not self._ensure_image():
             return
-        self._show_result(decode_codes(self._original_image), title="ID Read")
+        self._show_result(decode_codes(self._input_image()), title="ID Read")
 
     def _run_color(self):
         if not self._ensure_image():
             return
         x, y, w, h = self.sidebar.color_content.roi
         self._show_result(color_stats(self._original_image, x, y, w, h), title="Color")
+
+    def _run_diff(self, params: dict):
+        if not self._ensure_image():
+            return
+        if self._reference_image is None:
+            QMessageBox.information(self, "Reference", "Hãy load reference image (golden) trước.")
+            return
+        self._show_result(image_diff(self._original_image, self._reference_image, **params), title="Image Diff")
+
+    # ------------------------------------------------------------------
+    # Reference (golden) image
+    # ------------------------------------------------------------------
+    def _on_load_reference(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Reference", str(Path.home()), SUPPORTED_EXTS)
+        if not path:
+            return
+        try:
+            ref = read_image(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Reference", f"Không đọc được ảnh:\n{exc}")
+            return
+        self._reference_image = ref
+        self.sidebar.set_diff_reference_name(Path(path).name)
+        self.results_view.append_log(f"Reference loaded: {Path(path).name}")
+
+    def _on_clear_reference(self):
+        self._reference_image = None
+        self.sidebar.set_diff_reference_name(None)
+        self.results_view.append_log("Reference cleared.")
+
+    # ------------------------------------------------------------------
+    # Mask handlers
+    # ------------------------------------------------------------------
+    def _set_mask(self, mask: Optional[np.ndarray], source: str = ""):
+        self._mask = mask
+        self.canvas.set_mask(mask)
+        if mask is None:
+            self.mask_badge.setText("no mask")
+            self.sidebar.mask_content.set_status("(none)")
+            return
+        nz = int(np.count_nonzero(mask))
+        ratio = nz / mask.size
+        self.mask_badge.setText(f"mask {ratio*100:.1f}%")
+        info = f"{mask.shape[1]}×{mask.shape[0]} • {nz} px ({ratio*100:.1f}%)"
+        if source:
+            info += f" • {source}"
+        self.sidebar.mask_content.set_status(info)
+
+    def _on_mask_from_gray(self, mn: int, mx: int):
+        if not self._ensure_image():
+            return
+        mask = mask_from_gray_range(self._original_image, mn, mx)
+        self._set_mask(mask, source=f"gray[{mn},{mx}]")
+        self.results_view.append_log(f"[Mask] gray[{mn},{mx}] -> {int(np.count_nonzero(mask))} px")
+
+    def _on_mask_from_hsv(self, h1, h2, s1, s2, v1, v2):
+        if not self._ensure_image():
+            return
+        img = self._original_image
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv,
+                           np.array([h1, s1, v1], np.uint8),
+                           np.array([h2, s2, v2], np.uint8))
+        self._set_mask(mask, source=f"HSV[{h1}-{h2},{s1}-{s2},{v1}-{v2}]")
+        self.results_view.append_log(
+            f"[Mask] HSV H[{h1},{h2}] S[{s1},{s2}] V[{v1},{v2}] -> {int(np.count_nonzero(mask))} px"
+        )
+
+    def _on_mask_invert(self):
+        if self._mask is None:
+            return
+        self._set_mask(cv2.bitwise_not(self._mask), source="inverted")
+
+    def _on_mask_clear(self):
+        self._set_mask(None)
+        self.results_view.append_log("Mask cleared.")
+
+    def _on_mask_save(self):
+        if self._mask is None:
+            QMessageBox.information(self, "Mask", "Chưa có mask để lưu.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Mask", str(Path.home() / "mask.png"), "PNG (*.png)"
+        )
+        if path and cv2.imwrite(path, self._mask):
+            self.results_view.append_log(f"Mask saved → {path}")
+
+    def _on_mask_load(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Mask", str(Path.home()), "Images (*.png *.bmp *.tif *.tiff)")
+        if not path:
+            return
+        m = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if m is None:
+            QMessageBox.critical(self, "Mask", "Không đọc được file.")
+            return
+        # binarize
+        _, m = cv2.threshold(m, 1, 255, cv2.THRESH_BINARY)
+        self._set_mask(m, source=Path(path).name)
 
     def _show_result(self, result, title: str):
         self.canvas.set_image(result.image)

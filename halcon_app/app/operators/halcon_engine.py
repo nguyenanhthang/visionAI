@@ -618,3 +618,262 @@ def color_stats(
         log=[f"[Color] BGR≈({bgr_mean[0]:.0f},{bgr_mean[1]:.0f},{bgr_mean[2]:.0f}) "
              f"HSV≈({hsv_mean[0]:.0f},{hsv_mean[1]:.0f},{hsv_mean[2]:.0f})"],
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. Morphology (dilation / erosion / opening / closing)
+# ---------------------------------------------------------------------------
+
+def morphology(
+    img: np.ndarray,
+    op: str = "dilate",
+    ksize: int = 5,
+    shape: str = "rect",
+    iterations: int = 1,
+) -> OperatorResult:
+    """Morphology trên grayscale.
+
+    HALCON: dilation_circle / erosion_circle / opening_circle / closing_circle.
+    """
+    gray = to_gray(img)
+    log: list[str] = []
+    k = max(1, int(ksize))
+
+    if HALCON_AVAILABLE:
+        try:
+            himg = _numpy_to_himage(gray)
+            radius = float(k)
+            if op == "dilate":
+                out = ha.dilation_circle(ha.threshold(himg, 1, 255), radius)
+            elif op == "erode":
+                out = ha.erosion_circle(ha.threshold(himg, 1, 255), radius)
+            elif op == "open":
+                out = ha.opening_circle(ha.threshold(himg, 1, 255), radius)
+            elif op == "close":
+                out = ha.closing_circle(ha.threshold(himg, 1, 255), radius)
+            else:
+                out = ha.threshold(himg, 1, 255)
+            mask_img = ha.region_to_bin(out, 255, 0, gray.shape[1], gray.shape[0])
+            arr = _himage_to_numpy(mask_img)
+            log.append(f"[HALCON] {op}_circle radius={radius}")
+            return OperatorResult(image=arr, metrics={"op": op, "ksize": k}, log=log)
+        except Exception as exc:  # pragma: no cover
+            log.append(f"[HALCON] error -> fallback OpenCV: {exc}")
+
+    cv_shape = {"rect": cv2.MORPH_RECT, "ellipse": cv2.MORPH_ELLIPSE, "cross": cv2.MORPH_CROSS}.get(
+        shape, cv2.MORPH_RECT
+    )
+    kernel = cv2.getStructuringElement(cv_shape, (k, k))
+    if op == "dilate":
+        out = cv2.dilate(gray, kernel, iterations=iterations)
+    elif op == "erode":
+        out = cv2.erode(gray, kernel, iterations=iterations)
+    elif op == "open":
+        out = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel, iterations=iterations)
+    elif op == "close":
+        out = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel, iterations=iterations)
+    elif op == "gradient":
+        out = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel)
+    elif op == "tophat":
+        out = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+    elif op == "blackhat":
+        out = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+    else:
+        out = gray.copy()
+    log.append(f"[OpenCV] morphology={op} ksize={k} iter={iterations}")
+    out_bgr = cv2.cvtColor(out, cv2.COLOR_GRAY2BGR)
+    return OperatorResult(image=out_bgr, metrics={"op": op, "ksize": k}, log=log)
+
+
+# ---------------------------------------------------------------------------
+# 10. Adaptive threshold
+# ---------------------------------------------------------------------------
+
+def adaptive_threshold(
+    img: np.ndarray,
+    block_size: int = 15,
+    offset: int = 5,
+    method: str = "mean",
+) -> OperatorResult:
+    """Adaptive threshold (HALCON: dyn_threshold)."""
+    gray = to_gray(img)
+    bs = max(3, int(block_size) | 1)
+    cv_method = (
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C if method == "gaussian"
+        else cv2.ADAPTIVE_THRESH_MEAN_C
+    )
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv_method, cv2.THRESH_BINARY_INV, bs, int(offset)
+    )
+    overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    overlay[binary > 0] = (54, 197, 214)
+    return OperatorResult(
+        image=overlay,
+        metrics={
+            "method": method,
+            "block_size": bs,
+            "offset": int(offset),
+            "fg_pixels": int(np.count_nonzero(binary)),
+        },
+        log=[f"[Adaptive] {method} block={bs} offset={offset}"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. Color segment → mask (HSV range)
+# ---------------------------------------------------------------------------
+
+def color_segment(
+    img: np.ndarray,
+    h_min: int = 0, h_max: int = 179,
+    s_min: int = 0, s_max: int = 255,
+    v_min: int = 0, v_max: int = 255,
+) -> OperatorResult:
+    """Phân vùng theo HSV range; trả về ảnh overlay + mask trong metrics."""
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    lower = np.array([h_min, s_min, v_min], dtype=np.uint8)
+    upper = np.array([h_max, s_max, v_max], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower, upper)
+    # Overlay: tô màu accent lên vùng matched
+    overlay = img.copy()
+    accent = np.zeros_like(img); accent[:, :] = (54, 197, 214)
+    blend = cv2.addWeighted(overlay, 0.6, accent, 0.4, 0)
+    overlay[mask > 0] = blend[mask > 0]
+    return OperatorResult(
+        image=overlay,
+        metrics={
+            "hsv_lower": [h_min, s_min, v_min],
+            "hsv_upper": [h_max, s_max, v_max],
+            "mask_pixels": int(np.count_nonzero(mask)),
+            "mask_ratio": round(float(np.count_nonzero(mask)) / mask.size, 4),
+            "_mask": mask,  # GUI sẽ rút ra để set làm current mask
+        },
+        log=[f"[ColorSegment] H[{h_min},{h_max}] S[{s_min},{s_max}] V[{v_min},{v_max}] "
+             f"-> {np.count_nonzero(mask)} px"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12. Contour analysis
+# ---------------------------------------------------------------------------
+
+def contour_analysis(
+    img: np.ndarray,
+    min_area: int = 50,
+    max_area: int = 10_000_000,
+    approx_eps: float = 0.01,
+) -> OperatorResult:
+    """Tìm contour, xấp xỉ polygon, vẽ + thống kê (perimeter/area/circularity)."""
+    gray = to_gray(img)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    items = []
+    for i, c in enumerate(contours):
+        area = cv2.contourArea(c)
+        if not (min_area <= area <= max_area):
+            continue
+        peri = cv2.arcLength(c, True)
+        circularity = 4 * np.pi * area / (peri * peri) if peri > 0 else 0.0
+        eps = max(1.0, approx_eps * peri)
+        approx = cv2.approxPolyDP(c, eps, True)
+        cv2.drawContours(overlay, [c], -1, (108, 217, 137), 1)
+        cv2.drawContours(overlay, [approx], -1, (54, 197, 214), 2)
+        M = cv2.moments(c)
+        cx = int(M["m10"] / M["m00"]) if M["m00"] else 0
+        cy = int(M["m01"] / M["m00"]) if M["m00"] else 0
+        cv2.putText(
+            overlay, f"#{len(items)+1}", (cx, cy),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 180, 84), 1, cv2.LINE_AA,
+        )
+        items.append({
+            "id": len(items) + 1,
+            "area": float(area),
+            "perimeter": float(peri),
+            "circularity": round(float(circularity), 4),
+            "vertices": int(len(approx)),
+            "cx": cx, "cy": cy,
+        })
+    return OperatorResult(
+        image=overlay,
+        metrics={"count": len(items), "contours": items},
+        log=[f"[Contours] {len(items)} (min_area={min_area}, eps={approx_eps})"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 13. Image diff (so sánh với reference / golden image)
+# ---------------------------------------------------------------------------
+
+def image_diff(
+    img: np.ndarray,
+    reference: np.ndarray,
+    threshold: int = 30,
+    blur: int = 5,
+) -> OperatorResult:
+    """Diff image với reference (golden template), highlight defect."""
+    if img.shape != reference.shape:
+        reference = cv2.resize(reference, (img.shape[1], img.shape[0]))
+    g1 = to_gray(img)
+    g2 = to_gray(reference)
+    if blur > 1:
+        b = max(3, int(blur) | 1)
+        g1 = cv2.GaussianBlur(g1, (b, b), 0)
+        g2 = cv2.GaussianBlur(g2, (b, b), 0)
+    diff = cv2.absdiff(g1, g2)
+    _, mask = cv2.threshold(diff, int(threshold), 255, cv2.THRESH_BINARY)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    overlay = cv2.cvtColor(g1, cv2.COLOR_GRAY2BGR)
+    overlay[mask > 0] = (84, 96, 255)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    defects = []
+    for c in contours:
+        a = cv2.contourArea(c)
+        if a < 5:
+            continue
+        x, y, w, h = cv2.boundingRect(c)
+        cv2.rectangle(overlay, (x, y), (x + w, y + h), (84, 96, 255), 2)
+        defects.append({"x": x, "y": y, "w": w, "h": h, "area": float(a)})
+    return OperatorResult(
+        image=overlay,
+        metrics={
+            "defect_count": len(defects),
+            "defect_pixels": int(np.count_nonzero(mask)),
+            "defects": defects,
+        },
+        log=[f"[Diff] threshold={threshold} -> {len(defects)} defect"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 14. Mask helpers
+# ---------------------------------------------------------------------------
+
+def mask_from_gray_range(
+    img: np.ndarray, min_gray: int = 0, max_gray: int = 128
+) -> np.ndarray:
+    gray = to_gray(img)
+    return cv2.inRange(gray, int(min_gray), int(max_gray))
+
+
+def mask_from_roi(img: np.ndarray, x: int, y: int, w: int, h: int) -> np.ndarray:
+    H, W = img.shape[:2]
+    mask = np.zeros((H, W), dtype=np.uint8)
+    x0 = max(0, x); y0 = max(0, y)
+    x1 = min(W, x + w); y1 = min(H, y + h)
+    mask[y0:y1, x0:x1] = 255
+    return mask
+
+
+def apply_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Áp mask: ngoài mask = 0 (HALCON: reduce_domain)."""
+    if mask is None:
+        return img
+    if mask.shape[:2] != img.shape[:2]:
+        mask = cv2.resize(mask, (img.shape[1], img.shape[0]),
+                          interpolation=cv2.INTER_NEAREST)
+    if img.ndim == 2:
+        return cv2.bitwise_and(img, img, mask=mask)
+    return cv2.bitwise_and(img, img, mask=mask)

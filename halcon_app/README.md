@@ -6,31 +6,48 @@ chạy được kể cả khi chưa có HALCON binding / licence.
 
 ## Sidebar (collapsible — gập/mở từng nhóm)
 
-| Nhóm           | Tools                                                |
-| -------------- | ---------------------------------------------------- |
-| 📷 Acquisition | Connect / Live (FPS) / Snapshot / Disconnect         |
-| 🪄 Pre-process | Gauss / Median / Mean / Sharpen                      |
-| 🎯 Locate      | Blob, Edges (sub-pixel), Pattern Match (+ Pick ROI)  |
-| 📐 Measure     | Caliper (Measure 1D), Histogram                      |
-| 🔢 Identify    | ID Read (QR / Barcode 1D)                            |
-| 🎨 Inspect     | Color stats trong ROI (BGR / RGB / HSV)              |
+| Nhóm           | Tools                                                              |
+| -------------- | ------------------------------------------------------------------ |
+| 📷 Acquisition | Connect / Live (FPS) / Snapshot / Disconnect                       |
+| 🪄 Pre-process | Filter (Gauss/Median/Mean/Sharpen) + Morphology (dilate/erode/…)   |
+| 🩹 Mask / ROI  | Sinh từ gray range / HSV / ROI vẽ tay; invert/clear/save/load      |
+| 🎯 Locate      | Blob, Adaptive Threshold, Edges (sub-pixel), Contours, Pattern Match (+ Pick ROI) |
+| 📐 Measure     | Caliper (Measure 1D), Histogram                                    |
+| 🔢 Identify    | ID Read (QR / Barcode 1D)                                          |
+| 🎨 Inspect     | Color stats trong ROI; Image Diff (golden template)                |
+
+### Mask system
+- Sinh mask từ **gray range**, **HSV range** hoặc **ROI vẽ tay** trên ảnh.
+- Invert / Clear / Save / Load mask (PNG nhị phân).
+- Toggle hiện/ẩn overlay teal trên canvas.
+- Khi mask được set, **mọi operator** đều áp `apply_mask` (HALCON: `reduce_domain`).
+- Status badge "mask 12.7%" hiển thị tỷ lệ pixel trong mask.
+
+### Layout
+- Canvas chiếm ~78% chiều dọc, results panel ~22%; có thể **collapse Results** bằng nút `▾ Hide`.
+- Status badges trên header viewer: nguồn ảnh (`idle/file/connect/live/snapshot`) và mask coverage.
 
 Click vào header section để mở/gập. Menu **View → Expand/Collapse all sections**
 hoặc nút trên toolbar để gập tất cả cùng lúc.
 
 ## Mapping HALCON ↔ tool
 
-| Tool            | HALCON operator                                              |
-| --------------- | ------------------------------------------------------------ |
-| Acquisition     | `open_framegrabber` / `grab_image` / `close_framegrabber`    |
-| Filter          | `gauss_filter` / `median_image` / `mean_image` / `emphasize` |
-| Blob            | `threshold` + `connection` + `select_shape`                  |
-| Edges           | `edges_sub_pix`                                              |
-| Pattern Match   | `create_shape_model` + `find_shape_model`                    |
-| Caliper         | `gen_measure_rectangle2` + `measure_pairs`                   |
-| Histogram       | `gray_histo` (fallback `cv2.calcHist`)                       |
-| ID Read         | `find_data_code_2d` (fallback `cv2.QRCodeDetector` + `cv2.barcode`) |
-| Color           | `intensity` / `mean_n` trong ROI (BGR / HSV)                 |
+| Tool                | HALCON operator                                                       |
+| ------------------- | --------------------------------------------------------------------- |
+| Acquisition         | `open_framegrabber` / `grab_image` / `close_framegrabber`             |
+| Filter              | `gauss_filter` / `median_image` / `mean_image` / `emphasize`          |
+| Morphology          | `dilation_circle` / `erosion_circle` / `opening_circle` / `closing_circle` |
+| Mask (gray / HSV)   | `threshold` (+ `reduce_domain` áp lên operator)                       |
+| Blob                | `threshold` + `connection` + `select_shape`                           |
+| Adaptive Threshold  | `dyn_threshold` (fallback `cv2.adaptiveThreshold`)                    |
+| Edges               | `edges_sub_pix`                                                       |
+| Contours            | `gen_contours_skeleton_xld` / `select_contours_xld`                   |
+| Pattern Match       | `create_shape_model` + `find_shape_model`                             |
+| Caliper             | `gen_measure_rectangle2` + `measure_pairs`                            |
+| Histogram           | `gray_histo` (fallback `cv2.calcHist`)                                |
+| ID Read             | `find_data_code_2d` (fallback `cv2.QRCodeDetector` + `cv2.barcode`)   |
+| Color               | `intensity` / `mean_n` trong ROI (BGR / HSV)                          |
+| Image Diff          | `sub_image` + `threshold` + `connection` (golden compare)             |
 
 ## Workflow điển hình
 
