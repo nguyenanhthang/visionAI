@@ -1,35 +1,50 @@
 # HALCON Vision Studio
 
-GUI PySide6 wrap quanh MVTec HALCON cho các tác vụ machine vision phổ biến.
+Ứng dụng PySide6 lấy cảm hứng từ Cognex VisionPro, wrap quanh các operator của
+MVTec HALCON cho machine vision. Có fallback OpenCV/numpy cho mọi tool nên app
+chạy được kể cả khi chưa có HALCON binding / licence.
 
-## Tính năng
+## Sidebar (collapsible — gập/mở từng nhóm)
 
-- **Image Acquisition** — `open_framegrabber` / `grab_image` (HALCON) hoặc `cv2.VideoCapture` fallback. Hỗ trợ Connect / Live (FPS chỉnh được) / Snapshot / Disconnect.
-- **Image Viewer** với zoom (chuột giữa) / pan (drag) / fit / hover toạ độ + giá trị pixel.
-- **Blob Analysis** — `threshold` + `connection` + `select_shape` (lọc theo area).
-- **Edge Detection (sub-pixel)** — `edges_sub_pix` (canny / sobel / deriche / lanser).
-- **Shape-based Matching** — `create_shape_model` + `find_shape_model` (xoay).
-  - Lấy template từ file, hoặc **vẽ ROI trực tiếp trên ảnh** (giống `draw_rectangle1` + `crop_rectangle1`), kèm preview & save.
-- **Measure 1D** — `gen_measure_rectangle2` + `measure_pairs` (vẽ segment trên ảnh).
-- Bảng kết quả + console log + lưu ảnh kết quả.
+| Nhóm           | Tools                                                |
+| -------------- | ---------------------------------------------------- |
+| 📷 Acquisition | Connect / Live (FPS) / Snapshot / Disconnect         |
+| 🪄 Pre-process | Gauss / Median / Mean / Sharpen                      |
+| 🎯 Locate      | Blob, Edges (sub-pixel), Pattern Match (+ Pick ROI)  |
+| 📐 Measure     | Caliper (Measure 1D), Histogram                      |
+| 🔢 Identify    | ID Read (QR / Barcode 1D)                            |
+| 🎨 Inspect     | Color stats trong ROI (BGR / RGB / HSV)              |
 
-## Workflow điển hình (production)
+Click vào header section để mở/gập. Menu **View → Expand/Collapse all sections**
+hoặc nút trên toolbar để gập tất cả cùng lúc.
 
-1. Mở dock **Acquisition**, chọn interface (DirectShow / GigEVision / OpenCV…) → **Connect**.
-2. Bật **Live** để xem stream, hoặc bấm **Snapshot** để chụp 1 frame.
-3. Sang tab **Match**, bấm **✎ Pick từ ảnh (ROI)** → kéo chuột chọn vùng mẫu → template được crop tự động.
-4. Bấm **▶ Run Match** trên frame mới (hoặc lặp lại snapshot → match cho từng sản phẩm).
+## Mapping HALCON ↔ tool
+
+| Tool            | HALCON operator                                              |
+| --------------- | ------------------------------------------------------------ |
+| Acquisition     | `open_framegrabber` / `grab_image` / `close_framegrabber`    |
+| Filter          | `gauss_filter` / `median_image` / `mean_image` / `emphasize` |
+| Blob            | `threshold` + `connection` + `select_shape`                  |
+| Edges           | `edges_sub_pix`                                              |
+| Pattern Match   | `create_shape_model` + `find_shape_model`                    |
+| Caliper         | `gen_measure_rectangle2` + `measure_pairs`                   |
+| Histogram       | `gray_histo` (fallback `cv2.calcHist`)                       |
+| ID Read         | `find_data_code_2d` (fallback `cv2.QRCodeDetector` + `cv2.barcode`) |
+| Color           | `intensity` / `mean_n` trong ROI (BGR / HSV)                 |
+
+## Workflow điển hình
+
+1. **Acquisition** → Connect → Live / Snapshot
+2. **Pre-process** → áp filter (output ghi đè ảnh nguồn để xếp chuỗi tool)
+3. **Locate** → Pick ROI lấy template → Run Match
+4. **Measure / Identify / Inspect** → chạy thêm trên cùng frame
 
 ## Cài đặt
 
 ```bash
 pip install PySide6 opencv-python numpy
-# Optional: cài MVTec HALCON Python binding (cần licence)
-pip install mvtec-halcon  # hoặc theo hướng dẫn của MVTec
+pip install mvtec-halcon  # optional, cần licence
 ```
-
-Nếu thư viện `halcon` không có trong môi trường, app vẫn chạy được — các operator
-sẽ fallback sang OpenCV/numpy (status bar sẽ ghi rõ engine đang dùng).
 
 ## Chạy
 
@@ -45,11 +60,14 @@ halcon_app/
 ├── main.py
 └── app/
     ├── main_window.py
-    ├── styles.py
+    ├── styles.py                    # theme dark teal kiểu VisionPro
     ├── operators/
-    │   └── halcon_engine.py     # HALCON wrapper + OpenCV fallback
+    │   ├── halcon_engine.py         # 8 operator + HALCON/OpenCV fallback
+    │   └── acquisition.py           # Grabber wrapper
     └── widgets/
-        ├── image_canvas.py      # QGraphicsView zoom/pan + measure tool
-        ├── operator_panel.py    # Tab parameters cho từng operator
-        └── results_view.py      # Bảng metrics + console log
+        ├── collapsible.py           # CollapsibleSection
+        ├── operator_panel.py        # OperatorSidebar (accordion)
+        ├── acquisition_panel.py
+        ├── image_canvas.py          # zoom/pan + ROI + segment tool
+        └── results_view.py
 ```

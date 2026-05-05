@@ -1,7 +1,6 @@
-"""Main window cho HALCON Vision Studio."""
+"""Main window cho HALCON Vision Studio (VisionPro-style sidebar)."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -10,7 +9,6 @@ import numpy as np
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QDockWidget,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -27,19 +25,17 @@ from app.operators import (
     HALCON_AVAILABLE,
     HALCON_VERSION,
     Grabber,
+    apply_filter,
+    color_stats,
+    decode_codes,
     edges_sub_pix,
+    histogram,
     measure_pairs,
     read_image,
     shape_match,
     threshold_blob,
 )
-from app.widgets import (
-    AcquisitionPanel,
-    ImageCanvas,
-    OperatorPanel,
-    ResultsView,
-)
-
+from app.widgets import ImageCanvas, OperatorSidebar, ResultsView
 
 SUPPORTED_EXTS = "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
 
@@ -48,21 +44,20 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("HALCON Vision Studio")
-        self.resize(1400, 880)
-        self.setMinimumSize(QSize(1100, 700))
+        self.resize(1480, 920)
+        self.setMinimumSize(QSize(1180, 720))
 
         self._image_path: Optional[Path] = None
         self._original_image: Optional[np.ndarray] = None
         self._template_path: Optional[Path] = None
         self._template_image: Optional[np.ndarray] = None
 
-        # Acquisition
         self._grabber = Grabber()
         self._live_timer = QTimer(self)
         self._live_timer.timeout.connect(self._on_live_tick)
 
-        # ROI picking flag — khi True, ROI vẽ sẽ được dùng làm template
-        self._picking_template = False
+        # ROI mode state — phân biệt mục đích lấy ROI: "template" hay "color"
+        self._roi_purpose: Optional[str] = None
 
         self._build_ui()
         self._build_menu()
@@ -77,43 +72,52 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        splitter = QSplitter(Qt.Horizontal, central)
+        h_split = QSplitter(Qt.Horizontal, central)
 
-        # Left: image canvas
+        # ---- LEFT: sidebar (collapsible tools) ----
+        self.sidebar = OperatorSidebar()
+        self.sidebar.setMinimumWidth(320)
+        self.sidebar.setMaximumWidth(440)
+        h_split.addWidget(self.sidebar)
+
+        # ---- CENTER: canvas + results (vertical) ----
+        center = QSplitter(Qt.Vertical)
         canvas_holder = QWidget()
         cv_lay = QVBoxLayout(canvas_holder)
         cv_lay.setContentsMargins(0, 0, 0, 0)
+        cv_lay.setSpacing(6)
+        title_row = QHBoxLayout()
         title = QLabel("Image Viewer")
         title.setProperty("heading", True)
-        cv_lay.addWidget(title)
+        self.viewer_badge = QLabel("idle")
+        self.viewer_badge.setProperty("badge", True)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        title_row.addWidget(self.viewer_badge)
+        cv_lay.addLayout(title_row)
         self.canvas = ImageCanvas()
         cv_lay.addWidget(self.canvas, 1)
+        center.addWidget(canvas_holder)
 
-        # Right: operator panel + results
-        right = QSplitter(Qt.Vertical)
-        self.operator_panel = OperatorPanel()
+        results_holder = QWidget()
+        r_lay = QVBoxLayout(results_holder)
+        r_lay.setContentsMargins(0, 6, 0, 0)
+        r_lay.setSpacing(6)
+        r_title = QLabel("Results")
+        r_title.setProperty("heading", True)
+        r_lay.addWidget(r_title)
         self.results_view = ResultsView()
-        right.addWidget(self.operator_panel)
-        right.addWidget(self.results_view)
-        right.setStretchFactor(0, 2)
-        right.setStretchFactor(1, 3)
+        r_lay.addWidget(self.results_view, 1)
+        center.addWidget(results_holder)
+        center.setStretchFactor(0, 3)
+        center.setStretchFactor(1, 2)
 
-        splitter.addWidget(canvas_holder)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 2)
+        h_split.addWidget(center)
+        h_split.setStretchFactor(0, 0)
+        h_split.setStretchFactor(1, 1)
 
-        root.addWidget(splitter)
+        root.addWidget(h_split)
         self.setCentralWidget(central)
-
-        # Acquisition dock (left)
-        self.acq_panel = AcquisitionPanel()
-        dock = QDockWidget("Acquisition", self)
-        dock.setObjectName("AcquisitionDock")
-        dock.setWidget(self.acq_panel)
-        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        self._acq_dock = dock
 
     def _build_menu(self):
         bar = self.menuBar()
@@ -122,18 +126,15 @@ class MainWindow(QMainWindow):
         act_open.setShortcut(QKeySequence.Open)
         act_open.triggered.connect(self._on_open_image)
         m_file.addAction(act_open)
-
         act_template = QAction("Open Template…", self)
         act_template.triggered.connect(self._on_open_template)
         m_file.addAction(act_template)
-
         m_file.addSeparator()
         act_save = QAction("Save Result Image…", self)
         act_save.setShortcut(QKeySequence.Save)
         act_save.triggered.connect(self._on_save_result)
-        m_file.addAction(act_save)
-
         m_file.addSeparator()
+        m_file.addAction(act_save)
         act_quit = QAction("Quit", self)
         act_quit.setShortcut(QKeySequence.Quit)
         act_quit.triggered.connect(self.close)
@@ -149,7 +150,12 @@ class MainWindow(QMainWindow):
         act_reset.triggered.connect(self.canvas.reset_zoom)
         m_view.addAction(act_reset)
         m_view.addSeparator()
-        m_view.addAction(self._acq_dock.toggleViewAction())
+        act_expand = QAction("Expand all sections", self)
+        act_expand.triggered.connect(self.sidebar.expand_all)
+        m_view.addAction(act_expand)
+        act_collapse = QAction("Collapse all sections", self)
+        act_collapse.triggered.connect(self.sidebar.collapse_all)
+        m_view.addAction(act_collapse)
 
         m_help = bar.addMenu("&Help")
         act_about = QAction("About", self)
@@ -160,74 +166,67 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Main")
         tb.setMovable(False)
         self.addToolBar(tb)
-
-        act_open = QAction("📂  Open Image", self)
-        act_open.triggered.connect(self._on_open_image)
-        tb.addAction(act_open)
-
-        act_template = QAction("🧩  Open Template", self)
-        act_template.triggered.connect(self._on_open_template)
-        tb.addAction(act_template)
-
+        tb.addAction(QAction("📂  Open", self, triggered=self._on_open_image))
+        tb.addAction(QAction("🧩  Template", self, triggered=self._on_open_template))
         tb.addSeparator()
-
-        act_reset_img = QAction("↺  Reset Image", self)
-        act_reset_img.triggered.connect(self._on_reset_image)
-        tb.addAction(act_reset_img)
-
-        act_fit = QAction("🔍  Fit", self)
-        act_fit.triggered.connect(self.canvas.fit_to_view)
-        tb.addAction(act_fit)
-
+        tb.addAction(QAction("↺  Reset Image", self, triggered=self._on_reset_image))
+        tb.addAction(QAction("🔍  Fit", self, triggered=self.canvas.fit_to_view))
+        tb.addAction(QAction("1:1  Reset Zoom", self, triggered=self.canvas.reset_zoom))
         tb.addSeparator()
-        act_save = QAction("💾  Save Result", self)
-        act_save.triggered.connect(self._on_save_result)
-        tb.addAction(act_save)
+        tb.addAction(QAction("◧  Expand sidebar", self, triggered=self.sidebar.expand_all))
+        tb.addAction(QAction("◨  Collapse sidebar", self, triggered=self.sidebar.collapse_all))
+        tb.addSeparator()
+        tb.addAction(QAction("💾  Save Result", self, triggered=self._on_save_result))
 
     def _build_statusbar(self):
         sb = QStatusBar()
         self.setStatusBar(sb)
         engine = (
-            f"HALCON {HALCON_VERSION} ✓" if HALCON_AVAILABLE else "HALCON unavailable — using OpenCV fallback"
+            f"HALCON {HALCON_VERSION}  ●" if HALCON_AVAILABLE
+            else "Engine: OpenCV fallback  ●"
         )
         self._engine_label = QLabel(engine)
-        self._image_label = QLabel("No image")
+        self._image_label = QLabel("No image loaded")
         self._cursor_label = QLabel("")
         sb.addPermanentWidget(self._image_label, 2)
         sb.addPermanentWidget(self._cursor_label, 2)
         sb.addPermanentWidget(self._engine_label, 1)
 
     def _wire_signals(self):
-        self.operator_panel.threshold_run.connect(self._run_threshold)
-        self.operator_panel.edges_run.connect(self._run_edges)
-        self.operator_panel.shape_match_run.connect(self._run_shape_match)
-        self.operator_panel.shape_template_load.connect(self._on_open_template)
-        self.operator_panel.shape_template_save.connect(self._on_save_template)
-        self.operator_panel.shape_template_clear.connect(self._on_clear_template)
-        self.operator_panel.shape_pick_roi_toggled.connect(self._on_pick_roi_toggled)
-        self.operator_panel.measure_run.connect(self._run_measure)
-        self.operator_panel.measure_mode_toggled.connect(self.canvas.set_measure_mode)
+        s = self.sidebar
+        # Tools
+        s.filter_run.connect(self._run_filter)
+        s.threshold_run.connect(self._run_threshold)
+        s.edges_run.connect(self._run_edges)
+        s.shape_match_run.connect(self._run_shape_match)
+        s.shape_template_load.connect(self._on_open_template)
+        s.shape_template_save.connect(self._on_save_template)
+        s.shape_template_clear.connect(self._on_clear_template)
+        s.shape_pick_roi_toggled.connect(self._on_pick_template_roi)
+        s.measure_run.connect(self._run_measure)
+        s.measure_mode_toggled.connect(self.canvas.set_measure_mode)
+        s.histogram_run.connect(self._run_histogram)
+        s.idread_run.connect(self._run_idread)
+        s.color_pick_roi_toggled.connect(self._on_pick_color_roi)
+        s.color_run.connect(self._run_color)
 
-        self.canvas.measure_segment_drawn.connect(
-            self.operator_panel.set_measure_segment
-        )
+        # Acquisition
+        s.acq_connect.connect(self._on_acq_connect)
+        s.acq_disconnect.connect(self._on_acq_disconnect)
+        s.acq_live.connect(self._on_live_toggled)
+        s.acq_snapshot.connect(self._on_snapshot)
+        s.acq_fps.connect(self._on_fps_changed)
+
+        # Canvas
+        self.canvas.measure_segment_drawn.connect(self.sidebar.set_measure_segment)
         self.canvas.roi_drawn.connect(self._on_roi_drawn)
         self.canvas.mouse_moved.connect(self._on_cursor_moved)
 
-        # Acquisition
-        self.acq_panel.connect_requested.connect(self._on_acq_connect)
-        self.acq_panel.disconnect_requested.connect(self._on_acq_disconnect)
-        self.acq_panel.live_toggled.connect(self._on_live_toggled)
-        self.acq_panel.snapshot_requested.connect(self._on_snapshot)
-        self.acq_panel.fps_changed.connect(self._on_fps_changed)
-
-    # ------------------------------------------------------------------
-    # File actions
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # File / template
+    # ==================================================================
     def _on_open_image(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Image", str(Path.home()), SUPPORTED_EXTS
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "Open Image", str(Path.home()), SUPPORTED_EXTS)
         if not path:
             return
         try:
@@ -238,15 +237,12 @@ class MainWindow(QMainWindow):
         self._image_path = Path(path)
         self._original_image = img
         self.canvas.set_image(img)
-        self._image_label.setText(
-            f"{self._image_path.name}  •  {img.shape[1]}×{img.shape[0]}"
-        )
+        self._image_label.setText(f"{self._image_path.name}  •  {img.shape[1]}×{img.shape[0]}")
+        self.viewer_badge.setText("file")
         self.results_view.append_log(f"Loaded image: {self._image_path.name}")
 
     def _on_open_template(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Template", str(Path.home()), SUPPORTED_EXTS
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "Open Template", str(Path.home()), SUPPORTED_EXTS)
         if not path:
             return
         try:
@@ -259,31 +255,23 @@ class MainWindow(QMainWindow):
     def _set_template(self, img: np.ndarray, name: str, source: str):
         self._template_image = img
         self._template_path = Path(name) if source == "file" else None
-        self.operator_panel.set_template_name(f"{name}  •  {img.shape[1]}×{img.shape[0]}")
-        self.operator_panel.set_template_preview(img)
-        self.results_view.append_log(
-            f"Template ← {source}: {name} ({img.shape[1]}×{img.shape[0]})"
-        )
+        self.sidebar.set_template_name(f"{name}  •  {img.shape[1]}×{img.shape[0]}")
+        self.sidebar.set_template_preview(img)
+        self.results_view.append_log(f"Template ← {source}: {name} ({img.shape[1]}×{img.shape[0]})")
 
     def _on_save_template(self):
         if self._template_image is None:
             QMessageBox.information(self, "Template", "Chưa có template để lưu.")
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Template", str(Path.home() / "template.png"), SUPPORTED_EXTS
-        )
-        if not path:
-            return
-        if cv2.imwrite(path, self._template_image):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Template", str(Path.home() / "template.png"), SUPPORTED_EXTS)
+        if path and cv2.imwrite(path, self._template_image):
             self.results_view.append_log(f"Saved template → {path}")
-        else:
-            QMessageBox.warning(self, "Save", "Lưu thất bại.")
 
     def _on_clear_template(self):
         self._template_image = None
         self._template_path = None
-        self.operator_panel.set_template_name(None)
-        self.operator_panel.set_template_preview(None)
+        self.sidebar.set_template_name(None)
+        self.sidebar.set_template_preview(None)
         self.results_view.append_log("Template cleared.")
 
     def _on_reset_image(self):
@@ -295,20 +283,14 @@ class MainWindow(QMainWindow):
         if img is None:
             QMessageBox.information(self, "Save", "Chưa có ảnh để lưu.")
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Result", str(Path.home() / "result.png"), SUPPORTED_EXTS
-        )
-        if not path:
-            return
-        if cv2.imwrite(path, img):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Result", str(Path.home() / "result.png"), SUPPORTED_EXTS)
+        if path and cv2.imwrite(path, img):
             self.results_view.append_log(f"Saved → {path}")
-        else:
-            QMessageBox.warning(self, "Save", "Lưu thất bại.")
 
     def _on_about(self):
         msg = (
             "<b>HALCON Vision Studio</b><br>"
-            "PySide6 GUI wrapping MVTec HALCON operators.<br><br>"
+            "PySide6 GUI inspired by Cognex VisionPro, wrapping MVTec HALCON.<br><br>"
             f"Engine: <b>{'HALCON ' + HALCON_VERSION if HALCON_AVAILABLE else 'OpenCV fallback'}</b>"
         )
         QMessageBox.about(self, "About", msg)
@@ -316,43 +298,93 @@ class MainWindow(QMainWindow):
     def _on_cursor_moved(self, row: int, col: int, value):
         self._cursor_label.setText(f"({col}, {row})  px={value}")
 
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # ROI handling — distinguish purpose
+    # ==================================================================
+    def _on_pick_template_roi(self, on: bool):
+        self._roi_purpose = "template" if on else None
+        self.canvas.set_roi_mode(on)
+        if on:
+            self.results_view.append_log("Pick mode: kéo chuột để chọn ROI làm template…")
+            self.sidebar.focus_match()
+        else:
+            self.canvas.clear_roi()
+
+    def _on_pick_color_roi(self, on: bool):
+        self._roi_purpose = "color" if on else None
+        self.canvas.set_roi_mode(on)
+        if on:
+            self.results_view.append_log("Pick mode: kéo chuột để chọn ROI cho color stats…")
+        else:
+            self.canvas.clear_roi()
+
+    def _on_roi_drawn(self, x: int, y: int, w: int, h: int):
+        if self._original_image is None or w < 5 or h < 5:
+            return
+        if self._roi_purpose == "template":
+            crop = self._original_image[y : y + h, x : x + w].copy()
+            self._set_template(crop, name=f"ROI({x},{y},{w}×{h})", source="ROI")
+            self.sidebar.reset_pick_button()
+        elif self._roi_purpose == "color":
+            self.sidebar.set_color_roi(x, y, w, h)
+        self._roi_purpose = None
+        self.canvas.set_roi_mode(False)
+        self.canvas.clear_roi()
+
+    # ==================================================================
     # Operator runs
-    # ------------------------------------------------------------------
+    # ==================================================================
     def _ensure_image(self) -> bool:
         if self._original_image is None:
-            QMessageBox.information(self, "No Image", "Hãy mở một ảnh trước.")
+            QMessageBox.information(self, "No Image", "Hãy mở ảnh / acquire frame trước.")
             return False
         return True
+
+    def _run_filter(self, params: dict):
+        if not self._ensure_image():
+            return
+        result = apply_filter(self._original_image, **params)
+        self._original_image = result.image  # filter ghi đè ảnh nguồn để xếp chuỗi tool
+        self._show_result(result, title="Filter")
 
     def _run_threshold(self, params: dict):
         if not self._ensure_image():
             return
-        result = threshold_blob(self._original_image, **params)
-        self._show_result(result, title="Threshold + Blob")
+        self._show_result(threshold_blob(self._original_image, **params), title="Blob")
 
     def _run_edges(self, params: dict):
         if not self._ensure_image():
             return
-        result = edges_sub_pix(self._original_image, **params)
-        self._show_result(result, title="Edges")
+        self._show_result(edges_sub_pix(self._original_image, **params), title="Edges")
 
     def _run_shape_match(self, params: dict):
         if not self._ensure_image():
             return
         if self._template_image is None:
-            QMessageBox.information(
-                self, "Template", "Hãy load template trước khi match."
-            )
+            QMessageBox.information(self, "Template", "Hãy chọn template trước (Pick ROI hoặc Load file).")
             return
-        result = shape_match(self._original_image, self._template_image, **params)
-        self._show_result(result, title="Shape Match")
+        self._show_result(shape_match(self._original_image, self._template_image, **params), title="Pattern Match")
 
     def _run_measure(self, params: dict):
         if not self._ensure_image():
             return
-        result = measure_pairs(self._original_image, **params)
-        self._show_result(result, title="Measure 1D")
+        self._show_result(measure_pairs(self._original_image, **params), title="Caliper")
+
+    def _run_histogram(self):
+        if not self._ensure_image():
+            return
+        self._show_result(histogram(self._original_image), title="Histogram")
+
+    def _run_idread(self):
+        if not self._ensure_image():
+            return
+        self._show_result(decode_codes(self._original_image), title="ID Read")
+
+    def _run_color(self):
+        if not self._ensure_image():
+            return
+        x, y, w, h = self.sidebar.color_content.roi
+        self._show_result(color_stats(self._original_image, x, y, w, h), title="Color")
 
     def _show_result(self, result, title: str):
         self.canvas.set_image(result.image)
@@ -360,87 +392,50 @@ class MainWindow(QMainWindow):
         self.results_view.append_log(f"=== {title} ===")
         self.results_view.append_log(result.log)
 
-    # ------------------------------------------------------------------
-    # ROI / template picking
-    # ------------------------------------------------------------------
-    def _on_pick_roi_toggled(self, enabled: bool):
-        self._picking_template = enabled
-        self.canvas.set_roi_mode(enabled)
-        if enabled:
-            self.results_view.append_log(
-                "Pick mode: kéo chuột để chọn ROI làm template…"
-            )
-            self.operator_panel.focus_match_tab()
-        else:
-            self.canvas.clear_roi()
-
-    def _on_roi_drawn(self, x: int, y: int, w: int, h: int):
-        if not self._picking_template or self._original_image is None:
-            return
-        if w < 5 or h < 5:
-            self.results_view.append_log("ROI quá nhỏ — bỏ qua.")
-            return
-        crop = self._original_image[y : y + h, x : x + w].copy()
-        self._set_template(
-            crop,
-            name=f"ROI({x},{y},{w}×{h})",
-            source="ROI",
-        )
-        # tắt pick mode sau khi lấy mẫu xong
-        self._picking_template = False
-        self.canvas.set_roi_mode(False)
-        self.canvas.clear_roi()
-        self.operator_panel.reset_pick_button()
-
-    # ------------------------------------------------------------------
-    # Acquisition handlers
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Acquisition
+    # ==================================================================
     def _on_acq_connect(self, interface: str, device: str):
         try:
             self._grabber.open(interface, device)
         except Exception as exc:
             QMessageBox.critical(self, "Acquisition", f"Connect lỗi:\n{exc}")
-            self.acq_panel.set_connected(False)
+            self.sidebar.set_acq_connected(False)
             return
-        self.acq_panel.set_connected(
-            True, f"{self._grabber.backend} / {self._grabber.device_name}"
-        )
-        self.results_view.append_log(
-            f"Connected: {self._grabber.backend} / {self._grabber.device_name}"
-        )
-        # grab 1 frame ngay để có ảnh khởi tạo
+        self.sidebar.set_acq_connected(True, f"{self._grabber.backend} / {self._grabber.device_name}")
+        self.results_view.append_log(f"Connected: {self._grabber.backend} / {self._grabber.device_name}")
         try:
-            frame = self._grabber.grab()
-            self._set_acquired_image(frame, source="connect")
+            self._set_acquired_image(self._grabber.grab(), source="connect")
         except Exception as exc:
             self.results_view.append_log(f"Grab khởi tạo lỗi: {exc}")
 
     def _on_acq_disconnect(self):
         self._stop_live()
         self._grabber.close()
-        self.acq_panel.set_connected(False)
+        self.sidebar.set_acq_connected(False)
         self.results_view.append_log("Disconnected.")
+        self.viewer_badge.setText("idle")
 
     def _on_live_toggled(self, on: bool):
         if on:
             if not self._grabber.is_open:
                 QMessageBox.information(self, "Live", "Hãy connect thiết bị trước.")
-                self.acq_panel.set_live(False)
+                self.sidebar.set_acq_live(False)
                 return
-            interval_ms = max(33, int(1000 / max(1, self.acq_panel.fps_spin.value())))
-            self._live_timer.start(interval_ms)
-            self.acq_panel.set_live(True)
-            self.results_view.append_log(
-                f"Live started @ {self.acq_panel.fps_spin.value()} fps"
-            )
+            interval = max(33, int(1000 / max(1, self.sidebar.acq_fps_value)))
+            self._live_timer.start(interval)
+            self.sidebar.set_acq_live(True)
+            self.results_view.append_log(f"Live started @ {self.sidebar.acq_fps_value} fps")
+            self.viewer_badge.setText("live")
         else:
             self._stop_live()
 
     def _stop_live(self):
         if self._live_timer.isActive():
             self._live_timer.stop()
-            self.acq_panel.set_live(False)
+            self.sidebar.set_acq_live(False)
             self.results_view.append_log("Live stopped.")
+            self.viewer_badge.setText("connected")
 
     def _on_fps_changed(self, fps: int):
         if self._live_timer.isActive():
@@ -451,36 +446,28 @@ class MainWindow(QMainWindow):
             self._stop_live()
             return
         try:
-            frame = self._grabber.grab()
+            self._set_acquired_image(self._grabber.grab(), source="live", silent=True)
         except Exception as exc:
             self.results_view.append_log(f"Live grab lỗi: {exc}")
             self._stop_live()
-            return
-        self._set_acquired_image(frame, source="live", silent=True)
 
     def _on_snapshot(self):
         if not self._grabber.is_open:
             return
         try:
-            frame = self._grabber.grab()
+            self._set_acquired_image(self._grabber.grab(), source="snapshot")
         except Exception as exc:
             QMessageBox.critical(self, "Snapshot", f"Grab lỗi:\n{exc}")
-            return
-        self._set_acquired_image(frame, source="snapshot")
 
     def _set_acquired_image(self, img: np.ndarray, source: str, silent: bool = False):
         self._image_path = None
         self._original_image = img
         self.canvas.set_image(img)
-        self._image_label.setText(
-            f"[{source}]  {img.shape[1]}×{img.shape[0]}"
-        )
+        self._image_label.setText(f"[{source}]  {img.shape[1]}×{img.shape[0]}")
+        self.viewer_badge.setText(source)
         if not silent:
-            self.results_view.append_log(
-                f"Acquired ({source}): {img.shape[1]}×{img.shape[0]}"
-            )
+            self.results_view.append_log(f"Acquired ({source}): {img.shape[1]}×{img.shape[0]}")
 
-    # ------------------------------------------------------------------
     def closeEvent(self, event):  # type: ignore[override]
         self._stop_live()
         self._grabber.close()

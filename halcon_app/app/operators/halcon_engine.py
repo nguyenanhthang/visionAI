@@ -428,3 +428,193 @@ def measure_pairs(
         },
         log=log,
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. Pre-process filters
+# ---------------------------------------------------------------------------
+
+def apply_filter(
+    img: np.ndarray,
+    method: str = "gauss",
+    ksize: int = 5,
+    sigma: float = 1.5,
+) -> OperatorResult:
+    """Smoothing / sharpen filter.
+
+    HALCON: gauss_filter / median_image / mean_image / emphasize.
+    """
+    log: list[str] = []
+    k = max(3, int(ksize) | 1)
+
+    if HALCON_AVAILABLE:
+        try:
+            himg = _numpy_to_himage(img if img.ndim == 2 else to_gray(img))
+            if method == "gauss":
+                out = ha.gauss_filter(himg, k)
+            elif method == "median":
+                out = ha.median_image(himg, "circle", max(1, k // 2), "mirrored")
+            elif method == "mean":
+                out = ha.mean_image(himg, k, k)
+            elif method == "sharpen":
+                out = ha.emphasize(himg, k, k, 1.0)
+            else:
+                out = himg
+            arr = _himage_to_numpy(out)
+            log.append(f"[HALCON] filter={method} ksize={k}")
+            return OperatorResult(image=arr, metrics={"method": method, "ksize": k}, log=log)
+        except Exception as exc:  # pragma: no cover
+            log.append(f"[HALCON] error -> fallback OpenCV: {exc}")
+
+    # OpenCV fallback
+    if method == "gauss":
+        out = cv2.GaussianBlur(img, (k, k), sigma)
+    elif method == "median":
+        out = cv2.medianBlur(img, k)
+    elif method == "mean":
+        out = cv2.blur(img, (k, k))
+    elif method == "sharpen":
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        out = cv2.filter2D(img, -1, kernel)
+    else:
+        out = img.copy()
+    log.append(f"[OpenCV] filter={method} ksize={k}")
+    return OperatorResult(image=out, metrics={"method": method, "ksize": k}, log=log)
+
+
+# ---------------------------------------------------------------------------
+# 6. Histogram analysis
+# ---------------------------------------------------------------------------
+
+def histogram(img: np.ndarray) -> OperatorResult:
+    """Tính histogram + thống kê + render overlay biểu đồ."""
+    gray = to_gray(img)
+    hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).ravel()
+    mean_v = float(np.mean(gray))
+    std_v = float(np.std(gray))
+    min_v = int(np.min(gray))
+    max_v = int(np.max(gray))
+    median_v = int(np.median(gray))
+
+    # Render: image + histogram strip dưới
+    h, w = gray.shape
+    strip_h = max(120, h // 4)
+    overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    canvas = np.full((h + strip_h + 8, w, 3), 28, dtype=np.uint8)
+    canvas[:h] = overlay
+
+    if hist.max() > 0:
+        norm = (hist / hist.max() * (strip_h - 14)).astype(np.int32)
+        bar_w = max(1, w // 256)
+        for i in range(256):
+            x0 = i * bar_w
+            x1 = min(w, (i + 1) * bar_w)
+            y0 = h + 8 + (strip_h - 14 - norm[i])
+            cv2.rectangle(canvas, (x0, y0), (x1, h + 8 + strip_h - 14),
+                          (54, 197, 214), -1)
+        # mean/median markers
+        for v, color, label in (
+            (int(mean_v), (108, 217, 137), "mean"),
+            (int(median_v), (255, 180, 84), "median"),
+        ):
+            x = int(v * w / 256)
+            cv2.line(canvas, (x, h + 8), (x, h + 8 + strip_h - 14), color, 1)
+
+    return OperatorResult(
+        image=canvas,
+        metrics={
+            "mean": mean_v, "std": std_v, "median": median_v,
+            "min": min_v, "max": max_v,
+            "p1": int(np.percentile(gray, 1)),
+            "p99": int(np.percentile(gray, 99)),
+        },
+        log=[f"[Histogram] mean={mean_v:.1f} std={std_v:.1f} min={min_v} max={max_v}"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. ID Read (QR / Data Matrix / Barcode)
+# ---------------------------------------------------------------------------
+
+def decode_codes(img: np.ndarray) -> OperatorResult:
+    """Decode QR + barcode bằng OpenCV detector. (HALCON: find_data_code_2d.)"""
+    gray = to_gray(img)
+    overlay = img.copy() if img.ndim == 3 else cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    found: list[dict[str, Any]] = []
+
+    # QR
+    try:
+        qr = cv2.QRCodeDetector()
+        ok, decoded, points, _ = qr.detectAndDecodeMulti(gray)
+        if ok and points is not None:
+            for txt, poly in zip(decoded, points):
+                pts = np.intp(poly)
+                cv2.polylines(overlay, [pts], True, (108, 217, 137), 2)
+                if txt:
+                    cv2.putText(overlay, f"QR: {txt}", tuple(pts[0]),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (108, 217, 137), 2)
+                found.append({"type": "QR", "data": txt, "polygon": pts.tolist()})
+    except Exception:
+        pass
+
+    # Barcode (1D)
+    try:
+        bd = cv2.barcode.BarcodeDetector()  # type: ignore[attr-defined]
+        ok, decoded, types, points = bd.detectAndDecode(gray)
+        if ok and points is not None:
+            for txt, t, poly in zip(decoded, types, points):
+                pts = np.intp(poly)
+                cv2.polylines(overlay, [pts], True, (255, 180, 84), 2)
+                cv2.putText(overlay, f"{t}: {txt}", tuple(pts[0]),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 180, 84), 2)
+                found.append({"type": t, "data": txt, "polygon": pts.tolist()})
+    except Exception:
+        pass
+
+    return OperatorResult(
+        image=overlay,
+        metrics={"count": len(found), "codes": found},
+        log=[f"[ID Read] {len(found)} code(s) detected"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. Color stats trong ROI (hoặc full image)
+# ---------------------------------------------------------------------------
+
+def color_stats(
+    img: np.ndarray,
+    x: int = 0, y: int = 0, w: int = 0, h: int = 0,
+) -> OperatorResult:
+    """Thống kê màu trong ROI (mean RGB/HSV, dominant)."""
+    H, W = img.shape[:2]
+    if w <= 0 or h <= 0:
+        x, y, w, h = 0, 0, W, H
+    x = max(0, min(x, W - 1)); y = max(0, min(y, H - 1))
+    w = min(w, W - x); h = min(h, H - y)
+    roi = img[y:y + h, x:x + w]
+    if roi.ndim == 2:
+        roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+    bgr_mean = roi.reshape(-1, 3).mean(axis=0)
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hsv_mean = hsv.reshape(-1, 3).mean(axis=0)
+
+    overlay = img.copy() if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(overlay, (x, y), (x + w, y + h), (54, 197, 214), 2)
+    swatch_color = tuple(int(v) for v in bgr_mean)
+    cv2.rectangle(overlay, (x, y - 24), (x + 80, y - 4), swatch_color, -1)
+    cv2.rectangle(overlay, (x, y - 24), (x + 80, y - 4), (255, 255, 255), 1)
+
+    return OperatorResult(
+        image=overlay,
+        metrics={
+            "roi": {"x": x, "y": y, "w": w, "h": h},
+            "bgr_mean": [round(float(v), 2) for v in bgr_mean],
+            "rgb_mean": [round(float(bgr_mean[2]), 2),
+                         round(float(bgr_mean[1]), 2),
+                         round(float(bgr_mean[0]), 2)],
+            "hsv_mean": [round(float(v), 2) for v in hsv_mean],
+        },
+        log=[f"[Color] BGR≈({bgr_mean[0]:.0f},{bgr_mean[1]:.0f},{bgr_mean[2]:.0f}) "
+             f"HSV≈({hsv_mean[0]:.0f},{hsv_mean[1]:.0f},{hsv_mean[2]:.0f})"],
+    )
