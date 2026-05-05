@@ -23,6 +23,15 @@ from .halcon_engine import (
     threshold_blob,
     to_gray,
 )
+from .pipeline import (
+    TOOLS,
+    Param,
+    Pipeline,
+    PipelineContext,
+    PipelineNode,
+    ToolSpec,
+    make_thumbnail,
+)
 
 __all__ = [
     "HALCON_AVAILABLE",
@@ -49,4 +58,11 @@ __all__ = [
     "shape_match",
     "threshold_blob",
     "to_gray",
+    "TOOLS",
+    "Param",
+    "Pipeline",
+    "PipelineContext",
+    "PipelineNode",
+    "ToolSpec",
+    "make_thumbnail",
 ]

@@ -27,6 +27,23 @@ chạy được kể cả khi chưa có HALCON binding / licence.
 - Canvas chiếm ~78% chiều dọc, results panel ~22%; có thể **collapse Results** bằng nút `▾ Hide`.
 - Status badges trên header viewer: nguồn ảnh (`idle/file/connect/live/snapshot`) và mask coverage.
 
+### Pipeline (VisionPro-style ToolBlock)
+Right-side dock **Pipeline** cho phép xây chuỗi tool kéo-thả:
+
+- Chọn tool từ combobox → bấm **+ Add** → node được thêm vào cuối danh sách
+- **Drag-drop** trong list để sắp xếp lại
+- Mỗi node có:
+  - **Thumbnail** (60×60) tự render sau mỗi lần Run
+  - Title (ví dụ `1. 🪄 Filter`) + subtitle hiển thị metric chính (count / mean / fg_pixels…)
+  - **☑ On** — bật/tắt node (skip khi run)
+  - **✏ Edit** — mở ParamDialog dựng từ schema để chỉnh tham số
+  - **✕ Remove**
+- **▶ Run All** chạy tuần tự; tool có `chain=True` (Filter, Morphology) sẽ chuyển ảnh output làm input cho node sau, các tool khác đều nhận ảnh hiện tại
+- **Click một node** → canvas hiển thị ảnh output của node đó + bảng metrics + log
+- Tools cần input ngoài (Pattern Match cần template, Caliper cần segment, Image Diff cần reference) tự lấy từ sidebar; nếu thiếu, node hiện ⚠ kèm message lỗi
+- Mask hiện tại được áp vào ảnh đầu vào của pipeline (giống `reduce_domain`)
+- Toggle dock qua **View → Pipeline** hoặc nút `▶▶ Run Pipeline` trên toolbar
+
 Click vào header section để mở/gập. Menu **View → Expand/Collapse all sections**
 hoặc nút trên toolbar để gập tất cả cùng lúc.
 

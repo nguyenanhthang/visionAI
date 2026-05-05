@@ -9,6 +9,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QDockWidget,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -25,7 +26,10 @@ from PySide6.QtWidgets import (
 from app.operators import (
     HALCON_AVAILABLE,
     HALCON_VERSION,
+    TOOLS,
     Grabber,
+    Pipeline,
+    PipelineContext,
     adaptive_threshold,
     apply_filter,
     apply_mask,
@@ -43,7 +47,13 @@ from app.operators import (
     shape_match,
     threshold_blob,
 )
-from app.widgets import ImageCanvas, OperatorSidebar, ResultsView
+from app.widgets import (
+    ImageCanvas,
+    OperatorSidebar,
+    ParamDialog,
+    PipelinePanel,
+    ResultsView,
+)
 
 SUPPORTED_EXTS = "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
 
@@ -69,7 +79,13 @@ class MainWindow(QMainWindow):
         # ROI mode state — phân biệt mục đích lấy ROI: "template" / "color" / "mask"
         self._roi_purpose: Optional[str] = None
 
+        # Pipeline (VisionPro-style chain of tools)
+        self._pipeline = Pipeline()
+        self._segment: Optional[tuple[int, int, int, int]] = None
+        self._selected_node_idx: Optional[int] = None
+
         self._build_ui()
+        self._build_pipeline_dock()
         self._build_menu()
         self._build_toolbar()
         self._build_statusbar()
@@ -150,6 +166,16 @@ class MainWindow(QMainWindow):
         root.addWidget(h_split)
         self.setCentralWidget(central)
 
+    def _build_pipeline_dock(self):
+        self.pipeline_panel = PipelinePanel()
+        dock = QDockWidget("Pipeline", self)
+        dock.setObjectName("PipelineDock")
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setWidget(self.pipeline_panel)
+        dock.setMinimumWidth(320)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self._pipeline_dock = dock
+
     def _toggle_results_panel(self):
         sizes = self._v_split.sizes()
         if sizes[1] > 8:
@@ -199,6 +225,8 @@ class MainWindow(QMainWindow):
         act_collapse = QAction("Collapse all sections", self)
         act_collapse.triggered.connect(self.sidebar.collapse_all)
         m_view.addAction(act_collapse)
+        m_view.addSeparator()
+        m_view.addAction(self._pipeline_dock.toggleViewAction())
 
         m_help = bar.addMenu("&Help")
         act_about = QAction("About", self)
@@ -218,6 +246,8 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(QAction("◧  Expand sidebar", self, triggered=self.sidebar.expand_all))
         tb.addAction(QAction("◨  Collapse sidebar", self, triggered=self.sidebar.collapse_all))
+        tb.addSeparator()
+        tb.addAction(QAction("▶▶  Run Pipeline", self, triggered=self._on_pipeline_run))
         tb.addSeparator()
         tb.addAction(QAction("💾  Save Result", self, triggered=self._on_save_result))
 
@@ -278,8 +308,20 @@ class MainWindow(QMainWindow):
 
         # Canvas
         self.canvas.measure_segment_drawn.connect(self.sidebar.set_measure_segment)
+        self.canvas.measure_segment_drawn.connect(self._on_segment_drawn)
         self.canvas.roi_drawn.connect(self._on_roi_drawn)
         self.canvas.mouse_moved.connect(self._on_cursor_moved)
+
+        # Pipeline panel
+        p = self.pipeline_panel
+        p.add_node_requested.connect(self._on_pipeline_add)
+        p.edit_node_requested.connect(self._on_pipeline_edit)
+        p.delete_node_requested.connect(self._on_pipeline_delete)
+        p.enable_node_changed.connect(self._on_pipeline_enable)
+        p.select_node.connect(self._on_pipeline_select)
+        p.run_requested.connect(self._on_pipeline_run)
+        p.clear_requested.connect(self._on_pipeline_clear)
+        p.reorder_changed.connect(self._on_pipeline_reorder)
 
     # ==================================================================
     # File / template
@@ -663,6 +705,129 @@ class MainWindow(QMainWindow):
         if not silent:
             self.results_view.append_log(f"Acquired ({source}): {img.shape[1]}×{img.shape[0]}")
 
+    # ==================================================================
+    # Pipeline (VisionPro-style ToolBlock)
+    # ==================================================================
+    def _on_segment_drawn(self, r1: int, c1: int, r2: int, c2: int):
+        self._segment = (r1, c1, r2, c2)
+
+    def _build_ctx(self) -> PipelineContext:
+        return PipelineContext(
+            template=self._template_image,
+            reference=self._reference_image,
+            mask=self._mask,
+            segment=self._segment,
+            color_roi=self.sidebar.color_content.roi or None,
+        )
+
+    def _on_pipeline_add(self, tool_id: str):
+        self._pipeline.add(tool_id)
+        idx = len(self._pipeline.nodes) - 1
+        self.pipeline_panel.rebuild(self._pipeline.nodes, select_idx=idx)
+        self.pipeline_panel.set_status(
+            f"Added '{TOOLS[tool_id].display}' (#{idx+1}). Click Run All để chạy."
+        )
+
+    def _on_pipeline_edit(self, idx: int):
+        if not (0 <= idx < len(self._pipeline.nodes)):
+            return
+        node = self._pipeline.nodes[idx]
+        spec = TOOLS[node.tool_id]
+        dlg = ParamDialog(spec, node.params, self)
+        if dlg.exec() == ParamDialog.Accepted:
+            node.params = dlg.values()
+            # invalidate cached output
+            node.last_image = None
+            node.last_metrics = None
+            node.last_thumbnail = None
+            node.error = None
+            self.pipeline_panel.refresh_node(idx, node)
+            self.pipeline_panel.set_status(f"Updated #{idx+1} '{spec.display}'")
+
+    def _on_pipeline_delete(self, idx: int):
+        if not (0 <= idx < len(self._pipeline.nodes)):
+            return
+        spec = TOOLS[self._pipeline.nodes[idx].tool_id]
+        self._pipeline.remove(idx)
+        self.pipeline_panel.rebuild(self._pipeline.nodes)
+        self.pipeline_panel.set_status(f"Removed '{spec.display}'")
+
+    def _on_pipeline_enable(self, idx: int, on: bool):
+        if 0 <= idx < len(self._pipeline.nodes):
+            self._pipeline.nodes[idx].enabled = on
+
+    def _on_pipeline_reorder(self, src: int, dst: int):
+        self._pipeline.move(src, dst)
+        # rebuild để cập nhật số thứ tự
+        self.pipeline_panel.rebuild(self._pipeline.nodes, select_idx=dst)
+        self.pipeline_panel.set_status(f"Moved #{src+1} → #{dst+1}")
+
+    def _on_pipeline_clear(self):
+        if not self._pipeline.nodes:
+            return
+        if QMessageBox.question(
+            self, "Clear Pipeline", "Xoá toàn bộ pipeline?"
+        ) != QMessageBox.Yes:
+            return
+        self._pipeline.clear()
+        self._selected_node_idx = None
+        self.pipeline_panel.rebuild(self._pipeline.nodes)
+        self.pipeline_panel.set_status("Pipeline cleared.")
+
+    def _on_pipeline_select(self, idx: int):
+        if not (0 <= idx < len(self._pipeline.nodes)):
+            return
+        self._selected_node_idx = idx
+        node = self._pipeline.nodes[idx]
+        spec = TOOLS[node.tool_id]
+        if node.last_image is not None:
+            self.canvas.set_image(node.last_image)
+            self.results_view.set_metrics(node.last_metrics or {})
+            self.results_view.append_log(
+                f"--- Preview #{idx+1} {spec.icon} {spec.display} ---"
+            )
+            if node.last_log:
+                self.results_view.append_log(node.last_log)
+            self.viewer_badge.setText(f"#{idx+1} {spec.display}")
+        elif node.error:
+            self.results_view.append_log(f"⚠ Node #{idx+1} error: {node.error}")
+        else:
+            self.results_view.append_log(
+                f"Node #{idx+1} chưa chạy. Bấm 'Run All' trước."
+            )
+
+    def _on_pipeline_run(self):
+        if not self._pipeline.nodes:
+            QMessageBox.information(self, "Pipeline", "Chưa có node nào.")
+            return
+        if not self._ensure_image():
+            return
+        ctx = self._build_ctx()
+        self._pipeline.run(self._original_image, ctx)
+        # Refresh tất cả thumbnails
+        self.pipeline_panel.rebuild(self._pipeline.nodes,
+                                    select_idx=self._selected_node_idx)
+        # Tóm tắt
+        ok = sum(1 for n in self._pipeline.nodes if n.error is None and n.enabled)
+        err = sum(1 for n in self._pipeline.nodes if n.error)
+        skipped = sum(1 for n in self._pipeline.nodes if not n.enabled)
+        self.pipeline_panel.set_status(
+            f"Run done — {ok} ok, {err} error, {skipped} skipped"
+        )
+        self.results_view.append_log(
+            f"=== Pipeline run: {ok} ok, {err} error, {skipped} skipped ==="
+        )
+        # Tự chọn node cuối cùng có ảnh để xem preview
+        last_with_image = next(
+            (i for i in range(len(self._pipeline.nodes) - 1, -1, -1)
+             if self._pipeline.nodes[i].last_image is not None),
+            None,
+        )
+        if last_with_image is not None:
+            self.pipeline_panel.select(last_with_image)
+            self._on_pipeline_select(last_with_image)
+
+    # ==================================================================
     def closeEvent(self, event):  # type: ignore[override]
         self._stop_live()
         self._grabber.close()
