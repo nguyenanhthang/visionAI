@@ -4,17 +4,39 @@
 MVTec HALCON cho machine vision. Có fallback OpenCV/numpy cho mọi tool nên app
 chạy được kể cả khi chưa có HALCON binding / licence.
 
-## Sidebar (collapsible — gập/mở từng nhóm)
+## Layout
 
-| Nhóm           | Tools                                                              |
-| -------------- | ------------------------------------------------------------------ |
-| 📷 Acquisition | Connect / Live (FPS) / Snapshot / Disconnect                       |
-| 🪄 Pre-process | Filter (Gauss/Median/Mean/Sharpen) + Morphology (dilate/erode/…)   |
-| 🩹 Mask / ROI  | Sinh từ gray range / HSV / ROI vẽ tay; invert/clear/save/load      |
-| 🎯 Locate      | Blob, Adaptive Threshold, Edges (sub-pixel), Contours, Pattern Match (+ Pick ROI) |
-| 📐 Measure     | Caliper (Measure 1D), Histogram                                    |
-| 🔢 Identify    | ID Read (QR / Barcode 1D)                                          |
-| 🎨 Inspect     | Color stats trong ROI; Image Diff (golden template)                |
+Pipeline-first — **không còn sidebar trái**. Mọi cấu hình tool nằm trong dock
+phải gồm 2 tab:
+
+- **▶ Pipeline** — danh sách node kéo-thả, mỗi node có thumbnail + ✏ edit + ☑ enable + ✕ remove
+- **🧰 Resources** — collapsible sections cho:
+  - 📷 **Acquisition** — Connect / Live (FPS) / Snapshot
+  - 🩹 **Mask** — sinh từ gray range / HSV / ROI vẽ tay; invert / clear / save / load / show
+  - 🧩 **Template** — load file / Pick ROI / save / clear + preview
+  - 📋 **Reference** — load reference (cho Image Diff)
+  - 🖱 **Canvas inputs** — vẽ Caliper segment, chọn Color ROI
+
+## Tools (registered trong pipeline)
+
+| Tool                | Chain | HALCON op                                                       |
+| ------------------- | ----- | --------------------------------------------------------------- |
+| 🪄 Filter           | ✓     | gauss_filter / median_image / mean_image / emphasize            |
+| 🧱 Morphology       | ✓     | dilation_circle / erosion_circle / opening_circle / closing_circle |
+| ↻  Rotate           | ✓     | rotate_image (góc tuỳ chọn, scale, interpolation, expand canvas)|
+| ⬛ Blob             |       | threshold + connection + select_shape                           |
+| 🌓 Adaptive Thresh. |       | dyn_threshold (fallback cv2.adaptiveThreshold)                  |
+| ✶  Edges            |       | edges_sub_pix                                                   |
+| 〜 Contours         |       | gen_contours_skeleton_xld + select_contours_xld                 |
+| 🎯 Pattern Match    |       | create_shape_model + find_shape_model                           |
+| 📐 Caliper          |       | gen_measure_rectangle2 + measure_pairs                          |
+| 📊 Histogram        |       | gray_histo                                                      |
+| 🔢 ID Read          |       | find_data_code_2d                                               |
+| 🎨 Color stats      |       | intensity / mean_n trong ROI                                    |
+| 📋 Image Diff       |       | sub_image + threshold + connection (golden compare)             |
+
+`Chain=✓` nghĩa là output ảnh được chuyển sang node sau (Filter, Morphology,
+Rotate dùng cho preprocessing).
 
 ### Mask system
 - Sinh mask từ **gray range**, **HSV range** hoặc **ROI vẽ tay** trên ảnh.

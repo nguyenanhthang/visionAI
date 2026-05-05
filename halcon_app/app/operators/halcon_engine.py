@@ -877,3 +877,62 @@ def apply_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if img.ndim == 2:
         return cv2.bitwise_and(img, img, mask=mask)
     return cv2.bitwise_and(img, img, mask=mask)
+
+
+# ---------------------------------------------------------------------------
+# 15. Rotate / Affine
+# ---------------------------------------------------------------------------
+
+def rotate_image(
+    img: np.ndarray,
+    angle: float = 0.0,
+    scale: float = 1.0,
+    interpolation: str = "linear",
+    expand: bool = True,
+    border: str = "constant",
+) -> OperatorResult:
+    """Xoay ảnh quanh tâm.
+
+    HALCON: `rotate_image(Image, ImageRotate, Phi, Interpolation)`.
+    """
+    h, w = img.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    M = cv2.getRotationMatrix2D((cx, cy), angle, scale)
+    inter = {
+        "nearest": cv2.INTER_NEAREST,
+        "linear": cv2.INTER_LINEAR,
+        "cubic": cv2.INTER_CUBIC,
+        "lanczos": cv2.INTER_LANCZOS4,
+    }.get(interpolation, cv2.INTER_LINEAR)
+    border_mode = {
+        "constant": cv2.BORDER_CONSTANT,
+        "reflect": cv2.BORDER_REFLECT,
+        "replicate": cv2.BORDER_REPLICATE,
+    }.get(border, cv2.BORDER_CONSTANT)
+
+    if expand:
+        cos = abs(M[0, 0]); sin = abs(M[0, 1])
+        new_w = int(h * sin + w * cos)
+        new_h = int(h * cos + w * sin)
+        M[0, 2] += new_w / 2.0 - cx
+        M[1, 2] += new_h / 2.0 - cy
+        out_w, out_h = new_w, new_h
+    else:
+        out_w, out_h = w, h
+
+    rotated = cv2.warpAffine(
+        img, M, (out_w, out_h),
+        flags=inter, borderMode=border_mode, borderValue=0,
+    )
+    return OperatorResult(
+        image=rotated,
+        metrics={
+            "angle": float(angle),
+            "scale": float(scale),
+            "interpolation": interpolation,
+            "expand": bool(expand),
+            "size_before": [w, h],
+            "size_after": [out_w, out_h],
+        },
+        log=[f"[Rotate] angle={angle}° scale={scale} {w}×{h} -> {out_w}×{out_h}"],
+    )

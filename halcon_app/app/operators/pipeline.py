@@ -29,6 +29,7 @@ from .halcon_engine import (
     image_diff,
     measure_pairs,
     morphology,
+    rotate_image,
     shape_match,
     threshold_blob,
 )
@@ -92,6 +93,7 @@ class PipelineNode:
 
 def _r_filter(img, p, ctx): return apply_filter(img, **p)
 def _r_morph(img, p, ctx): return morphology(img, **p)
+def _r_rotate(img, p, ctx): return rotate_image(img, **p)
 def _r_blob(img, p, ctx): return threshold_blob(img, **p)
 def _r_adaptive(img, p, ctx): return adaptive_threshold(img, **p)
 def _r_edges(img, p, ctx): return edges_sub_pix(img, **p)
@@ -154,6 +156,19 @@ TOOLS: dict[str, ToolSpec] = {
             Param("iterations", "Iterations", "int", 1, rng=(1, 20)),
         ],
         runner=_r_morph,
+    ),
+    "rotate": ToolSpec(
+        id="rotate", display="Rotate", icon="↻", chain=True, needs=[],
+        params=[
+            Param("angle", "Angle (°)", "float", 0.0, rng=(-360.0, 360.0), step=0.5),
+            Param("scale", "Scale", "float", 1.0, rng=(0.1, 10.0), step=0.05),
+            Param("interpolation", "Interpolation", "choice", "linear",
+                  choices=["nearest", "linear", "cubic", "lanczos"]),
+            Param("expand", "Expand canvas", "bool", True),
+            Param("border", "Border", "choice", "constant",
+                  choices=["constant", "reflect", "replicate"]),
+        ],
+        runner=_r_rotate,
     ),
     "blob": ToolSpec(
         id="blob", display="Blob", icon="⬛", chain=False, needs=[],
