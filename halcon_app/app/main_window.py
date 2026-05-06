@@ -277,6 +277,8 @@ class MainWindow(QMainWindow):
         p.run_requested.connect(self._on_pipeline_run)
         p.clear_requested.connect(self._on_pipeline_clear)
         p.reorder_changed.connect(self._on_pipeline_reorder)
+        p.params_changed.connect(self._on_pipeline_params_changed)
+        p.live_apply_requested.connect(self._on_pipeline_run)
 
     # ==================================================================
     # File / image
@@ -547,29 +549,57 @@ class MainWindow(QMainWindow):
         else:
             self.results_view.append_log(f"Node #{idx+1} chưa chạy. Bấm '▶ Run All' trước.")
 
-    def _on_pipeline_run(self):
+    def _on_pipeline_run(self, focus_idx: Optional[int] = None):
         if not self._pipeline.nodes:
             QMessageBox.information(self, "Pipeline", "Chưa có node nào."); return
         if self._original_image is None:
             QMessageBox.information(self, "Pipeline", "Hãy mở ảnh / acquire frame trước."); return
         ctx = self._build_ctx()
         self._pipeline.run(self._original_image, ctx)
-        self.pipeline_panel.rebuild(self._pipeline.nodes, select_idx=self._selected_node_idx)
+        # Refresh tất cả thumbnail mà KHÔNG rebuild form (giữ widget user đang chỉnh)
+        for i, node in enumerate(self._pipeline.nodes):
+            self.pipeline_panel.refresh_node(i, node)
         ok = sum(1 for n in self._pipeline.nodes if n.error is None and n.enabled)
         err = sum(1 for n in self._pipeline.nodes if n.error)
         skipped = sum(1 for n in self._pipeline.nodes if not n.enabled)
-        self.pipeline_panel.set_status(f"Run done — {ok} ok, {err} error, {skipped} skipped")
-        self.results_view.append_log(
-            f"=== Pipeline run: {ok} ok, {err} error, {skipped} skipped ==="
-        )
-        last = next(
-            (i for i in range(len(self._pipeline.nodes) - 1, -1, -1)
-             if self._pipeline.nodes[i].last_image is not None),
-            None,
-        )
-        if last is not None:
-            self.pipeline_panel.select(last)
-            self._on_pipeline_select(last)
+        self.pipeline_panel.set_status(f"Run — {ok} ok, {err} error, {skipped} skipped")
+
+        # Chọn node để preview: ưu tiên focus_idx (node vừa edit), fallback last
+        if focus_idx is not None and 0 <= focus_idx < len(self._pipeline.nodes):
+            target = focus_idx
+        elif self._selected_node_idx is not None:
+            target = self._selected_node_idx
+        else:
+            target = next(
+                (i for i in range(len(self._pipeline.nodes) - 1, -1, -1)
+                 if self._pipeline.nodes[i].last_image is not None),
+                None,
+            )
+        if target is not None:
+            # Sync list selection → trigger props panel update + canvas preview
+            self.pipeline_panel.select(target)
+            self._on_pipeline_select(target)
+
+    def _on_pipeline_params_changed(self, idx: int, new_params: dict):
+        """Live edit: cập nhật params, chạy pipeline, preview node vừa chỉnh."""
+        if not (0 <= idx < len(self._pipeline.nodes)):
+            return
+        node = self._pipeline.nodes[idx]
+        node.params = new_params
+        # Invalidate cached output
+        node.last_image = None; node.last_metrics = None
+        node.last_thumbnail = None; node.error = None
+        if not self.pipeline_panel.props_panel.live:
+            # Live tắt → chỉ cập nhật subtitle/badge, chờ Apply
+            self.pipeline_panel.refresh_node(idx, node)
+            self.pipeline_panel.set_status(
+                f"Edited #{idx+1} (live preview off — bấm Apply để chạy)"
+            )
+            return
+        # Live on → chạy pipeline, preview tại node vừa edit
+        if self._original_image is None:
+            return
+        self._on_pipeline_run(focus_idx=idx)
 
     # ==================================================================
     # Acquisition

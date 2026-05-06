@@ -9,7 +9,7 @@ chạy được kể cả khi chưa có HALCON binding / licence.
 Pipeline-first — **không còn sidebar trái**. Mọi cấu hình tool nằm trong dock
 phải gồm 2 tab:
 
-- **▶ Pipeline** — danh sách node kéo-thả, mỗi node có thumbnail + ✏ edit + ☑ enable + ✕ remove
+- **▶ Pipeline** — danh sách node kéo-thả, mỗi node có thumbnail + ☑ enable + ✕ remove. Bên dưới list là **Properties panel**: click 1 node → form thuộc tính hiện ra, chỉnh value → **live preview** ngay (debounce 180 ms). Toggle "Live preview" để tắt và bấm "Apply" thủ công.
 - **🧰 Resources** — collapsible sections cho:
   - 📷 **Acquisition** — Connect / Live (FPS) / Snapshot
   - 🩹 **Mask** — sinh từ gray range / HSV / ROI vẽ tay; invert / clear / save / load / show
