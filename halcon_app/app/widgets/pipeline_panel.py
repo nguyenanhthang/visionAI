@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,9 +25,11 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QSpinBox,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -38,7 +40,6 @@ from .image_canvas import numpy_to_qpixmap
 
 
 class PipelineItem(QWidget):
-    edit_requested = Signal()
     delete_requested = Signal()
     enable_toggled = Signal(bool)
 
@@ -48,59 +49,59 @@ class PipelineItem(QWidget):
         self.idx = idx
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
 
-        # Drag handle hint
+        # Drag handle
         handle = QLabel("⋮⋮")
         handle.setStyleSheet("color:#454c66; font-size:14pt;")
         handle.setFixedWidth(14)
+        handle.setToolTip("Kéo để sắp xếp")
         layout.addWidget(handle)
 
-        # Thumbnail
+        # Thumbnail (lớn hơn)
         self.thumb = QLabel()
-        self.thumb.setFixedSize(60, 60)
+        self.thumb.setFixedSize(72, 72)
         self.thumb.setAlignment(Qt.AlignCenter)
         self.thumb.setStyleSheet(self._thumb_style_idle())
         layout.addWidget(self.thumb)
 
         # Title + subtitle
         text_lay = QVBoxLayout()
-        text_lay.setSpacing(2)
+        text_lay.setSpacing(3)
         spec = TOOLS.get(node.tool_id)
         icon = spec.icon if spec else "•"
-        self.title = QLabel(f"<b>{idx+1}.</b> {icon}  {node.label}")
+        title_text = f"<b>{idx+1}.</b> {icon}  {node.label}"
+        if spec and spec.chain:
+            title_text += "  <span style='color:#36c5d6; font-size:8pt;'>↪ chain</span>"
+        self.title = QLabel(title_text)
         self.title.setStyleSheet("font-size:10pt;")
         self.subtitle = QLabel(self._summary())
         self.subtitle.setStyleSheet("color:#9aa3bd; font-size:9pt;")
         self.subtitle.setWordWrap(True)
         text_lay.addWidget(self.title)
         text_lay.addWidget(self.subtitle)
+        text_lay.addStretch()
         layout.addLayout(text_lay, 1)
 
-        # Controls
+        # Controls — vertical: enable + remove
         ctrl_lay = QVBoxLayout()
-        ctrl_lay.setSpacing(4)
+        ctrl_lay.setSpacing(6)
+        ctrl_lay.setContentsMargins(0, 0, 0, 0)
+
         self.enable_chk = QCheckBox("On")
         self.enable_chk.setChecked(node.enabled)
+        self.enable_chk.setToolTip("Bật/tắt node")
         self.enable_chk.toggled.connect(self.enable_toggled.emit)
-        ctrl_lay.addWidget(self.enable_chk)
+        ctrl_lay.addWidget(self.enable_chk, 0, Qt.AlignRight)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(2)
-        self.edit_btn = QPushButton("✏")
-        self.edit_btn.setFixedSize(26, 26)
-        self.edit_btn.setProperty("secondary", True)
-        self.edit_btn.setToolTip("Edit params")
-        self.edit_btn.clicked.connect(self.edit_requested.emit)
-        self.del_btn = QPushButton("✕")
-        self.del_btn.setFixedSize(26, 26)
+        self.del_btn = QPushButton("✕  Remove")
         self.del_btn.setProperty("secondary", True)
-        self.del_btn.setToolTip("Remove")
+        self.del_btn.setToolTip("Xoá node")
         self.del_btn.clicked.connect(self.delete_requested.emit)
-        btn_row.addWidget(self.edit_btn)
-        btn_row.addWidget(self.del_btn)
-        ctrl_lay.addLayout(btn_row)
+        ctrl_lay.addWidget(self.del_btn)
+
+        ctrl_lay.addStretch()
         layout.addLayout(ctrl_lay)
 
         self.refresh()
@@ -136,7 +137,7 @@ class PipelineItem(QWidget):
         if self.node.last_thumbnail is not None:
             self.thumb.setPixmap(
                 numpy_to_qpixmap(self.node.last_thumbnail).scaled(
-                    60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
             )
             self.thumb.setStyleSheet(self._thumb_style_idle())
@@ -159,6 +160,7 @@ class NodePropertiesPanel(QWidget):
 
     params_changed = Signal(int, dict)        # idx, new_params dict (debounced)
     live_run_requested = Signal()             # bấm nút Apply / dừng pipeline
+    pick_canvas_requested = Signal(str)       # purpose: "roi"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -178,17 +180,34 @@ class NodePropertiesPanel(QWidget):
         self.header_label.setProperty("subheading", True)
         self.live_chk = QCheckBox("Live preview")
         self.live_chk.setChecked(True)
+        self.live_chk.setToolTip("Tự chạy pipeline khi đổi tham số")
         self.live_chk.toggled.connect(self._on_live_toggled)
         header_row.addWidget(self.header_label)
         header_row.addStretch()
         header_row.addWidget(self.live_chk)
         outer.addLayout(header_row)
 
-        # Hint when nothing is selected
-        self.hint = QLabel("Chọn 1 node trong pipeline ở trên để xem & chỉnh thuộc tính.")
-        self.hint.setProperty("muted", True)
-        self.hint.setWordWrap(True)
-        outer.addWidget(self.hint)
+        # Empty-state hint
+        self.empty_state = QFrame()
+        self.empty_state.setProperty("card", True)
+        es_lay = QVBoxLayout(self.empty_state)
+        es_lay.setContentsMargins(14, 18, 14, 18)
+        es_lay.setSpacing(6)
+        big_icon = QLabel("⚙")
+        big_icon.setStyleSheet("color:#36c5d6; font-size:28pt;")
+        big_icon.setAlignment(Qt.AlignCenter)
+        es_lay.addWidget(big_icon)
+        es_title = QLabel("Chưa chọn node")
+        es_title.setProperty("subheading", True)
+        es_title.setAlignment(Qt.AlignCenter)
+        es_lay.addWidget(es_title)
+        es_hint = QLabel("Click 1 node ở danh sách phía trên để xem và chỉnh thuộc tính.\n"
+                         "Hoặc bấm <b>+ Add</b> bên dưới để thêm tool mới.")
+        es_hint.setProperty("muted", True)
+        es_hint.setAlignment(Qt.AlignCenter)
+        es_hint.setWordWrap(True)
+        es_lay.addWidget(es_hint)
+        outer.addWidget(self.empty_state)
 
         # Form holder (rebuild khi node thay đổi)
         self.form_holder = QFrame()
@@ -199,11 +218,29 @@ class NodePropertiesPanel(QWidget):
         self.form_holder.setVisible(False)
         outer.addWidget(self.form_holder)
 
-        # Apply button (khi tắt live)
+        # Action row (Reset, Pick from canvas, Apply)
+        self.action_row = QHBoxLayout()
+        self.reset_btn = QPushButton("↺  Reset defaults")
+        self.reset_btn.setProperty("secondary", True)
+        self.reset_btn.setToolTip("Đặt lại về giá trị mặc định của tool")
+        self.reset_btn.clicked.connect(self._on_reset)
+        self.reset_btn.setVisible(False)
+
+        self.pick_btn = QPushButton("📌  Pick from canvas")
+        self.pick_btn.setProperty("secondary", True)
+        self.pick_btn.setToolTip("Vẽ ROI trên ảnh để điền x/y/w/h")
+        self.pick_btn.clicked.connect(lambda: self.pick_canvas_requested.emit("roi"))
+        self.pick_btn.setVisible(False)
+
         self.apply_btn = QPushButton("▶  Apply (Run pipeline)")
         self.apply_btn.clicked.connect(self.live_run_requested.emit)
         self.apply_btn.setVisible(False)
-        outer.addWidget(self.apply_btn)
+
+        self.action_row.addWidget(self.reset_btn)
+        self.action_row.addWidget(self.pick_btn)
+        self.action_row.addStretch()
+        self.action_row.addWidget(self.apply_btn)
+        outer.addLayout(self.action_row)
 
         outer.addStretch()
 
@@ -226,7 +263,7 @@ class NodePropertiesPanel(QWidget):
             return
         self._spec = spec
         self.header_label.setText(f"Properties — #{idx+1} {spec.icon} {spec.display}")
-        self.hint.setVisible(False)
+        self.empty_state.setVisible(False)
 
         # Clear current form
         self._suppress = True
@@ -235,7 +272,7 @@ class NodePropertiesPanel(QWidget):
             self.form_layout.removeRow(0)
 
         if not spec.params:
-            empty = QLabel("(không có tham số)")
+            empty = QLabel("(tool này không có tham số)")
             empty.setProperty("muted", True)
             self.form_layout.addRow(empty)
         else:
@@ -245,6 +282,10 @@ class NodePropertiesPanel(QWidget):
                 self._widgets[p.name] = (p, w)
 
         self.form_holder.setVisible(True)
+        self.reset_btn.setVisible(bool(spec.params))
+        # Pick from canvas chỉ hiện cho tool có x/y/w/h params (vd ROI)
+        has_xywh = all(k in [p.name for p in spec.params] for k in ("x", "y", "w", "h"))
+        self.pick_btn.setVisible(has_xywh)
         self.apply_btn.setVisible(not self._live)
         self._suppress = False
 
@@ -255,9 +296,39 @@ class NodePropertiesPanel(QWidget):
         while self.form_layout.rowCount():
             self.form_layout.removeRow(0)
         self.form_holder.setVisible(False)
+        self.reset_btn.setVisible(False)
+        self.pick_btn.setVisible(False)
         self.apply_btn.setVisible(False)
         self.header_label.setText("Properties")
-        self.hint.setVisible(True)
+        self.empty_state.setVisible(True)
+
+    def _on_reset(self):
+        if self._idx < 0 or self._spec is None:
+            return
+        defaults = self._spec.default_params()
+        self._suppress = True
+        for name, (p, w) in self._widgets.items():
+            v = defaults.get(name, p.default)
+            if isinstance(w, QSpinBox): w.setValue(int(v))
+            elif isinstance(w, QDoubleSpinBox): w.setValue(float(v))
+            elif isinstance(w, QComboBox):
+                if v in (p.choices or []): w.setCurrentText(str(v))
+            elif isinstance(w, QCheckBox): w.setChecked(bool(v))
+            elif isinstance(w, QLineEdit): w.setText(str(v))
+        self._suppress = False
+        self._debounce.start()  # trigger emit_changes
+
+    def fill_xywh(self, x: int, y: int, w: int, h: int) -> None:
+        """Điền params x/y/w/h từ ROI vẽ trên canvas (cho ROI tool)."""
+        if not all(k in self._widgets for k in ("x", "y", "w", "h")):
+            return
+        self._suppress = True
+        for name, val in (("x", x), ("y", y), ("w", w), ("h", h)):
+            widget = self._widgets[name][1]
+            if isinstance(widget, QSpinBox):
+                widget.setValue(int(val))
+        self._suppress = False
+        self._debounce.start()
 
     def update_for_idx(self, idx: int, node: PipelineNode) -> None:
         """Sync nếu cùng idx (ví dụ sau reorder hoặc params bị invalidate)."""
@@ -347,6 +418,7 @@ class PipelinePanel(QWidget):
     reorder_changed = Signal(int, int)           # src, dst
     params_changed = Signal(int, dict)           # idx, new_params (live edit)
     live_apply_requested = Signal()              # khi tắt live mode
+    pick_canvas_requested = Signal(int, str)     # idx, purpose ("roi")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -390,6 +462,9 @@ class PipelinePanel(QWidget):
         self.props_panel = NodePropertiesPanel()
         self.props_panel.params_changed.connect(self.params_changed.emit)
         self.props_panel.live_run_requested.connect(self.live_apply_requested.emit)
+        self.props_panel.pick_canvas_requested.connect(
+            lambda purpose: self.pick_canvas_requested.emit(self.props_panel._idx, purpose)
+        )
         split.addWidget(self.props_panel)
 
         split.setStretchFactor(0, 3)
@@ -397,16 +472,33 @@ class PipelinePanel(QWidget):
         split.setSizes([320, 280])
         layout.addWidget(split, 1)
 
-        # Add row
-        add_row = QHBoxLayout()
-        self.add_combo = QComboBox()
+        # Add tool — menu phân nhóm theo category
+        self.add_btn = QToolButton()
+        self.add_btn.setText("+  Add Tool")
+        self.add_btn.setPopupMode(QToolButton.InstantPopup)
+        self.add_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.add_btn.setStyleSheet(
+            "QToolButton{background:#36c5d6; color:#0b1220; border:none;"
+            " border-radius:6px; padding:8px 16px; font-weight:700;}"
+            "QToolButton:hover{background:#5dd5e3;}"
+            "QToolButton::menu-indicator{image:none;}"
+        )
+        menu = QMenu(self.add_btn)
+        # group by category
+        cats: dict[str, list] = {}
         for tool_id, spec in TOOLS.items():
-            self.add_combo.addItem(f"{spec.icon}  {spec.display}", tool_id)
-        self.add_btn = QPushButton("+ Add")
-        self.add_btn.clicked.connect(self._on_add)
-        add_row.addWidget(self.add_combo, 1)
-        add_row.addWidget(self.add_btn)
-        layout.addLayout(add_row)
+            cats.setdefault(spec.category, []).append((tool_id, spec))
+        for cat in ("Pre-process", "Locate", "Measure", "Identify", "Inspect", "Other"):
+            items = cats.get(cat, [])
+            if not items:
+                continue
+            sub = menu.addMenu(cat)
+            for tool_id, spec in items:
+                act = QAction(f"{spec.icon}  {spec.display}", sub)
+                act.triggered.connect(lambda _=False, tid=tool_id: self.add_node_requested.emit(tid))
+                sub.addAction(act)
+        self.add_btn.setMenu(menu)
+        layout.addWidget(self.add_btn)
 
         # Action row
         actions = QHBoxLayout()
@@ -428,11 +520,6 @@ class PipelinePanel(QWidget):
         self._suppress_reorder = False
 
     # ------------------------------------------------------------------
-    def _on_add(self):
-        tool_id = self.add_combo.currentData()
-        if tool_id:
-            self.add_node_requested.emit(tool_id)
-
     def _on_select(self):
         items = self.list_widget.selectedItems()
         if items:
@@ -463,9 +550,6 @@ class PipelinePanel(QWidget):
         self.list_widget.clear()
         for i, node in enumerate(nodes):
             widget = PipelineItem(node, i)
-            widget.edit_requested.connect(
-                lambda i=i: self.edit_node_requested.emit(i)
-            )
             widget.delete_requested.connect(
                 lambda i=i: self.delete_node_requested.emit(i)
             )

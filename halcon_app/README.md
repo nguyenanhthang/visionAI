@@ -19,21 +19,23 @@ phải gồm 2 tab:
 
 ## Tools (registered trong pipeline)
 
-| Tool                | Chain | HALCON op                                                       |
-| ------------------- | ----- | --------------------------------------------------------------- |
-| 🪄 Filter           | ✓     | gauss_filter / median_image / mean_image / emphasize            |
-| 🧱 Morphology       | ✓     | dilation_circle / erosion_circle / opening_circle / closing_circle |
-| ↻  Rotate           | ✓     | rotate_image (góc tuỳ chọn, scale, interpolation, expand canvas)|
-| ⬛ Blob             |       | threshold + connection + select_shape                           |
-| 🌓 Adaptive Thresh. |       | dyn_threshold (fallback cv2.adaptiveThreshold)                  |
-| ✶  Edges            |       | edges_sub_pix                                                   |
-| 〜 Contours         |       | gen_contours_skeleton_xld + select_contours_xld                 |
-| 🎯 Pattern Match    |       | create_shape_model + find_shape_model                           |
-| 📐 Caliper          |       | gen_measure_rectangle2 + measure_pairs                          |
-| 📊 Histogram        |       | gray_histo                                                      |
-| 🔢 ID Read          |       | find_data_code_2d                                               |
-| 🎨 Color stats      |       | intensity / mean_n trong ROI                                    |
-| 📋 Image Diff       |       | sub_image + threshold + connection (golden compare)             |
+| Tool                | Chain | Category    | HALCON op                                                       |
+| ------------------- | ----- | ----------- | --------------------------------------------------------------- |
+| 🪄 Filter           | ✓     | Pre-process | gauss_filter / median_image / mean_image / emphasize            |
+| 🧱 Morphology       | ✓     | Pre-process | dilation / erosion / opening / closing / gradient / tophat / blackhat |
+| 🔄 Convert          | ✓     | Pre-process | gray / HSV / Lab / channel split / invert / equalize / CLAHE    |
+| ↻  Rotate           | ✓     | Pre-process | rotate_image (góc, scale, interp, expand canvas)                |
+| ▭  ROI              | ✓     | Pre-process | crop_rectangle1 (mode=crop) / reduce_domain (mode=mask)         |
+| ⬛ Blob             |       | Locate      | threshold + connection + select_shape                           |
+| 🌓 Adaptive Thresh. |       | Locate      | dyn_threshold (fallback cv2.adaptiveThreshold)                  |
+| ✶  Edges            |       | Locate      | edges_sub_pix                                                   |
+| 〜 Contours         |       | Locate      | gen_contours_skeleton_xld + select_contours_xld                 |
+| 🎯 Pattern Match    |       | Locate      | create_shape_model + find_shape_model                           |
+| 📐 Caliper          |       | Measure     | gen_measure_rectangle2 + measure_pairs                          |
+| 📊 Histogram        |       | Measure     | gray_histo                                                      |
+| 🔢 ID Read          |       | Identify    | find_data_code_2d                                               |
+| 🎨 Color stats      |       | Inspect     | intensity / mean_n trong ROI                                    |
+| 📋 Image Diff       |       | Inspect     | sub_image + threshold + connection (golden compare)             |
 
 `Chain=✓` nghĩa là output ảnh được chuyển sang node sau (Filter, Morphology,
 Rotate dùng cho preprocessing).

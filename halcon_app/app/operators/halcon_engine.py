@@ -936,3 +936,105 @@ def rotate_image(
         },
         log=[f"[Rotate] angle={angle}° scale={scale} {w}×{h} -> {out_w}×{out_h}"],
     )
+
+
+# ---------------------------------------------------------------------------
+# 16. ROI crop / mask
+# ---------------------------------------------------------------------------
+
+def roi_crop(
+    img: np.ndarray,
+    x: int = 0,
+    y: int = 0,
+    w: int = 0,
+    h: int = 0,
+    mode: str = "crop",
+) -> OperatorResult:
+    """Cắt vùng (crop) hoặc giữ vùng (mask).
+
+    HALCON tương đương: `crop_rectangle1` (mode=crop) hoặc
+    `reduce_domain` (mode=mask). Khi w hoặc h <= 0 → dùng full image.
+    """
+    H, W = img.shape[:2]
+    if w <= 0: w = W - x
+    if h <= 0: h = H - y
+    x = max(0, min(x, W - 1))
+    y = max(0, min(y, H - 1))
+    w = max(1, min(w, W - x))
+    h = max(1, min(h, H - y))
+
+    if mode == "crop":
+        out = img[y:y + h, x:x + w].copy()
+    else:  # mask: giữ kích thước, zero ngoài ROI
+        if img.ndim == 2:
+            out = np.zeros_like(img)
+            out[y:y + h, x:x + w] = img[y:y + h, x:x + w]
+        else:
+            out = np.zeros_like(img)
+            out[y:y + h, x:x + w] = img[y:y + h, x:x + w]
+    return OperatorResult(
+        image=out,
+        metrics={
+            "mode": mode, "x": x, "y": y, "w": w, "h": h,
+            "size_after": [out.shape[1], out.shape[0]],
+        },
+        log=[f"[ROI] mode={mode} ({x},{y}) {w}×{h} -> {out.shape[1]}×{out.shape[0]}"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 17. Image convert (color space, channel, equalize, invert, CLAHE)
+# ---------------------------------------------------------------------------
+
+def convert_image(
+    img: np.ndarray,
+    mode: str = "to_gray",
+    channel: int = 0,
+    clahe_clip: float = 2.0,
+    clahe_grid: int = 8,
+) -> OperatorResult:
+    """Chuyển đổi ảnh.
+
+    Modes:
+      to_gray, to_hsv, to_lab, hsv_to_bgr, lab_to_bgr,
+      invert, equalize, clahe,
+      channel  (lấy 1 kênh từ ảnh BGR theo `channel` 0/1/2 = B/G/R)
+      hsv_h, hsv_s, hsv_v
+    """
+    log: list[str] = []
+    src = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    if mode == "to_gray":
+        gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+        out = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    elif mode == "to_hsv":
+        out = cv2.cvtColor(src, cv2.COLOR_BGR2HSV)
+    elif mode == "hsv_to_bgr":
+        out = cv2.cvtColor(src, cv2.COLOR_HSV2BGR)
+    elif mode == "to_lab":
+        out = cv2.cvtColor(src, cv2.COLOR_BGR2Lab)
+    elif mode == "lab_to_bgr":
+        out = cv2.cvtColor(src, cv2.COLOR_Lab2BGR)
+    elif mode == "invert":
+        out = cv2.bitwise_not(src)
+    elif mode == "equalize":
+        gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+        eq = cv2.equalizeHist(gray)
+        out = cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
+    elif mode == "clahe":
+        gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=float(clahe_clip),
+                                tileGridSize=(int(clahe_grid), int(clahe_grid)))
+        eq = clahe.apply(gray)
+        out = cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
+    elif mode == "channel":
+        ch = max(0, min(2, int(channel)))
+        out = cv2.cvtColor(src[:, :, ch], cv2.COLOR_GRAY2BGR)
+    elif mode in ("hsv_h", "hsv_s", "hsv_v"):
+        hsv = cv2.cvtColor(src, cv2.COLOR_BGR2HSV)
+        idx = {"hsv_h": 0, "hsv_s": 1, "hsv_v": 2}[mode]
+        out = cv2.cvtColor(hsv[:, :, idx], cv2.COLOR_GRAY2BGR)
+    else:
+        out = src.copy()
+    log.append(f"[Convert] mode={mode}")
+    return OperatorResult(image=out, metrics={"mode": mode}, log=log)

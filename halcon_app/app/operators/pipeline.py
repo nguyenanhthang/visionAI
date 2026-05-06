@@ -23,12 +23,14 @@ from .halcon_engine import (
     apply_mask,
     color_stats,
     contour_analysis,
+    convert_image,
     decode_codes,
     edges_sub_pix,
     histogram,
     image_diff,
     measure_pairs,
     morphology,
+    roi_crop,
     rotate_image,
     shape_match,
     threshold_blob,
@@ -59,6 +61,7 @@ class ToolSpec:
     needs: list[str]                  # ["template", "reference", "segment", "color_roi"]
     params: list[Param]
     runner: Callable[..., OperatorResult]
+    category: str = "Other"          # "Pre-process" / "Locate" / "Measure" / "Identify" / "Inspect"
 
     def default_params(self) -> dict:
         return {p.name: p.default for p in self.params}
@@ -94,6 +97,8 @@ class PipelineNode:
 def _r_filter(img, p, ctx): return apply_filter(img, **p)
 def _r_morph(img, p, ctx): return morphology(img, **p)
 def _r_rotate(img, p, ctx): return rotate_image(img, **p)
+def _r_roi(img, p, ctx): return roi_crop(img, **p)
+def _r_convert(img, p, ctx): return convert_image(img, **p)
 def _r_blob(img, p, ctx): return threshold_blob(img, **p)
 def _r_adaptive(img, p, ctx): return adaptive_threshold(img, **p)
 def _r_edges(img, p, ctx): return edges_sub_pix(img, **p)
@@ -135,8 +140,10 @@ def _r_diff(img, p, ctx):
 # =============================================================================
 
 TOOLS: dict[str, ToolSpec] = {
+    # ---------- Pre-process ----------
     "filter": ToolSpec(
         id="filter", display="Filter", icon="🪄", chain=True, needs=[],
+        category="Pre-process",
         params=[
             Param("method", "Method", "choice", "gauss",
                   choices=["gauss", "median", "mean", "sharpen"]),
@@ -147,6 +154,7 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "morphology": ToolSpec(
         id="morphology", display="Morphology", icon="🧱", chain=True, needs=[],
+        category="Pre-process",
         params=[
             Param("op", "Operation", "choice", "dilate",
                   choices=["dilate", "erode", "open", "close", "gradient", "tophat", "blackhat"]),
@@ -157,8 +165,23 @@ TOOLS: dict[str, ToolSpec] = {
         ],
         runner=_r_morph,
     ),
+    "convert": ToolSpec(
+        id="convert", display="Convert", icon="🔄", chain=True, needs=[],
+        category="Pre-process",
+        params=[
+            Param("mode", "Mode", "choice", "to_gray",
+                  choices=["to_gray", "to_hsv", "hsv_to_bgr", "to_lab", "lab_to_bgr",
+                           "invert", "equalize", "clahe",
+                           "channel", "hsv_h", "hsv_s", "hsv_v"]),
+            Param("channel", "Channel (0=B,1=G,2=R)", "int", 0, rng=(0, 2)),
+            Param("clahe_clip", "CLAHE clip", "float", 2.0, rng=(0.5, 20.0), step=0.5),
+            Param("clahe_grid", "CLAHE grid", "int", 8, rng=(2, 32)),
+        ],
+        runner=_r_convert,
+    ),
     "rotate": ToolSpec(
         id="rotate", display="Rotate", icon="↻", chain=True, needs=[],
+        category="Pre-process",
         params=[
             Param("angle", "Angle (°)", "float", 0.0, rng=(-360.0, 360.0), step=0.5),
             Param("scale", "Scale", "float", 1.0, rng=(0.1, 10.0), step=0.05),
@@ -170,8 +193,22 @@ TOOLS: dict[str, ToolSpec] = {
         ],
         runner=_r_rotate,
     ),
+    "roi": ToolSpec(
+        id="roi", display="ROI", icon="▭", chain=True, needs=[],
+        category="Pre-process",
+        params=[
+            Param("x", "X", "int", 0, rng=(0, 100000)),
+            Param("y", "Y", "int", 0, rng=(0, 100000)),
+            Param("w", "Width", "int", 0, rng=(0, 100000)),
+            Param("h", "Height", "int", 0, rng=(0, 100000)),
+            Param("mode", "Mode", "choice", "crop", choices=["crop", "mask"]),
+        ],
+        runner=_r_roi,
+    ),
+    # ---------- Locate ----------
     "blob": ToolSpec(
         id="blob", display="Blob", icon="⬛", chain=False, needs=[],
+        category="Locate",
         params=[
             Param("min_gray", "Min gray", "int", 0, rng=(0, 255)),
             Param("max_gray", "Max gray", "int", 128, rng=(0, 255)),
@@ -182,6 +219,7 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "adaptive": ToolSpec(
         id="adaptive", display="Adaptive Threshold", icon="🌓", chain=False, needs=[],
+        category="Locate",
         params=[
             Param("method", "Method", "choice", "mean", choices=["mean", "gaussian"]),
             Param("block_size", "Block size", "int", 15, rng=(3, 99), step=2),
@@ -191,6 +229,7 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "edges": ToolSpec(
         id="edges", display="Edges", icon="✶", chain=False, needs=[],
+        category="Locate",
         params=[
             Param("method", "Method", "choice", "canny",
                   choices=["canny", "sobel", "deriche2", "lanser2"]),
@@ -202,6 +241,7 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "contours": ToolSpec(
         id="contours", display="Contours", icon="〜", chain=False, needs=[],
+        category="Locate",
         params=[
             Param("min_area", "Min area", "int", 50, rng=(1, 10_000_000)),
             Param("max_area", "Max area", "int", 10_000_000, rng=(1, 100_000_000)),
@@ -211,6 +251,7 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "match": ToolSpec(
         id="match", display="Pattern Match", icon="🎯", chain=False, needs=["template"],
+        category="Locate",
         params=[
             Param("min_score", "Min score", "float", 0.6, rng=(0.1, 1.0), step=0.05),
             Param("num_matches", "Num matches", "int", 5, rng=(1, 100)),
@@ -219,8 +260,10 @@ TOOLS: dict[str, ToolSpec] = {
         ],
         runner=_r_match,
     ),
+    # ---------- Measure ----------
     "caliper": ToolSpec(
         id="caliper", display="Caliper", icon="📐", chain=False, needs=["segment"],
+        category="Measure",
         params=[
             Param("sigma", "Sigma", "float", 1.0, rng=(0.1, 10.0), step=0.1),
             Param("threshold", "Edge threshold", "int", 30, rng=(1, 255)),
@@ -229,21 +272,27 @@ TOOLS: dict[str, ToolSpec] = {
     ),
     "histogram": ToolSpec(
         id="histogram", display="Histogram", icon="📊", chain=False, needs=[],
+        category="Measure",
         params=[],
         runner=_r_histogram,
     ),
+    # ---------- Identify ----------
     "idread": ToolSpec(
         id="idread", display="ID Read", icon="🔢", chain=False, needs=[],
+        category="Identify",
         params=[],
         runner=_r_idread,
     ),
+    # ---------- Inspect ----------
     "color": ToolSpec(
         id="color", display="Color stats", icon="🎨", chain=False, needs=[],
+        category="Inspect",
         params=[],
         runner=_r_color,
     ),
     "diff": ToolSpec(
         id="diff", display="Image Diff", icon="📋", chain=False, needs=["reference"],
+        category="Inspect",
         params=[
             Param("threshold", "Diff threshold", "int", 30, rng=(1, 255)),
             Param("blur", "Blur kernel", "int", 5, rng=(1, 25), step=2),

@@ -74,7 +74,8 @@ class MainWindow(QMainWindow):
         self._live_timer = QTimer(self)
         self._live_timer.timeout.connect(self._on_live_tick)
 
-        self._roi_purpose: Optional[str] = None  # template / mask / color
+        self._roi_purpose: Optional[str] = None  # template / mask / color / pipeline_roi
+        self._pipeline_roi_idx: Optional[int] = None  # node idx waiting for ROI
 
         # Pipeline
         self._pipeline = Pipeline()
@@ -279,6 +280,7 @@ class MainWindow(QMainWindow):
         p.reorder_changed.connect(self._on_pipeline_reorder)
         p.params_changed.connect(self._on_pipeline_params_changed)
         p.live_apply_requested.connect(self._on_pipeline_run)
+        p.pick_canvas_requested.connect(self._on_pipeline_pick_canvas)
 
     # ==================================================================
     # File / image
@@ -409,8 +411,24 @@ class MainWindow(QMainWindow):
         elif self._roi_purpose == "color":
             self._color_roi = (x, y, w, h)
             self.resources.set_color_roi(x, y, w, h)
+        elif self._roi_purpose == "pipeline_roi" and self._pipeline_roi_idx is not None:
+            # Điền x/y/w/h vào props panel (sẽ trigger live preview)
+            self.pipeline_panel.props_panel.fill_xywh(x, y, w, h)
+            self.results_view.append_log(
+                f"[ROI tool] picked ROI ({x},{y}) {w}×{h} cho node #{self._pipeline_roi_idx+1}"
+            )
+            self._pipeline_roi_idx = None
         self._roi_purpose = None
         self.canvas.set_roi_mode(False); self.canvas.clear_roi()
+
+    def _on_pipeline_pick_canvas(self, idx: int, purpose: str):
+        if self._original_image is None:
+            QMessageBox.information(self, "ROI", "Hãy mở ảnh trước.")
+            return
+        self._roi_purpose = "pipeline_roi"
+        self._pipeline_roi_idx = idx
+        self.canvas.set_roi_mode(True)
+        self.results_view.append_log("Pick mode: kéo chuột chọn ROI cho tool…")
 
     def _on_segment_drawn(self, r1: int, c1: int, r2: int, c2: int):
         self._segment = (r1, c1, r2, c2)
