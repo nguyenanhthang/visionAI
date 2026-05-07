@@ -39,6 +39,7 @@ class InteractiveImageLabel(QLabel):
     roi_changed    = Signal(int, int, int, int)
     pixel_picked   = Signal(int, int)
     template_drawn = Signal(int, int, int, int)
+    origin_changed = Signal(float, float)   # image coords (float)
 
     def __init__(self, mode="view", parent=None):
         super().__init__(parent)
@@ -52,6 +53,10 @@ class InteractiveImageLabel(QLabel):
         self._dragging   = False
         self._pick_pos: Optional[Tuple[int,int]] = None
         self._readonly_rect: Optional[Tuple[int,int,int,int]] = None
+        # Origin marker (PatMax pattern reference point) — image coords
+        self._origin_xy: Optional[Tuple[float, float]] = None
+        self._show_origin: bool = False
+        self._dragging_origin: bool = False
 
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(400, 300)
@@ -90,6 +95,29 @@ class InteractiveImageLabel(QLabel):
         """Hiển thị rect từ port (không cho phép kéo thay đổi)."""
         self._readonly_rect = (x, y, w, h)
         self._render()
+
+    def set_origin(self, x: Optional[float], y: Optional[float]):
+        """Đặt điểm tham chiếu (origin) trên ảnh. Truyền (None,None) để ẩn."""
+        if x is None or y is None:
+            self._origin_xy = None
+            self._show_origin = False
+        else:
+            self._origin_xy = (float(x), float(y))
+            self._show_origin = True
+        self._render()
+
+    def _origin_widget_pos(self) -> Optional[Tuple[int, int]]:
+        if not self._show_origin or self._origin_xy is None:
+            return None
+        ox, oy = self._origin_xy
+        return self._img_to_widget(ox, oy)
+
+    def _hit_origin_handle(self, wx: int, wy: int, radius: int = 12) -> bool:
+        pos = self._origin_widget_pos()
+        if pos is None:
+            return False
+        dx = wx - pos[0]; dy = wy - pos[1]
+        return (dx * dx + dy * dy) <= radius * radius
 
     def _img_to_widget(self, ix, iy):
         return int(ix * self._scale + self._off_x), int(iy * self._scale + self._off_y)
@@ -165,6 +193,23 @@ class InteractiveImageLabel(QLabel):
             p.drawText(draw_rect.left() + 4, draw_rect.top() - 6,
                        f"({ix},{iy})  {iw2}×{ih2}")
 
+        # Origin marker (điểm tham chiếu PatMax) — màu vàng
+        if self._show_origin and self._origin_xy is not None:
+            ox_w, oy_w = self._img_to_widget(*self._origin_xy)
+            col_o = QColor(255, 215, 0)
+            p.setPen(QPen(col_o, 2))
+            p.setBrush(QBrush(QColor(255, 215, 0, 40)))
+            p.drawEllipse(ox_w - 9, oy_w - 9, 18, 18)
+            p.setPen(QPen(col_o, 2))
+            p.drawLine(ox_w - 12, oy_w, ox_w + 12, oy_w)
+            p.drawLine(ox_w, oy_w - 12, ox_w, oy_w + 12)
+            p.setPen(QPen(QColor(0, 0, 0), 1))
+            p.setBrush(QBrush(col_o))
+            p.drawEllipse(ox_w - 3, oy_w - 3, 6, 6)
+            p.setPen(QPen(col_o)); p.setFont(QFont("Courier New", 9, QFont.Bold))
+            p.drawText(ox_w + 14, oy_w - 8,
+                       f"O ({self._origin_xy[0]:.1f},{self._origin_xy[1]:.1f})")
+
         # Pixel pick marker
         if self._pick_pos and self.mode == "pick":
             px2, py2 = self._img_to_widget(*self._pick_pos)
@@ -190,17 +235,29 @@ class InteractiveImageLabel(QLabel):
                 self._render()
                 self.pixel_picked.emit(ix, iy)
         elif self.mode in ("roi", "template"):
+            # Ưu tiên kéo origin marker nếu click trúng handle
+            if self._show_origin and self._hit_origin_handle(pos.x(), pos.y()):
+                self._dragging_origin = True
+                self._update_origin_from_widget(pos.x(), pos.y())
+                return
             self._drag_start = pos
             self._dragging   = True
             self._rect = QRect(pos, QSize(0, 0))
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        pos = event.position().toPoint()
+        if self._dragging_origin:
+            self._update_origin_from_widget(pos.x(), pos.y())
+            return
         if not self._dragging or self._drag_start is None:
             return
-        self._rect = QRect(self._drag_start, event.position().toPoint()).normalized()
+        self._rect = QRect(self._drag_start, pos).normalized()
         self._render()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._dragging_origin:
+            self._dragging_origin = False
+            return
         if not self._dragging:
             return
         self._dragging = False
@@ -215,6 +272,26 @@ class InteractiveImageLabel(QLabel):
             self.roi_changed.emit(ix, iy, iw2, ih2)
             if self.mode == "template":
                 self.template_drawn.emit(ix, iy, iw2, ih2)
+
+    def _update_origin_from_widget(self, wx: int, wy: int):
+        """Convert widget pos → image coords, clamp vào rect (nếu có), emit signal."""
+        ix_f = (wx - self._off_x) / self._scale if self._scale else 0.0
+        iy_f = (wy - self._off_y) / self._scale if self._scale else 0.0
+        if self._arr is not None:
+            H2, W2 = self._arr.shape[:2]
+            ix_f = max(0.0, min(ix_f, W2 - 1.0))
+            iy_f = max(0.0, min(iy_f, H2 - 1.0))
+        # Clamp vào ROI rect đang vẽ (nếu có)
+        if self._rect and not self._rect.isNull():
+            rx, ry = self._widget_to_img(self._rect.left(), self._rect.top())
+            rw = self._rect.width() / self._scale if self._scale else 0
+            rh = self._rect.height() / self._scale if self._scale else 0
+            ix_f = max(float(rx), min(ix_f, float(rx) + float(rw)))
+            iy_f = max(float(ry), min(iy_f, float(ry) + float(rh)))
+        self._origin_xy = (ix_f, iy_f)
+        self._show_origin = True
+        self._render()
+        self.origin_changed.emit(ix_f, iy_f)
 
     def resizeEvent(self, event):
         self._render()

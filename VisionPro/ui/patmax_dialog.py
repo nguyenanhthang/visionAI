@@ -320,6 +320,7 @@ class PatMaxDialog(QDialog):
         # Interactive image
         self._img_label = InteractiveImageLabel(mode="roi")
         self._img_label.roi_changed.connect(self._on_roi_drawn)
+        self._img_label.origin_changed.connect(self._on_origin_dragged)
         self._img_label.setMinimumSize(600, 400)
         rl.addWidget(self._img_label, 1)
 
@@ -395,6 +396,20 @@ class PatMaxDialog(QDialog):
             "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
             "selection-background-color:#1a2236;}")
         og.addWidget(self._origin_combo)
+
+        # Origin X/Y spinboxes (image coords) — kéo trên canvas hoặc nhập tay
+        og.addWidget(QLabel("Toạ độ tham chiếu (X, Y - ảnh):"))
+        self._sp_origin_x = self._mk_dspin("Origin X", 0.0, 0.0, 99999.0, 1.0, og)
+        self._sp_origin_y = self._mk_dspin("Origin Y", 0.0, 0.0, 99999.0, 1.0, og)
+        hint_o = QLabel("💡 Kéo dấu O vàng trên ảnh để chỉnh điểm tham chiếu")
+        hint_o.setStyleSheet("color:#ffd700; font-size:10px; padding:2px;")
+        hint_o.setWordWrap(True)
+        og.addWidget(hint_o)
+
+        self._origin_combo.currentIndexChanged.connect(self._on_origin_preset_changed)
+        self._sp_origin_x.valueChanged.connect(self._on_origin_spin_changed)
+        self._sp_origin_y.valueChanged.connect(self._on_origin_spin_changed)
+        self._origin_updating = False  # guard chống loop tín hiệu
         lay.addWidget(orig_grp)
 
         # Canny params
@@ -558,6 +573,11 @@ class PatMaxDialog(QDialog):
             if self._model.train_roi:
                 x,y,w2,h2 = self._model.train_roi
                 QTimer.singleShot(100, lambda: self._img_label.set_rect_from_params(x,y,w2,h2))
+                # Restore origin marker từ model
+                ox = x + float(self._model.origin_x)
+                oy = y + float(self._model.origin_y)
+                QTimer.singleShot(120, lambda: self._set_origin(ox, oy, from_user=False))
+                QTimer.singleShot(125, lambda: self._origin_combo.setCurrentIndex(7))
         else:
             self._img_status.setText(
                 "⚠  Không có ảnh.  "
@@ -567,6 +587,72 @@ class PatMaxDialog(QDialog):
         self._current_roi = (x, y, w, h)
         self._img_status.setText(
             f"ROI đã vẽ: ({x},{y})  {w}×{h} px  —  Nhấn ⚙ Train Pattern")
+        # Cập nhật điểm origin theo preset hiện tại trong ROI mới
+        self._apply_origin_preset_to_roi()
+
+    # ── Origin point handling ──────────────────────────────────────
+    def _preset_offset(self, idx: int) -> Optional[Tuple[float, float]]:
+        m = {
+            0: (0.5, 0.5), 1: (0.0, 0.0), 2: (0.5, 0.0), 3: (1.0, 0.0),
+            4: (0.0, 0.5), 5: (1.0, 0.5), 6: (0.5, 1.0),
+        }
+        return m.get(idx)   # 7 = Custom → None
+
+    def _apply_origin_preset_to_roi(self):
+        """Khi đổi preset hoặc vẽ ROI mới: đặt origin theo preset."""
+        if self._current_roi is None:
+            return
+        idx = self._origin_combo.currentIndex()
+        off = self._preset_offset(idx)
+        if off is None:
+            # Custom — giữ nguyên giá trị spinbox, chỉ đảm bảo trong ROI
+            ox = self._sp_origin_x.value()
+            oy = self._sp_origin_y.value()
+        else:
+            x, y, w, h = self._current_roi
+            ox = x + w * off[0]
+            oy = y + h * off[1]
+        self._set_origin(ox, oy, from_user=False)
+
+    def _set_origin(self, ox: float, oy: float, from_user: bool):
+        """Cập nhật origin: spinboxes + canvas marker. from_user=True khi user nhập tay."""
+        self._origin_updating = True
+        try:
+            self._sp_origin_x.setValue(float(ox))
+            self._sp_origin_y.setValue(float(oy))
+            self._img_label.set_origin(ox, oy)
+        finally:
+            self._origin_updating = False
+
+    def _on_origin_preset_changed(self, idx: int):
+        if self._preset_offset(idx) is not None:
+            self._apply_origin_preset_to_roi()
+        # Nếu Custom → không reset, để user kéo/nhập tay
+
+    def _on_origin_spin_changed(self, _val):
+        if self._origin_updating:
+            return
+        ox = self._sp_origin_x.value()
+        oy = self._sp_origin_y.value()
+        self._origin_updating = True
+        try:
+            self._img_label.set_origin(ox, oy)
+            # Nếu user chỉnh tay → chuyển combo về Custom
+            if self._origin_combo.currentIndex() != 7:
+                self._origin_combo.setCurrentIndex(7)
+        finally:
+            self._origin_updating = False
+
+    def _on_origin_dragged(self, ox: float, oy: float):
+        """Callback khi user kéo origin trên canvas."""
+        self._origin_updating = True
+        try:
+            self._sp_origin_x.setValue(float(ox))
+            self._sp_origin_y.setValue(float(oy))
+            if self._origin_combo.currentIndex() != 7:
+                self._origin_combo.setCurrentIndex(7)
+        finally:
+            self._origin_updating = False
 
     def _train(self):
         if self._current_image is None:
@@ -582,12 +668,21 @@ class PatMaxDialog(QDialog):
             QMessageBox.warning(self, "Train", "Vùng ROI quá nhỏ (min 8×8 px).")
             return
 
-        # Origin offset
-        origin_map = {
-            0: (0.5, 0.5), 1: (0.0, 0.0), 2: (0.5, 0.0), 3: (1.0, 0.0),
-            4: (0.0, 0.5), 5: (1.0, 0.5), 6: (0.5, 1.0), 7: (0.5, 0.5),
-        }
-        origin_off = origin_map.get(self._origin_combo.currentIndex(), (0.5, 0.5))
+        # Origin offset — tính từ toạ độ origin (x,y) thực tế trên ảnh
+        idx = self._origin_combo.currentIndex()
+        preset = self._preset_offset(idx)
+        if preset is not None:
+            origin_off = preset
+        else:
+            ox = self._sp_origin_x.value()
+            oy = self._sp_origin_y.value()
+            denom_w = float(w) if w > 0 else 1.0
+            denom_h = float(h) if h > 0 else 1.0
+            fx = (ox - x) / denom_w
+            fy = (oy - y) / denom_h
+            fx = max(0.0, min(fx, 1.0))
+            fy = max(0.0, min(fy, 1.0))
+            origin_off = (fx, fy)
 
         self._btn_train.setEnabled(False)
         self._train_status.setText("Training...")
@@ -612,6 +707,9 @@ class PatMaxDialog(QDialog):
 
             self._model = model
             self._node.params["_patmax_model"] = model
+
+            # Cập nhật marker origin (đã trained) — toạ độ tuyệt đối ảnh
+            self._set_origin(x + model.origin_x, y + model.origin_y, from_user=False)
 
             self._model_preview.update_model(model)
             self._status_chip.setText(f"● TRAINED  hash:{model.model_hash}")
@@ -835,6 +933,14 @@ class PatMaxDialog(QDialog):
                 self._model = model
                 self._node.params["_patmax_model"] = model
                 self._model_preview.update_model(model)
+                # Restore ROI + origin marker từ model
+                if model.train_roi:
+                    rx, ry, rw, rh = model.train_roi
+                    self._current_roi = model.train_roi
+                    self._img_label.set_rect_from_params(rx, ry, rw, rh)
+                    self._set_origin(rx + model.origin_x, ry + model.origin_y,
+                                     from_user=False)
+                    self._origin_combo.setCurrentIndex(7)
                 self._status_chip.setText(f"● LOADED  hash:{model.model_hash}")
                 self._status_chip.setStyleSheet(
                     "color:#00d4ff; font-size:12px; font-weight:700; background:transparent;")
