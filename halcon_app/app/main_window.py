@@ -528,9 +528,14 @@ class MainWindow(QMainWindow):
     def _on_pipeline_add(self, tool_id: str):
         self._pipeline.add(tool_id)
         idx = len(self._pipeline.nodes) - 1
-        self.pipeline_panel.rebuild(self._pipeline.nodes, select_idx=idx)
+        # Không auto-select node mới để giữ canvas view + props hiện tại của user.
+        # User chủ động click vào node khi muốn cấu hình.
+        prev_idx = self._selected_node_idx
+        keep_idx = prev_idx if (prev_idx is not None and 0 <= prev_idx < len(self._pipeline.nodes)) else None
+        self.pipeline_panel.rebuild(self._pipeline.nodes, select_idx=keep_idx)
         self.pipeline_panel.set_status(
-            f"Added '{TOOLS[tool_id].display}' (#{idx+1}). Click ▶ Run All để chạy."
+            f"Added '{TOOLS[tool_id].display}' (#{idx+1}). "
+            "Click node để cấu hình, hoặc bấm ▶ Run All."
         )
 
     def _on_pipeline_edit(self, idx: int):
@@ -594,12 +599,10 @@ class MainWindow(QMainWindow):
             self._roi_purpose = "pipeline_roi"
             self._pipeline_roi_idx = idx
             self.canvas.set_roi_mode(True)
-            # Hiện ảnh INPUT của ROI node (để overlay vẽ trên ảnh chưa crop)
-            input_img = node.last_input_image
-            if input_img is None:
-                input_img = self._original_image
-            if input_img is not None:
-                self.canvas.set_image(input_img)
+            # Chỉ switch canvas sang input image khi node đã chạy (last_input_image có).
+            # Không thì giữ canvas view hiện tại — tránh reset bất ngờ.
+            if node.last_input_image is not None:
+                self.canvas.set_image(node.last_input_image)
                 self.viewer_badge.setText(f"#{idx+1} {spec.display} (input)")
             p = node.params
             x = int(p.get("x", 0)); y = int(p.get("y", 0))
