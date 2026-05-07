@@ -321,8 +321,11 @@ class PatMaxDialog(QDialog):
         self._img_label = InteractiveImageLabel(mode="roi")
         self._img_label.roi_changed.connect(self._on_roi_drawn)
         self._img_label.origin_changed.connect(self._on_origin_dragged)
+        self._img_label.shape_drawn.connect(self._on_shape_drawn)
         self._img_label.setMinimumSize(600, 400)
         rl.addWidget(self._img_label, 1)
+        self._current_shape: str = "rect"
+        self._current_shape_data: Optional[dict] = None
 
         # Status bar
         self._img_status = QLabel("Load image source → Run pipeline → Draw ROI → Train")
@@ -366,19 +369,36 @@ class PatMaxDialog(QDialog):
         w = QWidget(); lay = QVBoxLayout(w)
         lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
 
-        hint = QLabel("1. Kéo chuột trên ảnh để vẽ vùng Pattern\n"
-                       "2. Chỉnh tham số Train bên dưới\n"
-                       "3. Nhấn ▶ Train Pattern")
+        hint = QLabel("1. Chọn loại shape ROI (Rect/Circle/Ellipse/Polygon)\n"
+                       "2. Vẽ vùng Pattern trên ảnh — Polygon: click từng đỉnh,\n"
+                       "    double-click để đóng, right-click để huỷ\n"
+                       "3. Chỉnh tham số Train → ▶ Train Pattern")
         hint.setStyleSheet(
             "background:#0d1a2a; color:#ffd700; font-size:11px;"
             "padding:8px; border-radius:4px; line-height:1.5;")
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
+        # Shape selector
+        shape_grp = QGroupBox("ROI Shape")
+        sg2 = QVBoxLayout(shape_grp); sg2.setContentsMargins(8, 22, 8, 8); sg2.setSpacing(6)
+        self._shape_combo = QComboBox()
+        self._shape_combo.addItems(["Rectangle", "Circle", "Ellipse", "Polygon"])
+        self._shape_combo.setStyleSheet(
+            "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+            "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+            "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+            "selection-background-color:#1a2236;}")
+        self._shape_combo.currentIndexChanged.connect(self._on_shape_changed)
+        sg2.addWidget(self._shape_combo)
+        lay.addWidget(shape_grp)
+
         # Origin setting
         orig_grp = QGroupBox("Pattern Origin Point")
-        og = QVBoxLayout(orig_grp); og.setContentsMargins(8,12,8,8); og.setSpacing(4)
-        og.addWidget(QLabel("Điểm tham chiếu trong pattern:"))
+        og = QVBoxLayout(orig_grp); og.setContentsMargins(8, 22, 8, 8); og.setSpacing(6)
+        lbl_pre = QLabel("Điểm tham chiếu trong pattern:")
+        lbl_pre.setStyleSheet("color:#94a3b8; font-size:11px;")
+        og.addWidget(lbl_pre)
         self._origin_combo = QComboBox()
         self._origin_combo.addItems([
             "Center (50%, 50%)",
@@ -398,10 +418,12 @@ class PatMaxDialog(QDialog):
         og.addWidget(self._origin_combo)
 
         # Origin X/Y spinboxes (image coords) — kéo trên canvas hoặc nhập tay
-        og.addWidget(QLabel("Toạ độ tham chiếu (X, Y - ảnh):"))
+        lbl_xy = QLabel("Toạ độ tham chiếu (X, Y - ảnh):")
+        lbl_xy.setStyleSheet("color:#94a3b8; font-size:11px; margin-top:4px;")
+        og.addWidget(lbl_xy)
         self._sp_origin_x = self._mk_dspin("Origin X", 0.0, 0.0, 99999.0, 1.0, og)
         self._sp_origin_y = self._mk_dspin("Origin Y", 0.0, 0.0, 99999.0, 1.0, og)
-        hint_o = QLabel("💡 Kéo dấu O vàng trên ảnh để chỉnh điểm tham chiếu")
+        hint_o = QLabel("💡 Kéo dấu O vàng trên ảnh để chỉnh — có thể kéo ra ngoài ROI")
         hint_o.setStyleSheet("color:#ffd700; font-size:10px; padding:2px;")
         hint_o.setWordWrap(True)
         og.addWidget(hint_o)
@@ -572,7 +594,17 @@ class PatMaxDialog(QDialog):
             # Restore ROI nếu có
             if self._model.train_roi:
                 x,y,w2,h2 = self._model.train_roi
-                QTimer.singleShot(100, lambda: self._img_label.set_rect_from_params(x,y,w2,h2))
+                st = getattr(self._model, "shape_type", "rect") or "rect"
+                sd = getattr(self._model, "shape_data", None)
+                self._current_shape = st
+                self._current_shape_data = dict(sd) if sd else None
+                shape_idx = {"rect":0,"circle":1,"ellipse":2,"polygon":3}.get(st, 0)
+                self._shape_combo.setCurrentIndex(shape_idx)
+                self._img_label.set_shape_mode(st)
+                if sd:
+                    QTimer.singleShot(100, lambda: self._img_label.set_shape_data(st, sd))
+                else:
+                    QTimer.singleShot(100, lambda: self._img_label.set_rect_from_params(x,y,w2,h2))
                 # Restore origin marker từ model
                 ox = x + float(self._model.origin_x)
                 oy = y + float(self._model.origin_y)
@@ -586,9 +618,30 @@ class PatMaxDialog(QDialog):
     def _on_roi_drawn(self, x, y, w, h):
         self._current_roi = (x, y, w, h)
         self._img_status.setText(
-            f"ROI đã vẽ: ({x},{y})  {w}×{h} px  —  Nhấn ⚙ Train Pattern")
+            f"ROI đã vẽ: ({x},{y})  {w}×{h} px  ({self._current_shape})  "
+            f"—  Nhấn ⚙ Train Pattern")
         # Cập nhật điểm origin theo preset hiện tại trong ROI mới
         self._apply_origin_preset_to_roi()
+
+    def _on_shape_drawn(self, shape_type: str, data: dict):
+        self._current_shape = shape_type
+        self._current_shape_data = dict(data)
+
+    def _on_shape_changed(self, idx: int):
+        m = {0: "rect", 1: "circle", 2: "ellipse", 3: "polygon"}
+        s = m.get(idx, "rect")
+        self._current_shape = s
+        self._current_shape_data = None
+        self._current_roi = None
+        if hasattr(self, "_img_label"):
+            self._img_label.set_shape_mode(s)
+        hints = {
+            "rect":     "Kéo chuột vẽ Rectangle",
+            "circle":   "Kéo từ tâm ra rìa để vẽ Circle",
+            "ellipse":  "Kéo bounding-box cho Ellipse",
+            "polygon":  "Click từng đỉnh — double-click đóng, right-click huỷ",
+        }
+        self._img_status.setText(f"Shape: {s} — {hints[s]}")
 
     # ── Origin point handling ──────────────────────────────────────
     def _preset_offset(self, idx: int) -> Optional[Tuple[float, float]]:
@@ -695,6 +748,8 @@ class PatMaxDialog(QDialog):
                 origin_offset=origin_off,
                 canny_low=self._canny_low.value(),
                 canny_high=self._canny_high.value(),
+                shape_type=self._current_shape,
+                shape_data=self._current_shape_data,
             )
             # Lưu search params vào model
             model.accept_threshold = self._sp_threshold.value()
@@ -933,11 +988,21 @@ class PatMaxDialog(QDialog):
                 self._model = model
                 self._node.params["_patmax_model"] = model
                 self._model_preview.update_model(model)
-                # Restore ROI + origin marker từ model
+                # Restore ROI + origin marker + shape từ model
                 if model.train_roi:
                     rx, ry, rw, rh = model.train_roi
                     self._current_roi = model.train_roi
-                    self._img_label.set_rect_from_params(rx, ry, rw, rh)
+                    st = getattr(model, "shape_type", "rect") or "rect"
+                    sd = getattr(model, "shape_data", None)
+                    self._current_shape = st
+                    self._current_shape_data = dict(sd) if sd else None
+                    self._shape_combo.setCurrentIndex(
+                        {"rect":0,"circle":1,"ellipse":2,"polygon":3}.get(st, 0))
+                    self._img_label.set_shape_mode(st)
+                    if sd:
+                        self._img_label.set_shape_data(st, sd)
+                    else:
+                        self._img_label.set_rect_from_params(rx, ry, rw, rh)
                     self._set_origin(rx + model.origin_x, ry + model.origin_y,
                                      from_user=False)
                     self._origin_combo.setCurrentIndex(7)

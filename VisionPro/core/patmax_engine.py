@@ -47,6 +47,11 @@ class PatMaxModel:
     thumbnail: Optional[np.ndarray] = None
     edge_count: int = 0
     model_hash: str = ""
+    # Shape info: "rect" | "circle" | "ellipse" | "polygon"
+    shape_type: str = "rect"
+    shape_data: Optional[dict] = None
+    # Mask (h × w) — uint8 0/255, áp lên patch khi train với non-rect shape
+    mask: Optional[np.ndarray] = None
     # Search params
     accept_threshold: float = 0.5
     angle_low: float = 0.0
@@ -73,7 +78,9 @@ def train_patmax(image: np.ndarray,
                  roi: Tuple[int,int,int,int],
                  origin_offset: Tuple[float,float] = (0.5, 0.5),
                  canny_low: int = 50,
-                 canny_high: int = 150) -> PatMaxModel:
+                 canny_high: int = 150,
+                 shape_type: str = "rect",
+                 shape_data: Optional[dict] = None) -> PatMaxModel:
 
     x, y, w, h = roi
     H, W = image.shape[:2]
@@ -88,6 +95,14 @@ def train_patmax(image: np.ndarray,
     gray_smooth = cv2.GaussianBlur(gray, (3,3), 0)
     edges = cv2.Canny(gray_smooth, canny_low, canny_high)
 
+    # Build mask trong toạ độ patch (h × w) cho non-rect shapes
+    mask = _build_shape_mask(shape_type, shape_data, x, y, w, h)
+    if mask is not None:
+        # Outside-of-shape: set gray = mean (giảm ảnh hưởng NCC), edges = 0
+        mean_val = int(gray_smooth[mask > 0].mean()) if np.count_nonzero(mask) else 127
+        gray_smooth = np.where(mask > 0, gray_smooth, mean_val).astype(np.uint8)
+        edges = np.where(mask > 0, edges, 0).astype(np.uint8)
+
     # Thumbnail 80×80
     th = cv2.resize(bgr, (80, 80))
     e_small = cv2.resize(edges, (80, 80))
@@ -97,7 +112,7 @@ def train_patmax(image: np.ndarray,
     oy = h * origin_offset[1]
     model_hash = hashlib.md5(gray.tobytes()).hexdigest()[:8]
 
-    print(f"[PatMax Train] ROI=({x},{y},{w},{h})  "
+    print(f"[PatMax Train] ROI=({x},{y},{w},{h}) shape={shape_type} "
           f"edges={int(np.count_nonzero(edges))}  hash={model_hash}")
 
     return PatMaxModel(
@@ -113,7 +128,41 @@ def train_patmax(image: np.ndarray,
         model_hash=model_hash,
         canny_low=canny_low,
         canny_high=canny_high,
+        shape_type=shape_type,
+        shape_data=dict(shape_data) if shape_data else None,
+        mask=mask,
     )
+
+
+def _build_shape_mask(shape_type: str, shape_data: Optional[dict],
+                       roi_x: int, roi_y: int, w: int, h: int
+                       ) -> Optional[np.ndarray]:
+    """Tạo mask (h × w) uint8 0/255 cho non-rect shape, toạ độ ảnh → patch."""
+    if not shape_data or shape_type == "rect":
+        return None
+    mask = np.zeros((h, w), dtype=np.uint8)
+    if shape_type == "ellipse":
+        cx = int((shape_data.get("x", roi_x) - roi_x) + shape_data.get("w", w) / 2)
+        cy = int((shape_data.get("y", roi_y) - roi_y) + shape_data.get("h", h) / 2)
+        ax = max(1, int(shape_data.get("w", w) / 2))
+        ay = max(1, int(shape_data.get("h", h) / 2))
+        cv2.ellipse(mask, (cx, cy), (ax, ay), 0, 0, 360, 255, -1)
+    elif shape_type == "circle":
+        cx = int(shape_data.get("cx", roi_x + w / 2) - roi_x)
+        cy = int(shape_data.get("cy", roi_y + h / 2) - roi_y)
+        r = max(1, int(shape_data.get("r", min(w, h) / 2)))
+        cv2.circle(mask, (cx, cy), r, 255, -1)
+    elif shape_type == "polygon":
+        pts = shape_data.get("pts") or []
+        if len(pts) >= 3:
+            arr = np.array([[int(px - roi_x), int(py - roi_y)] for px, py in pts],
+                            dtype=np.int32)
+            cv2.fillPoly(mask, [arr], 255)
+        else:
+            return None
+    else:
+        return None
+    return mask
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -418,7 +467,7 @@ def save_model(model: PatMaxModel, path: str):
     base = os.path.splitext(path)[0]
 
     np_data = {}
-    for attr in ("patch_bgr","patch_gray","edge_image","thumbnail"):
+    for attr in ("patch_bgr","patch_gray","edge_image","thumbnail","mask"):
         arr = getattr(model, attr, None)
         if arr is not None:
             np_data[attr] = arr
@@ -431,7 +480,7 @@ def save_model(model: PatMaxModel, path: str):
             and not isinstance(getattr(model,k,None), type(None))
             or k in ("train_roi",)}
     # Remove numpy arrays from meta
-    for key in ("patch_bgr","patch_gray","edge_image","thumbnail"):
+    for key in ("patch_bgr","patch_gray","edge_image","thumbnail","mask"):
         meta.pop(key, None)
 
     with open(base + ".json", "w") as f:
@@ -465,10 +514,12 @@ def load_model(path: str) -> Optional[PatMaxModel]:
             num_results      = meta.get("num_results", 1),
             canny_low        = meta.get("canny_low", 50),
             canny_high       = meta.get("canny_high", 150),
+            shape_type       = meta.get("shape_type", "rect"),
+            shape_data       = meta.get("shape_data"),
         )
         if os.path.exists(npath):
             npz = np.load(npath)
-            for attr in ("patch_bgr","patch_gray","edge_image","thumbnail"):
+            for attr in ("patch_bgr","patch_gray","edge_image","thumbnail","mask"):
                 if attr in npz:
                     setattr(model, attr, npz[attr])
         return model
