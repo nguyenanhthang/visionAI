@@ -27,6 +27,9 @@ class PatMaxResult:
     width: float
     height: float
     corners: List[Tuple[float, float]] = field(default_factory=list)
+    # Origin (điểm tham chiếu) đã transform theo angle/scale của result
+    origin_x: float = 0.0
+    origin_y: float = 0.0
 
 
 @dataclass
@@ -366,16 +369,26 @@ def run_patmax(image: np.ndarray,
         if len(kept) >= num_results:
             break
 
+    # Origin offset từ tâm pattern (toạ độ pattern, không clamp)
+    pdx = float(model.origin_x) - float(model.pattern_w) / 2.0
+    pdy = float(model.origin_y) - float(model.pattern_h) / 2.0
+
     # Build results
     results: List[PatMaxResult] = []
     for d in kept:
         corners = _rotated_corners(d["cx"], d["cy"], d["nW"], d["nH"], d["angle"])
+        rad_o = math.radians(-d["angle"])
+        ca = math.cos(rad_o); sa = math.sin(rad_o)
+        s = d["scale"] if d["scale"] else 1.0
+        ox_t = float(d["cx"]) + s * (pdx * ca - pdy * sa)
+        oy_t = float(d["cy"]) + s * (pdx * sa + pdy * ca)
         results.append(PatMaxResult(
             found=True, score=d["score"],
             x=d["cx"], y=d["cy"],
             angle=d["angle"], scale=d["scale"],
             width=float(d["nW"]), height=float(d["nH"]),
             corners=corners,
+            origin_x=ox_t, origin_y=oy_t,
         ))
 
     # Score map visualization (blur để đẹp hơn)
@@ -420,6 +433,15 @@ def draw_patmax_results(image: np.ndarray,
                          model: Optional[PatMaxModel] = None) -> np.ndarray:
     vis = image.copy() if len(image.shape)==3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
+    # Origin offset t\u1eeb t\u00e2m pattern (to\u1ea1 \u0111\u1ed9 pattern, c\u00f3 th\u1ec3 \u00e2m ho\u1eb7c >w/h)
+    has_origin = False
+    pdx = pdy = 0.0
+    if model is not None and model.is_valid():
+        pw = float(model.pattern_w); ph = float(model.pattern_h)
+        pdx = float(model.origin_x) - pw / 2.0
+        pdy = float(model.origin_y) - ph / 2.0
+        has_origin = True
+
     for i, r in enumerate(results):
         if not r.found:
             continue
@@ -443,6 +465,24 @@ def draw_patmax_results(image: np.ndarray,
             ex  = int(cx + math.cos(rad) * sz * 2)
             ey  = int(cy + math.sin(rad) * sz * 2)
             cv2.arrowedLine(vis, (cx,cy), (ex,ey), (255,210,0), 2, tipLength=0.3)
+
+        # Origin marker (transformed) \u2014 di chuy\u1ec3n theo template
+        if has_origin:
+            rad_o = math.radians(-r.angle)
+            ca = math.cos(rad_o); sa = math.sin(rad_o)
+            s  = r.scale if r.scale else 1.0
+            ox = float(r.x) + s * (pdx * ca - pdy * sa)
+            oy = float(r.y) + s * (pdx * sa + pdy * ca)
+            ox_i = int(round(ox)); oy_i = int(round(oy))
+            o_col = (0, 215, 255)   # v\u00e0ng (BGR)
+            cv2.line(vis, (cx, cy), (ox_i, oy_i), o_col, 1, cv2.LINE_AA)
+            cv2.circle(vis, (ox_i, oy_i), 10, o_col, 2, cv2.LINE_AA)
+            cv2.line(vis, (ox_i - 14, oy_i), (ox_i + 14, oy_i), o_col, 2)
+            cv2.line(vis, (ox_i, oy_i - 14), (ox_i, oy_i + 14), o_col, 2)
+            cv2.circle(vis, (ox_i, oy_i), 3, o_col, -1)
+            cv2.putText(vis, f"O ({ox:.1f},{oy:.1f})",
+                        (ox_i + 16, oy_i - 8), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45, o_col, 1, cv2.LINE_AA)
 
         # Label
         lx = max(0, int(r.x - r.width/2))

@@ -904,16 +904,15 @@ class PatMaxDialog(QDialog):
             node.outputs["image"]     = result_vis
             if n > 0:
                 best = results[0]
-                ox_match, oy_match = self._transform_origin(best)
                 node.outputs["score"]    = best.score
                 node.outputs["x"]        = best.x
                 node.outputs["y"]        = best.y
                 node.outputs["angle"]    = best.angle
                 node.outputs["scale"]    = best.scale
-                node.outputs["origin_x"] = ox_match
-                node.outputs["origin_y"] = oy_match
-                # Cập nhật marker tham chiếu trên ảnh kết quả
-                self._set_origin(ox_match, oy_match, from_user=False)
+                node.outputs["origin_x"] = best.origin_x
+                node.outputs["origin_y"] = best.origin_y
+                # Cập nhật marker tham chiếu trên ảnh kết quả (theo template)
+                self._set_origin(best.origin_x, best.origin_y, from_user=False)
             node.status = "pass" if n > 0 else "fail"
 
             self._set_view("image")
