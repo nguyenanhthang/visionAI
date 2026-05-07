@@ -696,6 +696,23 @@ class PatMaxDialog(QDialog):
         finally:
             self._origin_updating = False
 
+    def _transform_origin(self, result) -> Tuple[float, float]:
+        """Biến đổi origin (lưu trong model) sang vị trí match được."""
+        import math
+        m = self._model
+        if not m or not m.train_roi:
+            return float(result.x), float(result.y)
+        w = float(m.pattern_w); h = float(m.pattern_h)
+        # Offset origin so với tâm pattern (toạ độ pattern, có thể âm/>w,h)
+        dx = float(m.origin_x) - w / 2.0
+        dy = float(m.origin_y) - h / 2.0
+        rad = math.radians(-float(result.angle))
+        ca = math.cos(rad); sa = math.sin(rad)
+        s  = float(result.scale) if result.scale else 1.0
+        ox = float(result.x) + s * (dx * ca - dy * sa)
+        oy = float(result.y) + s * (dx * sa + dy * ca)
+        return ox, oy
+
     def _on_origin_dragged(self, ox: float, oy: float):
         """Callback khi user kéo origin trên canvas."""
         self._origin_updating = True
@@ -721,7 +738,8 @@ class PatMaxDialog(QDialog):
             QMessageBox.warning(self, "Train", "Vùng ROI quá nhỏ (min 8×8 px).")
             return
 
-        # Origin offset — tính từ toạ độ origin (x,y) thực tế trên ảnh
+        # Origin offset — tính từ toạ độ origin (x,y) thực tế trên ảnh.
+        # KHÔNG clamp: cho phép origin nằm ngoài ROI (offset âm hoặc >1).
         idx = self._origin_combo.currentIndex()
         preset = self._preset_offset(idx)
         if preset is not None:
@@ -733,8 +751,6 @@ class PatMaxDialog(QDialog):
             denom_h = float(h) if h > 0 else 1.0
             fx = (ox - x) / denom_w
             fy = (oy - y) / denom_h
-            fx = max(0.0, min(fx, 1.0))
-            fy = max(0.0, min(fy, 1.0))
             origin_off = (fx, fy)
 
         self._btn_train.setEnabled(False)
@@ -887,11 +903,17 @@ class PatMaxDialog(QDialog):
             node.outputs["num_found"] = n
             node.outputs["image"]     = result_vis
             if n > 0:
-                node.outputs["score"] = results[0].score
-                node.outputs["x"]     = results[0].x
-                node.outputs["y"]     = results[0].y
-                node.outputs["angle"] = results[0].angle
-                node.outputs["scale"] = results[0].scale
+                best = results[0]
+                ox_match, oy_match = self._transform_origin(best)
+                node.outputs["score"]    = best.score
+                node.outputs["x"]        = best.x
+                node.outputs["y"]        = best.y
+                node.outputs["angle"]    = best.angle
+                node.outputs["scale"]    = best.scale
+                node.outputs["origin_x"] = ox_match
+                node.outputs["origin_y"] = oy_match
+                # Cập nhật marker tham chiếu trên ảnh kết quả
+                self._set_origin(ox_match, oy_match, from_user=False)
             node.status = "pass" if n > 0 else "fail"
 
             self._set_view("image")
