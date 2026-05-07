@@ -266,6 +266,7 @@ class MainWindow(QMainWindow):
         # ---- Canvas ----
         self.canvas.measure_segment_drawn.connect(self._on_segment_drawn)
         self.canvas.roi_drawn.connect(self._on_roi_drawn)
+        self.canvas.persistent_roi_changed.connect(self._on_persistent_roi_changed)
         self.canvas.mouse_moved.connect(self._on_cursor_moved)
 
         # ---- Pipeline panel ----
@@ -414,10 +415,13 @@ class MainWindow(QMainWindow):
         elif self._roi_purpose == "pipeline_roi" and self._pipeline_roi_idx is not None:
             # Điền x/y/w/h vào props panel (sẽ trigger live preview)
             self.pipeline_panel.props_panel.fill_xywh(x, y, w, h)
+            # Hiển thị overlay rect kéo được tại vùng vừa vẽ
+            self.canvas.set_persistent_roi(x, y, w, h)
             self.results_view.append_log(
                 f"[ROI tool] picked ROI ({x},{y}) {w}×{h} cho node #{self._pipeline_roi_idx+1}"
             )
-            self._pipeline_roi_idx = None
+            # Giữ ROI mode để user có thể vẽ lại nếu muốn
+            return
         self._roi_purpose = None
         self.canvas.set_roi_mode(False); self.canvas.clear_roi()
 
@@ -429,6 +433,21 @@ class MainWindow(QMainWindow):
         self._pipeline_roi_idx = idx
         self.canvas.set_roi_mode(True)
         self.results_view.append_log("Pick mode: kéo chuột chọn ROI cho tool…")
+
+    def _on_persistent_roi_changed(self, x: int, y: int, w: int, h: int):
+        """User kéo overlay rect trên canvas → cập nhật params node ROI hiện tại."""
+        idx = self._pipeline_roi_idx
+        if idx is None or not (0 <= idx < len(self._pipeline.nodes)):
+            return
+        # Đẩy giá trị mới vào props panel (sẽ trigger debounce live preview)
+        if self.pipeline_panel.props_panel._idx == idx:
+            self.pipeline_panel.props_panel.fill_xywh(x, y, w, h)
+        else:
+            # Cập nhật trực tiếp node + invalidate cache
+            node = self._pipeline.nodes[idx]
+            node.params.update({"x": x, "y": y, "w": w, "h": h})
+            node.last_image = None; node.last_metrics = None
+            node.last_thumbnail = None; node.error = None
 
     def _on_segment_drawn(self, r1: int, c1: int, r2: int, c2: int):
         self._segment = (r1, c1, r2, c2)
@@ -566,6 +585,35 @@ class MainWindow(QMainWindow):
             self.results_view.append_log(f"⚠ Node #{idx+1} error: {node.error}")
         else:
             self.results_view.append_log(f"Node #{idx+1} chưa chạy. Bấm '▶ Run All' trước.")
+        # ROI tool: tự bật chế độ vẽ + hiển thị rect kéo được
+        self._sync_canvas_for_node(idx, node, spec)
+
+    def _sync_canvas_for_node(self, idx: int, node, spec) -> None:
+        """Auto-enable ROI mode + persistent overlay khi node hiện tại là tool 'roi'."""
+        if spec.id == "roi":
+            self._roi_purpose = "pipeline_roi"
+            self._pipeline_roi_idx = idx
+            self.canvas.set_roi_mode(True)
+            # Hiện ảnh INPUT của ROI node (để overlay vẽ trên ảnh chưa crop)
+            input_img = node.last_input_image
+            if input_img is None:
+                input_img = self._original_image
+            if input_img is not None:
+                self.canvas.set_image(input_img)
+                self.viewer_badge.setText(f"#{idx+1} {spec.display} (input)")
+            p = node.params
+            x = int(p.get("x", 0)); y = int(p.get("y", 0))
+            w = int(p.get("w", 0)); h = int(p.get("h", 0))
+            if w > 0 and h > 0:
+                self.canvas.set_persistent_roi(x, y, w, h)
+            else:
+                self.canvas.clear_persistent_roi()
+        else:
+            if self._roi_purpose == "pipeline_roi":
+                self._roi_purpose = None
+                self._pipeline_roi_idx = None
+                self.canvas.set_roi_mode(False)
+            self.canvas.clear_persistent_roi()
 
     def _on_pipeline_run(self, focus_idx: Optional[int] = None):
         if not self._pipeline.nodes:
@@ -607,6 +655,15 @@ class MainWindow(QMainWindow):
         # Invalidate cached output
         node.last_image = None; node.last_metrics = None
         node.last_thumbnail = None; node.error = None
+        # Sync canvas overlay nếu là ROI tool
+        spec = TOOLS[node.tool_id]
+        if spec.id == "roi" and idx == self._pipeline_roi_idx:
+            x = int(new_params.get("x", 0)); y = int(new_params.get("y", 0))
+            w = int(new_params.get("w", 0)); h = int(new_params.get("h", 0))
+            if w > 0 and h > 0:
+                self.canvas.set_persistent_roi(x, y, w, h)
+            else:
+                self.canvas.clear_persistent_roi()
         if not self.pipeline_panel.props_panel.live:
             # Live tắt → chỉ cập nhật subtitle/badge, chờ Apply
             self.pipeline_panel.refresh_node(idx, node)

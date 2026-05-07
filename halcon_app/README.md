@@ -25,7 +25,7 @@ phải gồm 2 tab:
 | 🧱 Morphology       | ✓     | Pre-process | dilation / erosion / opening / closing / gradient / tophat / blackhat |
 | 🔄 Convert          | ✓     | Pre-process | gray / HSV / Lab / channel split / invert / equalize / CLAHE    |
 | ↻  Rotate           | ✓     | Pre-process | rotate_image (góc, scale, interp, expand canvas)                |
-| ▭  ROI              | ✓     | Pre-process | crop_rectangle1 (mode=crop) / reduce_domain (mode=mask)         |
+| ▭  ROI              | ✓     | Pre-process | crop_rectangle1 (mode=crop) / reduce_domain (mode=mask). Click node → canvas tự bật ROI mode, kéo chuột vẽ rect, kéo overlay để di chuyển; mọi thay đổi đều đồng bộ live với params x/y/w/h |
 | ⬛ Blob             |       | Locate      | threshold + connection + select_shape                           |
 | 🌓 Adaptive Thresh. |       | Locate      | dyn_threshold (fallback cv2.adaptiveThreshold)                  |
 | ✶  Edges            |       | Locate      | edges_sub_pix                                                   |

@@ -83,6 +83,7 @@ class PipelineNode:
     params: dict
     enabled: bool = True
     label: str = ""
+    last_input_image: Optional[np.ndarray] = field(default=None, repr=False)
     last_image: Optional[np.ndarray] = field(default=None, repr=False)
     last_metrics: Optional[dict] = None
     last_log: Optional[list[str]] = None
@@ -362,6 +363,7 @@ class Pipeline:
         if ctx.mask is not None:
             current = apply_mask(current, ctx.mask)
         for node in self.nodes:
+            node.last_input_image = current
             if not node.enabled:
                 node.last_image = None
                 node.last_metrics = None
