@@ -393,12 +393,16 @@ class PatMaxDialog(QDialog):
         sg2.addWidget(self._shape_combo)
         lay.addWidget(shape_grp)
 
-        # Origin setting
+        # Origin setting — layout gọn 1 hàng combo + 1 hàng X/Y
         orig_grp = QGroupBox("Pattern Origin Point")
-        og = QVBoxLayout(orig_grp); og.setContentsMargins(8, 22, 8, 8); og.setSpacing(6)
-        lbl_pre = QLabel("Điểm tham chiếu trong pattern:")
+        og = QVBoxLayout(orig_grp); og.setContentsMargins(10, 26, 10, 10); og.setSpacing(8)
+
+        # Hàng 1: Preset combo
+        preset_row = QWidget(); pr_lay = QHBoxLayout(preset_row)
+        pr_lay.setContentsMargins(0, 0, 0, 0); pr_lay.setSpacing(6)
+        lbl_pre = QLabel("Preset:")
         lbl_pre.setStyleSheet("color:#94a3b8; font-size:11px;")
-        og.addWidget(lbl_pre)
+        lbl_pre.setMinimumWidth(46)
         self._origin_combo = QComboBox()
         self._origin_combo.addItems([
             "Center (50%, 50%)",
@@ -415,18 +419,44 @@ class PatMaxDialog(QDialog):
             "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
             "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
             "selection-background-color:#1a2236;}")
-        og.addWidget(self._origin_combo)
+        pr_lay.addWidget(lbl_pre); pr_lay.addWidget(self._origin_combo, 1)
+        og.addWidget(preset_row)
 
-        # Origin X/Y spinboxes (image coords) — kéo trên canvas hoặc nhập tay
-        lbl_xy = QLabel("Toạ độ tham chiếu (X, Y - ảnh):")
-        lbl_xy.setStyleSheet("color:#94a3b8; font-size:11px; margin-top:4px;")
-        og.addWidget(lbl_xy)
-        self._sp_origin_x = self._mk_dspin("Origin X", 0.0, 0.0, 99999.0, 1.0, og)
-        self._sp_origin_y = self._mk_dspin("Origin Y", 0.0, 0.0, 99999.0, 1.0, og)
-        hint_o = QLabel("💡 Kéo dấu O vàng trên ảnh để chỉnh — có thể kéo ra ngoài ROI")
-        hint_o.setStyleSheet("color:#ffd700; font-size:10px; padding:2px;")
+        # Hàng 2: X / Y cùng dòng
+        xy_row = QWidget(); xy_lay = QHBoxLayout(xy_row)
+        xy_lay.setContentsMargins(0, 0, 0, 0); xy_lay.setSpacing(6)
+        sp_style = ("QDoubleSpinBox{background:#0a0e1a;border:1px solid #1e2d45;"
+                    "color:#e2e8f0;padding:2px 4px;border-radius:3px;}")
+        lbl_x = QLabel("X:"); lbl_x.setStyleSheet("color:#94a3b8; font-size:11px;")
+        self._sp_origin_x = QDoubleSpinBox()
+        self._sp_origin_x.setRange(-99999.0, 99999.0)
+        self._sp_origin_x.setDecimals(2); self._sp_origin_x.setSingleStep(1.0)
+        self._sp_origin_x.setStyleSheet(sp_style)
+        lbl_y = QLabel("Y:"); lbl_y.setStyleSheet("color:#94a3b8; font-size:11px;")
+        self._sp_origin_y = QDoubleSpinBox()
+        self._sp_origin_y.setRange(-99999.0, 99999.0)
+        self._sp_origin_y.setDecimals(2); self._sp_origin_y.setSingleStep(1.0)
+        self._sp_origin_y.setStyleSheet(sp_style)
+        xy_lay.addWidget(lbl_x); xy_lay.addWidget(self._sp_origin_x, 1)
+        xy_lay.addSpacing(6)
+        xy_lay.addWidget(lbl_y); xy_lay.addWidget(self._sp_origin_y, 1)
+        og.addWidget(xy_row)
+
+        # Hint
+        hint_o = QLabel("💡 Kéo dấu O vàng — có thể kéo ra ngoài ROI")
+        hint_o.setStyleSheet("color:#ffd700; font-size:10px;")
         hint_o.setWordWrap(True)
         og.addWidget(hint_o)
+
+        # Reset Image button
+        btn_reset = QPushButton("🔄  Reset Image")
+        btn_reset.setFixedHeight(28)
+        btn_reset.setStyleSheet(
+            "QPushButton{background:#1a2236;border:1px solid #1e2d45;"
+            "border-radius:4px;color:#94a3b8;font-size:11px;font-weight:600;}"
+            "QPushButton:hover{background:#0f3460;color:#00d4ff;border-color:#00d4ff;}")
+        btn_reset.clicked.connect(self._reset_image)
+        og.addWidget(btn_reset)
 
         self._origin_combo.currentIndexChanged.connect(self._on_origin_preset_changed)
         self._sp_origin_x.valueChanged.connect(self._on_origin_spin_changed)
@@ -713,6 +743,46 @@ class PatMaxDialog(QDialog):
         oy = float(result.y) + s * (dx * sa + dy * ca)
         return ox, oy
 
+    def _reset_image(self):
+        """Reload ảnh từ upstream, xoá ROI/origin/results/score-map hiện tại."""
+        # Clear state
+        self._current_roi = None
+        self._current_shape_data = None
+        self._results = []
+        self._score_map_img = None
+        if hasattr(self, "_result_vis"):
+            self._result_vis = None
+        # Clear canvas markers
+        self._img_label.set_origin(None, None)
+        self._img_label.set_shape_mode(self._current_shape)  # clears _rect/_poly/_data
+        # Reset origin spinboxes & combo
+        self._origin_updating = True
+        try:
+            self._sp_origin_x.setValue(0.0)
+            self._sp_origin_y.setValue(0.0)
+            self._origin_combo.setCurrentIndex(0)
+        finally:
+            self._origin_updating = False
+        # Reload ảnh upstream
+        img = self._get_input_image()
+        if img is not None and isinstance(img, np.ndarray):
+            self._current_image = img
+            self._img_label.set_image(img)
+            h, w = img.shape[:2]
+            self._img_status.setText(
+                f"🔄 Image reset: {w}×{h}  —  Vẽ ROI mới để train")
+        else:
+            self._img_status.setText("⚠ Không có ảnh upstream để reset.")
+        # Clear search summary
+        if hasattr(self, "_search_summary"):
+            self._search_summary.setText("Image reset — chạy search lại nếu cần.")
+            self._search_summary.setStyleSheet(
+                "background:#0d1220; color:#94a3b8; font-size:11px;"
+                "font-family:'Courier New'; padding:8px; border-radius:4px;")
+        if hasattr(self, "_result_table"):
+            self._result_table.setRowCount(0)
+        self._set_view("image")
+
     def _on_origin_dragged(self, ox: float, oy: float):
         """Callback khi user kéo origin trên canvas."""
         self._origin_updating = True
@@ -959,8 +1029,16 @@ class PatMaxDialog(QDialog):
             img = _rv if _rv is not None else self._current_image
             if img is not None:
                 self._img_label.set_image(img)
+            # Khi đang xem result_vis: marker origin đã vẽ trong ảnh, ẩn overlay
+            # để không chồng. Khi xem raw image: bật overlay theo spinbox hiện tại.
+            if _rv is not None:
+                self._img_label.set_origin(None, None)
+            else:
+                self._img_label.set_origin(self._sp_origin_x.value(),
+                                           self._sp_origin_y.value())
             self._view_info.setText("Output image with results")
         elif view == "scoremap":
+            self._img_label.set_origin(None, None)
             img = getattr(self, "_score_map_img", None)
             if img is not None:
                 self._img_label.set_image(img)
@@ -969,6 +1047,7 @@ class PatMaxDialog(QDialog):
                 self._img_label.set_image(None)
                 self._view_info.setText("Run search first")
         elif view == "edges":
+            self._img_label.set_origin(None, None)
             if self._model.is_valid() and self._model.edge_image is not None:
                 import cv2
                 edge_vis = cv2.cvtColor(self._model.edge_image, cv2.COLOR_GRAY2BGR)
