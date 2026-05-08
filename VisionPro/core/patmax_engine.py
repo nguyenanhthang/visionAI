@@ -66,7 +66,9 @@ class PatMaxModel:
     angle_step: float = 5.0
     scale_low: float = 1.0
     scale_high: float = 1.0
+    scale_step: float = 0.1
     num_results: int = 1
+    overlap_threshold: float = 0.5
     # Canny params dùng lúc train
     canny_low: int = 50
     canny_high: int = 150
@@ -598,7 +600,9 @@ def load_model(path: str) -> Optional[PatMaxModel]:
             angle_step       = meta.get("angle_step", 5.0),
             scale_low        = meta.get("scale_low", 1.0),
             scale_high       = meta.get("scale_high", 1.0),
+            scale_step       = meta.get("scale_step", 0.1),
             num_results      = meta.get("num_results", 1),
+            overlap_threshold= meta.get("overlap_threshold", 0.5),
             canny_low        = meta.get("canny_low", 50),
             canny_high       = meta.get("canny_high", 150),
             shape_type       = meta.get("shape_type", "rect"),

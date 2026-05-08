@@ -269,6 +269,10 @@ class PatMaxDialog(QDialog):
         self._tabs.addTab(self._build_settings_tab(), "⚒ Settings")
         ll.addWidget(self._tabs)
 
+        # Load Settings spinboxes từ model + connect auto-save
+        self._load_settings_from_model()
+        self._wire_settings_autosave()
+
         # Save/Load model buttons
         savload = QWidget()
         sl = QHBoxLayout(savload); sl.setContentsMargins(0,0,0,0); sl.setSpacing(6)
@@ -649,6 +653,63 @@ class PatMaxDialog(QDialog):
     # ════════════════════════════════════════════════════════════════
     #  Actions
     # ════════════════════════════════════════════════════════════════
+    def _load_settings_from_model(self):
+        """Khôi phục giá trị spinbox Settings từ self._model (nếu valid)."""
+        m = self._model
+        if not m:
+            return
+        try:
+            self._sp_threshold.setValue(float(getattr(m, "accept_threshold", 0.5)))
+            ang_lo = float(getattr(m, "angle_low", 0.0))
+            ang_hi = float(getattr(m, "angle_high", 0.0))
+            self._sp_ang_low.setValue(ang_lo)
+            self._sp_ang_high.setValue(ang_hi)
+            self._sp_ang_step.setValue(float(getattr(m, "angle_step", 5.0)))
+            self._chk_angle.setChecked(abs(ang_hi - ang_lo) > 0.5)
+
+            sc_lo = float(getattr(m, "scale_low", 1.0))
+            sc_hi = float(getattr(m, "scale_high", 1.0))
+            self._sp_sc_low.setValue(sc_lo)
+            self._sp_sc_high.setValue(sc_hi)
+            self._sp_sc_step.setValue(float(getattr(m, "scale_step", 0.1)))
+            self._chk_scale.setChecked(abs(sc_hi - sc_lo) > 0.01)
+
+            self._sp_num_results.setValue(int(getattr(m, "num_results", 1)))
+            self._sp_overlap.setValue(float(getattr(m, "overlap_threshold", 0.5)))
+        except Exception as e:
+            print(f"[PatMaxDialog] _load_settings_from_model: {e}")
+
+    def _wire_settings_autosave(self):
+        """Khi đổi spinbox Settings → ghi ngay vào model + node.params."""
+        self._sp_threshold.valueChanged.connect(self._save_settings_to_model)
+        self._sp_ang_low.valueChanged.connect(self._save_settings_to_model)
+        self._sp_ang_high.valueChanged.connect(self._save_settings_to_model)
+        self._sp_ang_step.valueChanged.connect(self._save_settings_to_model)
+        self._sp_sc_low.valueChanged.connect(self._save_settings_to_model)
+        self._sp_sc_high.valueChanged.connect(self._save_settings_to_model)
+        self._sp_sc_step.valueChanged.connect(self._save_settings_to_model)
+        self._sp_num_results.valueChanged.connect(self._save_settings_to_model)
+        self._sp_overlap.valueChanged.connect(self._save_settings_to_model)
+        self._chk_angle.stateChanged.connect(self._save_settings_to_model)
+        self._chk_scale.stateChanged.connect(self._save_settings_to_model)
+
+    def _save_settings_to_model(self, *_):
+        """Ghi giá trị spinbox Settings vào self._model + node.params."""
+        m = self._model
+        if m is None:
+            return
+        m.accept_threshold = float(self._sp_threshold.value())
+        m.angle_low  = float(self._sp_ang_low.value())  if self._chk_angle.isChecked() else 0.0
+        m.angle_high = float(self._sp_ang_high.value()) if self._chk_angle.isChecked() else 0.0
+        m.angle_step = float(self._sp_ang_step.value())
+        m.scale_low  = float(self._sp_sc_low.value())   if self._chk_scale.isChecked() else 1.0
+        m.scale_high = float(self._sp_sc_high.value())  if self._chk_scale.isChecked() else 1.0
+        m.scale_step = float(self._sp_sc_step.value())
+        m.num_results = int(self._sp_num_results.value())
+        m.overlap_threshold = float(self._sp_overlap.value())
+        # Đảm bảo node.params có reference tới model (cùng instance, an toàn)
+        self._node.params["_patmax_model"] = m
+
     def _on_refresh_click(self):
         """Force refresh — luôn re-fetch và clear stale state."""
         self._image_sig = None  # bypass equality check
