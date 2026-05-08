@@ -55,6 +55,10 @@ class PatMaxModel:
     shape_data: Optional[dict] = None
     # Mask (h × w) — uint8 0/255, áp lên patch khi train với non-rect shape
     mask: Optional[np.ndarray] = None
+    # Train mode: "evaluate" (DOFs at runtime) | "create" (precomputed templates)
+    train_mode: str = "evaluate"
+    # Precomputed templates khi train_mode == "create"
+    precomputed_templates: Optional[list] = None
     # Search params
     accept_threshold: float = 0.5
     angle_low: float = 0.0
@@ -77,13 +81,83 @@ class PatMaxModel:
 # ═══════════════════════════════════════════════════════════════
 #  TRAIN
 # ═══════════════════════════════════════════════════════════════
+def _build_template(patch_gray: np.ndarray,
+                     edge_image: np.ndarray,
+                     angle: float,
+                     scale: float) -> dict:
+    """Tạo template (rotated/scaled) từ patch base + edge base."""
+    pw = max(4, int(patch_gray.shape[1] * scale))
+    ph = max(4, int(patch_gray.shape[0] * scale))
+    patch = cv2.resize(patch_gray, (pw, ph))
+    edge_p = cv2.resize(edge_image, (pw, ph))
+    if abs(angle) > 0.1:
+        rad = math.radians(angle)
+        cos_a = abs(math.cos(rad)); sin_a = abs(math.sin(rad))
+        nW = int(ph * sin_a + pw * cos_a) + 2
+        nH = int(ph * cos_a + pw * sin_a) + 2
+        M = cv2.getRotationMatrix2D((pw / 2, ph / 2), angle, 1.0)
+        M[0, 2] += (nW - pw) / 2; M[1, 2] += (nH - ph) / 2
+        patch_rot = cv2.warpAffine(patch, M, (nW, nH),
+                                    borderMode=cv2.BORDER_REPLICATE)
+        edge_rot  = cv2.warpAffine(edge_p, M, (nW, nH))
+    else:
+        nW, nH = pw, ph
+        patch_rot = patch
+        edge_rot  = edge_p
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    edge_dil = cv2.dilate(edge_rot, kernel)
+    return {"angle": float(angle), "scale": float(scale),
+            "patch": patch_rot, "edge_dil": edge_dil,
+            "nW": nW, "nH": nH}
+
+
+def _build_search_grid(angle_low, angle_high, angle_step,
+                        scale_low, scale_high, scale_step):
+    if abs(angle_high - angle_low) < 0.5:
+        angles = [0.0]
+    else:
+        step = max(0.5, angle_step)
+        angles = list(np.arange(angle_low, angle_high + step * 0.5, step))
+        if 0.0 not in [round(a, 2) for a in angles]:
+            angles.append(0.0)
+    if abs(scale_high - scale_low) < 0.01:
+        scales = [1.0]
+    else:
+        step_s = max(0.01, scale_step)
+        scales = list(np.arange(scale_low, scale_high + step_s * 0.5, step_s))
+    return angles, scales
+
+
+def precompute_templates(model: PatMaxModel) -> int:
+    """Build precomputed_templates từ ranges đã lưu trong model.
+    Trả về số lượng template đã build."""
+    if not model.is_valid():
+        return 0
+    angles, scales = _build_search_grid(
+        model.angle_low, model.angle_high, model.angle_step,
+        model.scale_low, model.scale_high, 0.1)
+    tmpls = []
+    for sc in scales:
+        for ang in angles:
+            tmpls.append(_build_template(model.patch_gray, model.edge_image, ang, sc))
+    model.precomputed_templates = tmpls
+    return len(tmpls)
+
+
 def train_patmax(image: np.ndarray,
                  roi: Tuple[int,int,int,int],
                  origin_offset: Tuple[float,float] = (0.5, 0.5),
                  canny_low: int = 50,
                  canny_high: int = 150,
                  shape_type: str = "rect",
-                 shape_data: Optional[dict] = None) -> PatMaxModel:
+                 shape_data: Optional[dict] = None,
+                 train_mode: str = "evaluate",
+                 angle_low: float = 0.0,
+                 angle_high: float = 0.0,
+                 angle_step: float = 5.0,
+                 scale_low: float = 1.0,
+                 scale_high: float = 1.0,
+                 scale_step: float = 0.1) -> PatMaxModel:
 
     x, y, w, h = roi
     H, W = image.shape[:2]
@@ -116,9 +190,9 @@ def train_patmax(image: np.ndarray,
     model_hash = hashlib.md5(gray.tobytes()).hexdigest()[:8]
 
     print(f"[PatMax Train] ROI=({x},{y},{w},{h}) shape={shape_type} "
-          f"edges={int(np.count_nonzero(edges))}  hash={model_hash}")
+          f"mode={train_mode}  edges={int(np.count_nonzero(edges))}  hash={model_hash}")
 
-    return PatMaxModel(
+    model = PatMaxModel(
         trained=True,
         train_roi=(x, y, w, h),
         origin_x=ox, origin_y=oy,
@@ -134,7 +208,14 @@ def train_patmax(image: np.ndarray,
         shape_type=shape_type,
         shape_data=dict(shape_data) if shape_data else None,
         mask=mask,
+        train_mode=train_mode if train_mode in ("evaluate", "create") else "evaluate",
+        angle_low=angle_low, angle_high=angle_high, angle_step=angle_step,
+        scale_low=scale_low, scale_high=scale_high,
     )
+    if model.train_mode == "create":
+        n = precompute_templates(model)
+        print(f"[PatMax Train] precomputed {n} DOF templates")
+    return model
 
 
 def _build_shape_mask(shape_type: str, shape_data: Optional[dict],
@@ -171,35 +252,18 @@ def _build_shape_mask(shape_type: str, shape_data: Optional[dict],
 # ═══════════════════════════════════════════════════════════════
 #  SEARCH — single angle/scale attempt
 # ═══════════════════════════════════════════════════════════════
-def _match_one(gray_img: np.ndarray,
-               model: PatMaxModel,
-               angle: float,
-               scale: float,
-               canny_lo: int,
-               canny_hi: int) -> Optional[Dict]:
+def _match_template(gray_img: np.ndarray,
+                     img_edges: np.ndarray,
+                     t: Dict) -> Optional[Dict]:
     """
-    Thử match với 1 cặp (angle, scale).
-    Trả về dict {score, cx, cy, tx, ty, nW, nH} hoặc None nếu template quá lớn.
+    Thử match một template đã build sẵn.
+    Trả về dict {score, cx, cy, tx, ty, nW, nH, ...} hoặc None nếu quá to.
     """
-    pw = max(4, int(model.pattern_w * scale))
-    ph = max(4, int(model.pattern_h * scale))
+    patch_rot = t["patch"]
+    edge_rot_d = t["edge_dil"]
+    nW = t["nW"]; nH = t["nH"]
+    angle = t["angle"]; scale = t["scale"]
     H, W = gray_img.shape[:2]
-
-    # Rotate + resize patch_gray
-    patch = cv2.resize(model.patch_gray, (pw, ph))
-    if abs(angle) > 0.1:
-        rad = math.radians(angle)
-        cos_a = abs(math.cos(rad)); sin_a = abs(math.sin(rad))
-        nW = int(ph * sin_a + pw * cos_a) + 2
-        nH = int(ph * cos_a + pw * sin_a) + 2
-        M  = cv2.getRotationMatrix2D((pw/2, ph/2), angle, 1.0)
-        M[0,2] += (nW - pw) / 2
-        M[1,2] += (nH - ph) / 2
-        patch_rot = cv2.warpAffine(patch, M, (nW, nH),
-                                    borderMode=cv2.BORDER_REPLICATE)
-    else:
-        nW, nH = pw, ph
-        patch_rot = patch
 
     if nW >= W - 2 or nH >= H - 2:
         return None
@@ -212,19 +276,6 @@ def _match_one(gray_img: np.ndarray,
         s_ncc = 0.0; loc_ncc = (0, 0)
 
     # ── Method 2: Edge-on-edge ───────────────────────────────────
-    img_edges = cv2.Canny(gray_img, canny_lo, canny_hi)
-
-    # Rotate edge template
-    edge_patch = cv2.resize(model.edge_image, (pw, ph))
-    if abs(angle) > 0.1:
-        edge_rot = cv2.warpAffine(edge_patch, M, (nW, nH))
-    else:
-        edge_rot = edge_patch
-
-    # Dilate để tăng tolerance
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    edge_rot_d = cv2.dilate(edge_rot, kernel)
-
     img_e_f    = img_edges.astype(np.float32) / 255.0
     templ_e_f  = edge_rot_d.astype(np.float32) / 255.0
 
@@ -295,55 +346,50 @@ def run_patmax(image: np.ndarray,
     gray_img = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     H, W     = gray_img.shape
 
-    # Build angle list
-    if abs(angle_high - angle_low) < 0.5:
-        angles = [0.0]
-    else:
-        step = max(0.5, angle_step)
-        angles = list(np.arange(angle_low, angle_high + step * 0.5, step))
-        if 0.0 not in [round(a, 2) for a in angles]:
-            angles.append(0.0)
+    canny_lo = model.canny_low
+    canny_hi = model.canny_high
+    img_edges = cv2.Canny(gray_img, canny_lo, canny_hi)
 
-    # Build scale list
-    if abs(scale_high - scale_low) < 0.01:
-        scales = [1.0]
+    # Chọn nguồn templates: precomputed (mode "create") hoặc build on-the-fly
+    use_precomputed = (model.train_mode == "create"
+                       and model.precomputed_templates)
+
+    if use_precomputed:
+        templates = model.precomputed_templates
+        print(f"[PatMax Search] using {len(templates)} precomputed templates  "
+              f"threshold={accept_threshold}")
     else:
-        step_s = max(0.01, scale_step)
-        scales = list(np.arange(scale_low, scale_high + step_s * 0.5, step_s))
+        angles, scales = _build_search_grid(angle_low, angle_high, angle_step,
+                                              scale_low, scale_high, scale_step)
+        templates = [_build_template(model.patch_gray, model.edge_image, ang, sc)
+                     for sc in scales for ang in angles]
+        print(f"[PatMax Search] evaluate-DOF: {len(templates)} templates "
+              f"(angles={len(angles)} × scales={len(scales)})  "
+              f"threshold={accept_threshold}")
 
     candidates: List[Dict] = []
     score_map = np.zeros((H, W), dtype=np.float32)
+    best_any = 0.0
 
-    canny_lo = model.canny_low
-    canny_hi = model.canny_high
+    for t in templates:
+        result = _match_template(gray_img, img_edges, t)
+        if result is None:
+            continue
 
-    print(f"[PatMax Search] angles={len(angles)} scales={len(scales)} "
-          f"threshold={accept_threshold}")
+        score = result["score"]
+        best_any = max(best_any, score)
 
-    best_any = 0.0   # track best score seen (for debugging)
+        tx, ty = result["tx"], result["ty"]
+        nW, nH = result["nW"], result["nH"]
+        s_for_map = result["s_ncc"]
+        if (0 <= ty < H - nH) and (0 <= tx < W - nW):
+            cy_i = min(int(result["cy"]), H-1)
+            cx_i = min(int(result["cx"]), W-1)
+            if score_map[cy_i, cx_i] < s_for_map:
+                score_map[cy_i, cx_i] = s_for_map
 
-    for sc in scales:
-        for ang in angles:
-            result = _match_one(gray_img, model, ang, sc, canny_lo, canny_hi)
-            if result is None:
-                continue
-
-            score = result["score"]
-            best_any = max(best_any, score)
-
-            # Accumulate score map (NCC component only, cleaner)
-            tx, ty = result["tx"], result["ty"]
-            nW, nH = result["nW"], result["nH"]
-            s_for_map = result["s_ncc"]
-            if (0 <= ty < H - nH) and (0 <= tx < W - nW):
-                # Mark center pixel on score map
-                cy_i = min(int(result["cy"]), H-1)
-                cx_i = min(int(result["cx"]), W-1)
-                if score_map[cy_i, cx_i] < s_for_map:
-                    score_map[cy_i, cx_i] = s_for_map
-
-            if score >= accept_threshold:
-                candidates.append(result)
+        if score >= accept_threshold:
+            candidates.append(result)
 
     print(f"[PatMax Search] best_score={best_any:.4f}  "
           f"candidates_above_threshold={len(candidates)}  "
@@ -519,8 +565,9 @@ def save_model(model: PatMaxModel, path: str):
             if not isinstance(getattr(model,k,None), np.ndarray)
             and not isinstance(getattr(model,k,None), type(None))
             or k in ("train_roi",)}
-    # Remove numpy arrays from meta
-    for key in ("patch_bgr","patch_gray","edge_image","thumbnail","mask"):
+    # Remove numpy arrays + non-serializable từ meta
+    for key in ("patch_bgr","patch_gray","edge_image","thumbnail","mask",
+                "precomputed_templates"):
         meta.pop(key, None)
 
     with open(base + ".json", "w") as f:
@@ -556,12 +603,17 @@ def load_model(path: str) -> Optional[PatMaxModel]:
             canny_high       = meta.get("canny_high", 150),
             shape_type       = meta.get("shape_type", "rect"),
             shape_data       = meta.get("shape_data"),
+            train_mode       = meta.get("train_mode", "evaluate"),
         )
         if os.path.exists(npath):
             npz = np.load(npath)
             for attr in ("patch_bgr","patch_gray","edge_image","thumbnail","mask"):
                 if attr in npz:
                     setattr(model, attr, npz[attr])
+        # Regenerate precomputed templates nếu mode == "create"
+        if model.train_mode == "create" and model.is_valid():
+            n = precompute_templates(model)
+            print(f"[PatMax Load] regenerated {n} DOF templates")
         return model
     except Exception as e:
         print(f"[PatMax] load_model error: {e}")

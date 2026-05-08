@@ -477,6 +477,29 @@ class PatMaxDialog(QDialog):
         self._canny_high = self._mk_spin("High Threshold", 150, 0, 500, cg)
         lay.addWidget(canny_grp)
 
+        # Train Mode
+        tm_grp = QGroupBox("Train Mode")
+        tmg = QVBoxLayout(tm_grp); tmg.setContentsMargins(10, 26, 10, 10); tmg.setSpacing(6)
+        self._train_mode_combo = QComboBox()
+        self._train_mode_combo.addItems([
+            "Evaluate DOFs At Runtime",
+            "Create DOF Templates",
+        ])
+        self._train_mode_combo.setStyleSheet(
+            "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+            "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+            "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+            "selection-background-color:#1a2236;}")
+        tmg.addWidget(self._train_mode_combo)
+        tm_hint = QLabel(
+            "• Evaluate DOFs At Runtime: train nhanh, search xử lý DOF khi run\n"
+            "• Create DOF Templates: precompute mọi (angle, scale) — search\n"
+            "  nhanh hơn nhưng train tốn thời gian + bộ nhớ")
+        tm_hint.setStyleSheet("color:#94a3b8; font-size:10px;")
+        tm_hint.setWordWrap(True)
+        tmg.addWidget(tm_hint)
+        lay.addWidget(tm_grp)
+
         # Train button
         self._btn_train = QPushButton("⚙  Train Pattern")
         self._btn_train.setFixedHeight(38)
@@ -627,6 +650,9 @@ class PatMaxDialog(QDialog):
             h, w = img.shape[:2]
             self._img_status.setText(
                 f"Image loaded: {w}×{h}  —  Kéo chuột để vẽ vùng Pattern")
+            # Restore train_mode combo nếu model đã có
+            tm = getattr(self._model, "train_mode", "evaluate") or "evaluate"
+            self._train_mode_combo.setCurrentIndex(1 if tm == "create" else 0)
             # Restore ROI nếu có
             if self._model.train_roi:
                 x,y,w2,h2 = self._model.train_roi
@@ -834,6 +860,11 @@ class PatMaxDialog(QDialog):
         self._train_status.setStyleSheet("color:#ffd700; font-size:11px;")
 
         try:
+            tm = "create" if self._train_mode_combo.currentIndex() == 1 else "evaluate"
+            ang_low_t  = self._sp_ang_low.value()  if self._chk_angle.isChecked() else 0.0
+            ang_high_t = self._sp_ang_high.value() if self._chk_angle.isChecked() else 0.0
+            sc_low_t   = self._sp_sc_low.value()   if self._chk_scale.isChecked() else 1.0
+            sc_high_t  = self._sp_sc_high.value()  if self._chk_scale.isChecked() else 1.0
             model = train_patmax(
                 self._current_image,
                 self._current_roi,
@@ -842,15 +873,15 @@ class PatMaxDialog(QDialog):
                 canny_high=self._canny_high.value(),
                 shape_type=self._current_shape,
                 shape_data=self._current_shape_data,
+                train_mode=tm,
+                angle_low=ang_low_t, angle_high=ang_high_t,
+                angle_step=self._sp_ang_step.value(),
+                scale_low=sc_low_t, scale_high=sc_high_t,
+                scale_step=self._sp_sc_step.value(),
             )
-            # Lưu search params vào model
+            # Lưu thêm các params còn lại
             model.accept_threshold = self._sp_threshold.value()
-            model.angle_low  = self._sp_ang_low.value()  if self._chk_angle.isChecked() else 0.0
-            model.angle_high = self._sp_ang_high.value() if self._chk_angle.isChecked() else 0.0
-            model.angle_step = self._sp_ang_step.value()
-            model.scale_low  = self._sp_sc_low.value()   if self._chk_scale.isChecked() else 1.0
-            model.scale_high = self._sp_sc_high.value()  if self._chk_scale.isChecked() else 1.0
-            model.num_results= self._sp_num_results.value()
+            model.num_results = self._sp_num_results.value()
 
             self._model = model
             self._node.params["_patmax_model"] = model
