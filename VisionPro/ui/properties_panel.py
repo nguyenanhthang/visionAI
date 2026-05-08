@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                 QLineEdit, QSpinBox, QDoubleSpinBox,
                                 QComboBox, QCheckBox, QPushButton,
                                 QScrollArea, QFrame, QTabWidget, QFileDialog)
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage
 
 from core.flow_graph import FlowGraph, NodeInstance
@@ -453,10 +453,17 @@ class PropertiesPanel(QWidget):
         node = self._graph.nodes[node_id]
         node.params[name] = value
         self.params_changed.emit(node_id)
-        # Nếu có param khác phụ thuộc vào tên này → rebuild để cập nhật visibility
+        # Nếu có param khác phụ thuộc vào tên này → rebuild để cập nhật visibility.
+        # Defer qua event loop: nếu rebuild ngay trong slot sẽ xoá chính widget
+        # đang phát signal (vd QComboBox source_mode) → crash C++ deleted object.
         if any(getattr(p, "visible_if", None) and name in p.visible_if
                 for p in node.tool.params):
-            self._build_params_tab(node)
+            QTimer.singleShot(0, lambda nid=node_id: self._rebuild_params_if_current(nid))
+
+    def _rebuild_params_if_current(self, node_id: str):
+        if (self._graph and self._current_node_id == node_id
+                and node_id in self._graph.nodes):
+            self._build_params_tab(self._graph.nodes[node_id])
 
     def _refresh_outputs_tab(self, node: NodeInstance):
         self._out_scroll.setWidget(OutputsWidget(node))
