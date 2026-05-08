@@ -311,6 +311,14 @@ class PatMaxDialog(QDialog):
         for b in (self._btn_view_image, self._btn_view_scoremap, self._btn_view_edges):
             itl.addWidget(b)
 
+        itl.addSpacing(12)
+        self._btn_refresh = self._mk_small_btn("🔄 Refresh")
+        self._btn_refresh.setToolTip(
+            "Lấy ảnh mới từ upstream — xoá result_vis/score_map cũ, "
+            "giữ ROI + origin")
+        self._btn_refresh.clicked.connect(self._on_refresh_click)
+        itl.addWidget(self._btn_refresh)
+
         itl.addStretch()
         self._view_info = QLabel("")
         self._view_info.setStyleSheet("color:#1e2d45; font-size:10px; font-family:'Courier New';")
@@ -641,11 +649,77 @@ class PatMaxDialog(QDialog):
     # ════════════════════════════════════════════════════════════════
     #  Actions
     # ════════════════════════════════════════════════════════════════
+    def _on_refresh_click(self):
+        """Force refresh — luôn re-fetch và clear stale state."""
+        self._image_sig = None  # bypass equality check
+        if self._refresh_image_if_changed():
+            self._set_view("image")
+        else:
+            self._img_status.setText("⚠ Không có ảnh upstream để refresh.")
+
+    def _img_signature(self, arr) -> Optional[str]:
+        """Hash ngắn cho ảnh (down-sample 16x16 + md5) — phát hiện ảnh mới."""
+        if arr is None or not isinstance(arr, np.ndarray):
+            return None
+        try:
+            import hashlib, cv2
+            small = cv2.resize(arr, (16, 16))
+            return hashlib.md5(small.tobytes()).hexdigest()[:12]
+        except Exception:
+            return f"{arr.shape}-{arr.dtype}"
+
+    def _refresh_image_if_changed(self) -> bool:
+        """Nếu ảnh upstream khác ảnh hiện tại → xoá kết quả cũ, cập nhật canvas.
+        ROI + origin marker vẫn giữ lại (đọc từ model). Trả về True nếu đã refresh.
+        """
+        img = self._get_input_image()
+        if img is None or not isinstance(img, np.ndarray):
+            return False
+        new_sig = self._img_signature(img)
+        old_sig = getattr(self, "_image_sig", None)
+        if new_sig == old_sig:
+            return False
+        self._image_sig = new_sig
+        self._current_image = img
+        # Xoá render cũ — không phụ thuộc ảnh
+        self._results = []
+        self._score_map_img = None
+        self._result_vis = None
+        if hasattr(self, "_result_table"):
+            self._result_table.setRowCount(0)
+        if hasattr(self, "_search_summary"):
+            self._search_summary.setText("Image mới — chạy search lại.")
+            self._search_summary.setStyleSheet(
+                "background:#0d1220; color:#94a3b8; font-size:11px;"
+                "font-family:'Courier New'; padding:8px; border-radius:4px;")
+        # Cập nhật canvas: ảnh mới + restore ROI/origin từ model
+        self._img_label.set_image(img)
+        if self._model and self._model.train_roi:
+            x, y, w2, h2 = self._model.train_roi
+            st = getattr(self._model, "shape_type", "rect") or "rect"
+            sd = getattr(self._model, "shape_data", None)
+            self._img_label.set_shape_mode(st)
+            if sd:
+                self._img_label.set_shape_data(st, sd)
+            else:
+                self._img_label.set_rect_from_params(x, y, w2, h2)
+            self._img_label.set_origin(x + self._model.origin_x,
+                                        y + self._model.origin_y)
+        else:
+            self._img_label.set_origin(None, None)
+        h, w = img.shape[:2]
+        self._img_status.setText(
+            f"🔄 Image refreshed: {w}×{h}  —  drawings cũ đã xoá")
+        # View phải về raw image (vì result_vis đã clear)
+        self._current_view = "image"
+        return True
+
     def _load_upstream_image(self):
         """Lấy ảnh từ upstream node."""
         img = self._get_input_image()
         if img is not None and isinstance(img, np.ndarray):
             self._current_image = img
+            self._image_sig = self._img_signature(img)
             self._img_label.set_image(img)
             h, w = img.shape[:2]
             self._img_status.setText(
@@ -913,11 +987,14 @@ class PatMaxDialog(QDialog):
         if not self._model.is_valid():
             QMessageBox.warning(self, "Search", "Chưa train model.")
             return
+        # Tự refresh nếu upstream đổi ảnh
+        self._refresh_image_if_changed()
         img = self._current_image if self._current_image is not None else self._get_input_image()
         if img is None:
             QMessageBox.warning(self, "Search", "Không có ảnh để search.")
             return
         self._current_image = img
+        self._image_sig = self._img_signature(img)
 
         self._search_progress.show()
         self._search_progress.setValue(30)
@@ -1160,6 +1237,8 @@ class PatMaxDialog(QDialog):
     def _run_pipeline_node(self):
         """Chạy pipeline node PatMax (dùng model đã train)."""
         node = self._node
+        # Refresh nếu ảnh upstream đã đổi
+        self._refresh_image_if_changed()
         img  = self._current_image if self._current_image is not None else self._get_input_image()
         if img is None:
             QMessageBox.warning(self, "Run", "Không có ảnh.")

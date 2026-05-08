@@ -89,12 +89,16 @@ class ParamRow(QWidget):
         le.textChanged.connect(lambda t: self.value_changed.emit(p.name, t))
         hl.addWidget(le)
         if "path" in p.name.lower():
-            btn = QPushButton("…")
-            btn.setFixedWidth(24)
+            is_folder = "folder" in p.name.lower() or "dir" in p.name.lower()
+            btn = QPushButton("📂" if is_folder else "…")
+            btn.setFixedWidth(28)
             btn.setStyleSheet(
                 "QPushButton{background:#1e2d45;border:none;border-radius:3px;color:#e2e8f0;}"
                 "QPushButton:hover{background:#00d4ff;color:#000;}")
-            btn.clicked.connect(lambda: self._browse_file(le))
+            if is_folder:
+                btn.clicked.connect(lambda: self._browse_folder(le))
+            else:
+                btn.clicked.connect(lambda: self._browse_file(le))
             hl.addWidget(btn)
         return w
 
@@ -102,6 +106,12 @@ class ParamRow(QWidget):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select File", "",
             "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.tif);;All Files (*)")
+        if path:
+            le.setText(path)
+
+    def _browse_folder(self, le: QLineEdit):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Image Folder", le.text() or "")
         if path:
             le.setText(path)
 

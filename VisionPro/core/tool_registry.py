@@ -72,20 +72,50 @@ def _draw_pass_fail(img, is_pass, text=""):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_acquire_image(inputs, params):
-    """CogAcqFifoTool — Acquire image từ file hoặc camera."""
+    """CogAcqFifoTool — Acquire image từ file đơn hoặc folder (frame index).
+
+    Ưu tiên: folder_path > file_path.
+    Khi folder_path là thư mục có ảnh, sẽ lấy ảnh tại index `frame_index`
+    (modulo số file). Hỗ trợ .png .jpg .jpeg .bmp .tif .tiff.
+    """
+    folder = params.get("folder_path", "") or ""
+    files = []
+    if folder and os.path.isdir(folder):
+        exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+        try:
+            files = sorted(
+                f for f in os.listdir(folder)
+                if f.lower().endswith(exts) and os.path.isfile(os.path.join(folder, f))
+            )
+        except OSError:
+            files = []
+
+    if files:
+        idx = int(params.get("frame_index", 0)) % len(files)
+        path = os.path.join(folder, files[idx])
+        img = cv2.imread(path)
+        if img is not None:
+            h, w = img.shape[:2]
+            return {"image": img, "width": w, "height": h,
+                    "acquired": True, "frame_number": idx,
+                    "file_name": files[idx], "frame_count": len(files)}
+
     path = params.get("file_path", "")
     if path and os.path.exists(path):
         img = cv2.imread(path)
         if img is not None:
-            h,w = img.shape[:2]
+            h, w = img.shape[:2]
             return {"image": img, "width": w, "height": h,
-                    "acquired": True, "frame_number": 0}
+                    "acquired": True, "frame_number": 0,
+                    "file_name": os.path.basename(path), "frame_count": 1}
+
     w = max(1, params.get("width", 640))
     h = max(1, params.get("height", 480))
-    img = np.zeros((h,w,3), dtype=np.uint8)
-    cv2.putText(img,"No Image Acquired",(w//2-120,h//2),
-                cv2.FONT_HERSHEY_SIMPLEX,1,(50,50,80),2)
-    return {"image":img,"width":w,"height":h,"acquired":False,"frame_number":0}
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    cv2.putText(img, "No Image Acquired", (w//2 - 120, h//2),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (50, 50, 80), 2)
+    return {"image": img, "width": w, "height": h, "acquired": False,
+            "frame_number": 0, "file_name": "", "frame_count": 0}
 
 def proc_camera_acquire(inputs, params):
     """CogAcqFifoTool (Camera) — Capture từ camera."""
@@ -143,7 +173,8 @@ def proc_patmax(inputs, params):
     if results:
         r = results[0]
         return {"image": vis, "found": True, "score": r.score,
-                "x": r.x, "y": r.y, "angle": r.angle, "scale": r.scale,
+                "x": r.origin_x, "y": r.origin_y,
+                "angle": r.angle, "scale": r.scale,
                 "num_found": len(results)}
     return {"image": vis, "found": False, "score": 0.0,
             "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
@@ -1210,10 +1241,15 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
   ToolDef("acquire_image","Acquire Image","Acquire Image",
-    "Load ảnh từ file — CogAcqFifoTool","#0f3460","🖼",
+    "Load ảnh từ file hoặc folder — CogAcqFifoTool","#0f3460","🖼",
     [],[PortDef("image","image"),PortDef("width","number"),PortDef("height","number"),
-        PortDef("acquired","bool")],
-    [P("file_path","Image File","str","",tooltip="Đường dẫn file ảnh"),
+        PortDef("acquired","bool"),PortDef("frame_number","number"),
+        PortDef("frame_count","number"),PortDef("file_name","str")],
+    [P("folder_path","Image Folder","str","",
+        tooltip="Thư mục chứa ảnh (ưu tiên hơn file_path khi có ảnh)"),
+     P("frame_index","Frame Index","int",0,0,99999,
+        tooltip="Index ảnh trong folder — sẽ tự modulo theo số file"),
+     P("file_path","Image File","str","",tooltip="Đường dẫn 1 file ảnh"),
      P("width","Width","int",640,1,8192),P("height","Height","int",480,1,8192)],
     proc_acquire_image, "CogAcqFifoTool"),
 
