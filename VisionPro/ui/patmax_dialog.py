@@ -25,7 +25,10 @@ from PySide6.QtGui import (QPixmap, QImage, QFont, QColor, QPainter,
 
 from core.flow_graph import NodeInstance, FlowGraph
 from core.patmax_engine import (PatMaxModel, PatMaxResult, train_patmax,
-                                  run_patmax, draw_patmax_results,
+                                  train_patmax_multi_region,
+                                  train_patmax_multi_pattern,
+                                  run_patmax, run_patmax_multi,
+                                  draw_patmax_results,
                                   save_model, load_model)
 
 
@@ -198,6 +201,10 @@ class PatMaxDialog(QDialog):
         self._results: List[PatMaxResult] = []
         self._score_map_img: Optional[np.ndarray] = None
         self._current_image: Optional[np.ndarray] = None
+        # ROI mode: "single" | "multi_region" | "multi_pattern"
+        self._roi_mode: str = node.params.get("_patmax_roi_mode", "single")
+        # Multi-pattern models (chỉ dùng khi roi_mode == "multi_pattern")
+        self._models: List[PatMaxModel] = node.params.get("_patmax_models") or []
 
         self.setWindowTitle(f"🎯  PatMax Pattern Align Tool  —  {node.tool.name}")
         self.setMinimumSize(1100, 720)
@@ -336,7 +343,11 @@ class PatMaxDialog(QDialog):
         self._img_label.roi_changed.connect(self._on_roi_drawn)
         self._img_label.origin_changed.connect(self._on_origin_dragged)
         self._img_label.shape_drawn.connect(self._on_shape_drawn)
+        self._img_label.shapes_changed.connect(self._on_shapes_changed)
         self._img_label.setMinimumSize(600, 400)
+        # Bật multi-shape ngay nếu mode đã là multi_*
+        if self._roi_mode in ("multi_region", "multi_pattern"):
+            self._img_label.set_multi_shape(True)
         rl.addWidget(self._img_label, 1)
         self._current_shape: str = "rect"
         self._current_shape_data: Optional[dict] = None
@@ -419,6 +430,56 @@ class PatMaxDialog(QDialog):
             self._on_train_display_changed)
         mr_lay.addWidget(lbl_dm); mr_lay.addWidget(self._train_display_combo, 1)
         lay.addWidget(mode_row)
+
+        # ROI Mode — Single / Multi-Region (gộp 1 pattern) / Multi-Pattern (độc lập)
+        roi_mode_row = QWidget(); rm_lay = QHBoxLayout(roi_mode_row)
+        rm_lay.setContentsMargins(0, 0, 0, 0); rm_lay.setSpacing(6)
+        lbl_rm = QLabel("ROI Mode:")
+        lbl_rm.setStyleSheet("color:#94a3b8; font-size:11px;")
+        lbl_rm.setMinimumWidth(60)
+        self._roi_mode_combo = QComboBox()
+        self._roi_mode_combo.addItems([
+            "Single ROI",
+            "Multi-Region (gộp 1 pattern)",
+            "Multi-Pattern (nhiều pattern độc lập)",
+        ])
+        self._roi_mode_combo.setStyleSheet(
+            "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+            "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+            "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+            "selection-background-color:#1a2236;}")
+        self._roi_mode_combo.setToolTip(
+            "Single: 1 ROI duy nhất (vẽ lại = thay).\n"
+            "Multi-Region: vẽ nhiều ROI → gộp thành 1 pattern duy nhất.\n"
+            "Multi-Pattern: vẽ nhiều ROI → train mỗi cái 1 pattern riêng,\n"
+            "search trả kết quả gộp từ tất cả pattern."
+        )
+        self._roi_mode_combo.currentIndexChanged.connect(self._on_roi_mode_changed)
+        # Khôi phục mode đã lưu
+        mode_idx = {"single": 0, "multi_region": 1, "multi_pattern": 2}.get(
+            self._roi_mode, 0)
+        self._roi_mode_combo.setCurrentIndex(mode_idx)
+        rm_lay.addWidget(lbl_rm); rm_lay.addWidget(self._roi_mode_combo, 1)
+        lay.addWidget(roi_mode_row)
+
+        # Shape list (chỉ hiện trong multi mode)
+        self._shape_list_lbl = QLabel("Shapes: 0")
+        self._shape_list_lbl.setStyleSheet(
+            "color:#ffd700; font-size:10px; font-family:'Courier New';"
+            "padding:3px 6px; background:#0d1a2a; border-radius:3px;")
+        self._shape_list_lbl.setVisible(mode_idx > 0)
+        lay.addWidget(self._shape_list_lbl)
+
+        btn_clear_shapes = QPushButton("🗑  Clear All Shapes")
+        btn_clear_shapes.setFixedHeight(24)
+        btn_clear_shapes.setStyleSheet(
+            "QPushButton{background:#2a1a1a;border:1px solid #5c2a2a;"
+            "border-radius:3px;color:#ff8c8c;font-size:10px;}"
+            "QPushButton:hover{background:#5c2a2a;color:#fff;}")
+        btn_clear_shapes.clicked.connect(self._on_clear_shapes)
+        btn_clear_shapes.setVisible(mode_idx > 0)
+        self._btn_clear_shapes = btn_clear_shapes
+        lay.addWidget(btn_clear_shapes)
 
         # Shape selector
         shape_grp = QGroupBox("ROI Shape")
@@ -821,6 +882,28 @@ class PatMaxDialog(QDialog):
             # Restore train_mode combo nếu model đã có
             tm = getattr(self._model, "train_mode", "evaluate") or "evaluate"
             self._train_mode_combo.setCurrentIndex(1 if tm == "create" else 0)
+            # Restore multi-ROI nếu mode đã lưu
+            if self._roi_mode == "multi_region" and self._model.is_valid() \
+                    and self._model.shape_type == "multi":
+                regions = (self._model.shape_data or {}).get("regions") or []
+                if regions:
+                    self._img_label.set_multi_shape(True)
+                    QTimer.singleShot(110,
+                        lambda r=list(regions): self._img_label.set_shapes(r))
+                    self._on_shapes_changed(regions)
+                    return
+            if self._roi_mode == "multi_pattern" and self._models:
+                ms_list = []
+                for mm in self._models:
+                    if mm.shape_data and mm.shape_type:
+                        e = {"type": mm.shape_type}; e.update(mm.shape_data)
+                        ms_list.append(e)
+                if ms_list:
+                    self._img_label.set_multi_shape(True)
+                    QTimer.singleShot(110,
+                        lambda L=ms_list: self._img_label.set_shapes(L))
+                    self._on_shapes_changed(ms_list)
+                    return
             # Restore ROI nếu có
             if self._model.train_roi:
                 x,y,w2,h2 = self._model.train_roi
@@ -861,10 +944,15 @@ class PatMaxDialog(QDialog):
         m = {0: "rect", 1: "circle", 2: "ellipse", 3: "polygon"}
         s = m.get(idx, "rect")
         self._current_shape = s
-        self._current_shape_data = None
-        self._current_roi = None
+        # Trong multi mode: KHÔNG xoá shape_data hiện có (giữ list); chỉ đổi shape mới sẽ vẽ
+        if self._roi_mode == "single":
+            self._current_shape_data = None
+            self._current_roi = None
         if hasattr(self, "_img_label"):
-            self._img_label.set_shape_mode(s)
+            if self._roi_mode == "single":
+                self._img_label.set_shape_mode(s)
+            else:
+                self._img_label.set_next_shape_type(s)
         hints = {
             "rect":     "Kéo chuột vẽ Rectangle",
             "circle":   "Kéo từ tâm ra rìa để vẽ Circle",
@@ -872,6 +960,49 @@ class PatMaxDialog(QDialog):
             "polygon":  "Click từng đỉnh — double-click đóng, right-click huỷ",
         }
         self._img_status.setText(f"Shape: {s} — {hints[s]}")
+
+    # ── Multi-ROI handlers ─────────────────────────────────────────
+    def _on_roi_mode_changed(self, idx: int):
+        modes = ["single", "multi_region", "multi_pattern"]
+        new_mode = modes[idx] if 0 <= idx < len(modes) else "single"
+        self._roi_mode = new_mode
+        is_multi = (new_mode != "single")
+        # Sync visibility
+        if hasattr(self, "_shape_list_lbl"):
+            self._shape_list_lbl.setVisible(is_multi)
+        if hasattr(self, "_btn_clear_shapes"):
+            self._btn_clear_shapes.setVisible(is_multi)
+        # Sync canvas
+        if hasattr(self, "_img_label"):
+            self._img_label.set_multi_shape(is_multi)
+            if not is_multi:
+                # Clear existing list khi về Single
+                self._img_label.clear_shapes()
+                self._models = []
+        # Save vào params để bền giữa các lần mở dialog
+        self._node.params["_patmax_roi_mode"] = new_mode
+        labels = ["Single ROI",
+                  "Multi-Region (gộp 1 pattern)",
+                  "Multi-Pattern (mỗi ROI 1 pattern)"]
+        self._img_status.setText(f"ROI Mode: {labels[idx]}")
+
+    def _on_clear_shapes(self):
+        if hasattr(self, "_img_label"):
+            self._img_label.clear_shapes()
+        self._current_roi = None
+        self._current_shape_data = None
+        self._models = []
+        if hasattr(self, "_shape_list_lbl"):
+            self._shape_list_lbl.setText("Shapes: 0")
+
+    def _on_shapes_changed(self, shapes: list):
+        if hasattr(self, "_shape_list_lbl"):
+            n = len(shapes)
+            types = [s.get("type", "?")[0:3] for s in shapes]   # rec/cir/ell/pol
+            preview = ", ".join(f"#{i+1}:{t}" for i, t in enumerate(types[:6]))
+            if n > 6:
+                preview += f" ... +{n-6}"
+            self._shape_list_lbl.setText(f"Shapes: {n}  [{preview}]" if n else "Shapes: 0")
 
     # ── Origin point handling ──────────────────────────────────────
     def _preset_offset(self, idx: int) -> Optional[Tuple[float, float]]:
@@ -998,30 +1129,23 @@ class PatMaxDialog(QDialog):
         if self._current_image is None:
             QMessageBox.warning(self, "Train", "Chưa có ảnh. Hãy chạy pipeline trước.")
             return
-        if self._current_roi is None:
-            QMessageBox.warning(self, "Train",
-                                "Hãy kéo chuột trên ảnh để vẽ vùng Pattern trước.")
-            return
 
-        x, y, w, h = self._current_roi
-        if w < 8 or h < 8:
-            QMessageBox.warning(self, "Train", "Vùng ROI quá nhỏ (min 8×8 px).")
-            return
-
-        # Origin offset — tính từ toạ độ origin (x,y) thực tế trên ảnh.
-        # KHÔNG clamp: cho phép origin nằm ngoài ROI (offset âm hoặc >1).
-        idx = self._origin_combo.currentIndex()
-        preset = self._preset_offset(idx)
-        if preset is not None:
-            origin_off = preset
+        is_multi = (self._roi_mode in ("multi_region", "multi_pattern"))
+        if is_multi:
+            shapes = self._img_label.get_shapes() if hasattr(self, "_img_label") else []
+            if not shapes:
+                QMessageBox.warning(self, "Train",
+                                    "Chưa có ROI nào. Vẽ ít nhất 1 vùng Pattern.")
+                return
         else:
-            ox = self._sp_origin_x.value()
-            oy = self._sp_origin_y.value()
-            denom_w = float(w) if w > 0 else 1.0
-            denom_h = float(h) if h > 0 else 1.0
-            fx = (ox - x) / denom_w
-            fy = (oy - y) / denom_h
-            origin_off = (fx, fy)
+            if self._current_roi is None:
+                QMessageBox.warning(self, "Train",
+                                    "Hãy kéo chuột trên ảnh để vẽ vùng Pattern trước.")
+                return
+            x, y, w, h = self._current_roi
+            if w < 8 or h < 8:
+                QMessageBox.warning(self, "Train", "Vùng ROI quá nhỏ (min 8×8 px).")
+                return
 
         self._btn_train.setEnabled(False)
         self._train_status.setText("Training...")
@@ -1033,39 +1157,116 @@ class PatMaxDialog(QDialog):
             ang_high_t = self._sp_ang_high.value() if self._chk_angle.isChecked() else 0.0
             sc_low_t   = self._sp_sc_low.value()   if self._chk_scale.isChecked() else 1.0
             sc_high_t  = self._sp_sc_high.value()  if self._chk_scale.isChecked() else 1.0
-            model = train_patmax(
-                self._current_image,
-                self._current_roi,
-                origin_offset=origin_off,
-                canny_low=self._canny_low.value(),
-                canny_high=self._canny_high.value(),
-                shape_type=self._current_shape,
-                shape_data=self._current_shape_data,
-                train_mode=tm,
-                angle_low=ang_low_t, angle_high=ang_high_t,
-                angle_step=self._sp_ang_step.value(),
-                scale_low=sc_low_t, scale_high=sc_high_t,
-                scale_step=self._sp_sc_step.value(),
-            )
-            # Lưu thêm các params còn lại
-            model.accept_threshold = self._sp_threshold.value()
-            model.num_results = self._sp_num_results.value()
 
-            self._model = model
-            self._node.params["_patmax_model"] = model
+            if self._roi_mode == "multi_region":
+                model = train_patmax_multi_region(
+                    self._current_image, shapes,
+                    origin_offset=(0.5, 0.5),
+                    canny_low=self._canny_low.value(),
+                    canny_high=self._canny_high.value(),
+                    train_mode=tm,
+                    angle_low=ang_low_t, angle_high=ang_high_t,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low_t, scale_high=sc_high_t,
+                    scale_step=self._sp_sc_step.value(),
+                )
+                if model is None:
+                    raise RuntimeError("Multi-region train trả về None.")
+                model.accept_threshold = self._sp_threshold.value()
+                model.num_results = self._sp_num_results.value()
+                self._model = model
+                self._models = [model]
+                self._node.params["_patmax_model"] = model
+                self._node.params.pop("_patmax_models", None)
+                ux, uy = model.train_roi[0], model.train_roi[1]
+                self._set_origin(ux + model.origin_x, uy + model.origin_y,
+                                  from_user=False)
+                self._model_preview.update_model(model)
+                self._status_chip.setText(
+                    f"● TRAINED  multi-region ({len(shapes)} ROIs)")
+                self._status_chip.setStyleSheet(
+                    "color:#39ff14; font-size:12px; font-weight:700; background:transparent;")
+                self._train_status.setText(
+                    f"✔ Multi-Region OK  |  {model.edge_count} edge px  |  "
+                    f"Pattern {model.pattern_w}×{model.pattern_h}  ({len(shapes)} ROIs)")
+                self._train_status.setStyleSheet("color:#39ff14; font-size:11px;")
 
-            # Cập nhật marker origin (đã trained) — toạ độ tuyệt đối ảnh
-            self._set_origin(x + model.origin_x, y + model.origin_y, from_user=False)
+            elif self._roi_mode == "multi_pattern":
+                models = train_patmax_multi_pattern(
+                    self._current_image, shapes,
+                    origin_offset=(0.5, 0.5),
+                    canny_low=self._canny_low.value(),
+                    canny_high=self._canny_high.value(),
+                    train_mode=tm,
+                    angle_low=ang_low_t, angle_high=ang_high_t,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low_t, scale_high=sc_high_t,
+                    scale_step=self._sp_sc_step.value(),
+                )
+                if not models:
+                    raise RuntimeError("Multi-pattern train không tạo được model nào.")
+                for m in models:
+                    m.accept_threshold = self._sp_threshold.value()
+                    m.num_results = self._sp_num_results.value()
+                self._models = models
+                self._model = models[0]
+                # Lưu list vào node.params (proc_patmax sẽ phát hiện và dùng run_patmax_multi)
+                self._node.params["_patmax_models"] = models
+                self._node.params["_patmax_model"]  = models[0]
+                self._model_preview.update_model(models[0])
+                self._status_chip.setText(
+                    f"● TRAINED  multi-pattern ({len(models)} patterns)")
+                self._status_chip.setStyleSheet(
+                    "color:#39ff14; font-size:12px; font-weight:700; background:transparent;")
+                edges_total = sum(m.edge_count for m in models)
+                self._train_status.setText(
+                    f"✔ Multi-Pattern OK  |  {len(models)} patterns  |  "
+                    f"Σ edges = {edges_total}")
+                self._train_status.setStyleSheet("color:#39ff14; font-size:11px;")
 
-            self._model_preview.update_model(model)
-            self._status_chip.setText(f"● TRAINED  hash:{model.model_hash}")
-            self._status_chip.setStyleSheet(
-                "color:#39ff14; font-size:12px; font-weight:700; background:transparent;")
+            else:
+                # Single — original path
+                x, y, w, h = self._current_roi
+                idx = self._origin_combo.currentIndex()
+                preset = self._preset_offset(idx)
+                if preset is not None:
+                    origin_off = preset
+                else:
+                    ox = self._sp_origin_x.value()
+                    oy = self._sp_origin_y.value()
+                    denom_w = float(w) if w > 0 else 1.0
+                    denom_h = float(h) if h > 0 else 1.0
+                    origin_off = ((ox - x) / denom_w, (oy - y) / denom_h)
 
-            self._train_status.setText(
-                f"✔ Trained OK  |  {model.edge_count} edge pixels  |  "
-                f"Pattern {model.pattern_w}×{model.pattern_h}")
-            self._train_status.setStyleSheet("color:#39ff14; font-size:11px;")
+                model = train_patmax(
+                    self._current_image, self._current_roi,
+                    origin_offset=origin_off,
+                    canny_low=self._canny_low.value(),
+                    canny_high=self._canny_high.value(),
+                    shape_type=self._current_shape,
+                    shape_data=self._current_shape_data,
+                    train_mode=tm,
+                    angle_low=ang_low_t, angle_high=ang_high_t,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low_t, scale_high=sc_high_t,
+                    scale_step=self._sp_sc_step.value(),
+                )
+                model.accept_threshold = self._sp_threshold.value()
+                model.num_results = self._sp_num_results.value()
+                self._model = model
+                self._models = [model]
+                self._node.params["_patmax_model"] = model
+                self._node.params.pop("_patmax_models", None)
+                self._set_origin(x + model.origin_x, y + model.origin_y,
+                                  from_user=False)
+                self._model_preview.update_model(model)
+                self._status_chip.setText(f"● TRAINED  hash:{model.model_hash}")
+                self._status_chip.setStyleSheet(
+                    "color:#39ff14; font-size:12px; font-weight:700; background:transparent;")
+                self._train_status.setText(
+                    f"✔ Trained OK  |  {model.edge_count} edge pixels  |  "
+                    f"Pattern {model.pattern_w}×{model.pattern_h}")
+                self._train_status.setStyleSheet("color:#39ff14; font-size:11px;")
 
             # Show edge model
             self._set_view("edges")
@@ -1102,16 +1303,28 @@ class PatMaxDialog(QDialog):
 
             self._search_progress.setValue(50)
 
-            results, score_map_vis = run_patmax(
-                img, self._model,
-                accept_threshold=self._sp_threshold.value(),
-                angle_low=ang_low, angle_high=ang_high,
-                angle_step=self._sp_ang_step.value(),
-                scale_low=sc_low, scale_high=sc_high,
-                scale_step=self._sp_sc_step.value(),
-                num_results=self._sp_num_results.value(),
-                overlap_threshold=self._sp_overlap.value(),
-            )
+            if self._roi_mode == "multi_pattern" and self._models:
+                results, score_map_vis = run_patmax_multi(
+                    img, self._models,
+                    accept_threshold=self._sp_threshold.value(),
+                    angle_low=ang_low, angle_high=ang_high,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low, scale_high=sc_high,
+                    scale_step=self._sp_sc_step.value(),
+                    num_results_per_model=self._sp_num_results.value(),
+                    overlap_threshold=self._sp_overlap.value(),
+                )
+            else:
+                results, score_map_vis = run_patmax(
+                    img, self._model,
+                    accept_threshold=self._sp_threshold.value(),
+                    angle_low=ang_low, angle_high=ang_high,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low, scale_high=sc_high,
+                    scale_step=self._sp_sc_step.value(),
+                    num_results=self._sp_num_results.value(),
+                    overlap_threshold=self._sp_overlap.value(),
+                )
 
             self._search_progress.setValue(80)
             self._results = results

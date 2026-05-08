@@ -6,7 +6,7 @@ Fix crop_roi:
   - Mode hint thông minh hiển thị đang dùng mode nào
 """
 from __future__ import annotations
-from typing import Optional, Any, Tuple
+from typing import Optional, Any, List, Tuple
 import numpy as np
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
@@ -41,6 +41,7 @@ class InteractiveImageLabel(QLabel):
     template_drawn = Signal(int, int, int, int)
     origin_changed = Signal(float, float)   # image coords (float)
     shape_drawn    = Signal(str, dict)      # shape_type, data (image coords)
+    shapes_changed = Signal(list)           # multi-mode: list of {"type", **data}
 
     def __init__(self, mode="view", parent=None):
         super().__init__(parent)
@@ -66,8 +67,15 @@ class InteractiveImageLabel(QLabel):
         self._edit_action: Optional[str] = None    # "move" | "tl" | "tr" | "bl" | "br"
         self._edit_anchor_w: Optional[QPoint] = None
         self._edit_orig_data: dict = {}
+        # Multi-shape (opt-in qua set_multi_shape(True)). Khi tắt, behaviour
+        # giống single-shape (chỉ dùng _shape_data). Khi bật, _shapes là
+        # nguồn lưu trữ chính, _shape_data + _active_idx là shape đang active.
+        self._multi: bool = False
+        self._shapes: List[dict] = []     # mỗi entry: {"type": str, "data": dict}
+        self._active_idx: Optional[int] = None
 
         self.setAlignment(Qt.AlignCenter)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet(
@@ -106,13 +114,24 @@ class InteractiveImageLabel(QLabel):
         self._render()
 
     def set_shape_mode(self, shape: str):
-        """Đặt loại shape: 'rect' | 'circle' | 'ellipse' | 'polygon'."""
+        """Đặt loại shape: 'rect' | 'circle' | 'ellipse' | 'polygon'.
+        XOÁ shape_data hiện tại (single-mode reset). Multi-mode dùng
+        set_next_shape_type() để giữ list."""
         if shape not in ("rect", "circle", "ellipse", "polygon"):
             shape = "rect"
         self._shape = shape
         self._poly_drawing = []
         self._rect = None
         self._shape_data = {}
+        self._dragging = False
+        self._render()
+
+    def set_next_shape_type(self, shape: str):
+        """Multi-mode: chỉ đổi loại shape sẽ vẽ tiếp, KHÔNG xoá list/active."""
+        if shape not in ("rect", "circle", "ellipse", "polygon"):
+            shape = "rect"
+        self._shape = shape
+        self._poly_drawing = []
         self._dragging = False
         self._render()
 
@@ -138,6 +157,162 @@ class InteractiveImageLabel(QLabel):
         if self._poly_drawing:
             self._poly_drawing = []
             self._render()
+
+    # ── Multi-shape API ────────────────────────────────────────────
+    def set_multi_shape(self, enable: bool):
+        """Bật/tắt multi-shape. Tắt → xoá list, giữ shape hiện tại."""
+        if bool(enable) == self._multi:
+            return
+        self._multi = bool(enable)
+        if not self._multi:
+            self._shapes = []
+            self._active_idx = None
+        elif self._shape_data:
+            # Bật — đẩy shape hiện tại (nếu có) vào list để hiển thị nhất quán
+            self._shapes = [{"type": self._shape, "data": dict(self._shape_data)}]
+            self._active_idx = 0
+        self._render()
+
+    def get_shapes(self) -> List[dict]:
+        """List shapes cho caller. Mỗi entry: {"type", **data}."""
+        if self._multi:
+            out = []
+            for s in self._shapes:
+                e = {"type": s["type"]}
+                e.update(s["data"])
+                out.append(e)
+            return out
+        if self._shape_data:
+            e = {"type": self._shape}
+            e.update(self._shape_data)
+            return [e]
+        return []
+
+    def set_shapes(self, shapes: List[dict]):
+        """Khôi phục danh sách shapes. Mỗi entry: {"type", **data}."""
+        self._shapes = []
+        for s in shapes or []:
+            t = s.get("type", "rect")
+            d = {k: v for k, v in s.items() if k != "type"}
+            self._shapes.append({"type": t, "data": d})
+        if self._shapes:
+            self._active_idx = len(self._shapes) - 1
+            last = self._shapes[self._active_idx]
+            self._shape = last["type"]
+            self._shape_data = dict(last["data"])
+        else:
+            self._active_idx = None
+            self._shape_data = {}
+        self._render()
+
+    def clear_shapes(self):
+        self._shapes = []
+        self._active_idx = None
+        self._shape_data = {}
+        self._poly_drawing = []
+        self._rect = None
+        self._render()
+        self._emit_shapes_changed()
+
+    def delete_active_shape(self):
+        if not self._multi:
+            if self._shape_data:
+                self._shape_data = {}
+                self._render()
+                self._emit_shapes_changed()
+            return
+        if self._active_idx is None or not (0 <= self._active_idx < len(self._shapes)):
+            return
+        self._shapes.pop(self._active_idx)
+        if self._shapes:
+            self._active_idx = min(self._active_idx, len(self._shapes) - 1)
+            last = self._shapes[self._active_idx]
+            self._shape = last["type"]
+            self._shape_data = dict(last["data"])
+        else:
+            self._active_idx = None
+            self._shape_data = {}
+        self._render()
+        self._emit_shapes_changed()
+
+    def _emit_shapes_changed(self):
+        self.shapes_changed.emit(self.get_shapes())
+
+    def _commit_active_to_list(self):
+        """Đồng bộ _shape_data → _shapes[_active_idx] (multi-mode only)."""
+        if not self._multi or self._active_idx is None:
+            return
+        if 0 <= self._active_idx < len(self._shapes):
+            self._shapes[self._active_idx] = {
+                "type": self._shape, "data": dict(self._shape_data)}
+
+    def _bbox_of(self, stype: str, sd: dict) -> Optional[QRect]:
+        if not sd or stype not in ("rect", "ellipse", "circle"):
+            return None
+        if stype == "circle":
+            wx, wy = self._img_to_widget(sd["cx"], sd["cy"])
+            wr = int(sd["r"] * self._scale)
+            return QRect(wx - wr, wy - wr, 2 * wr, 2 * wr)
+        wx, wy = self._img_to_widget(sd["x"], sd["y"])
+        return QRect(wx, wy,
+                      int(sd["w"] * self._scale),
+                      int(sd["h"] * self._scale))
+
+    def _hit_test_shapes_list(self, wx: int, wy: int
+                                ) -> Optional[Tuple[int, str]]:
+        """Hit-test trên _shapes (multi-mode). Trả (idx, action)."""
+        if not self._multi:
+            return None
+        for i in reversed(range(len(self._shapes))):
+            entry = self._shapes[i]
+            if entry["type"] not in ("rect", "ellipse", "circle"):
+                continue
+            bb = self._bbox_of(entry["type"], entry["data"])
+            if bb is None:
+                continue
+            for name, (cx, cy) in (
+                ("tl", (bb.left(),  bb.top())),
+                ("tr", (bb.right(), bb.top())),
+                ("bl", (bb.left(),  bb.bottom())),
+                ("br", (bb.right(), bb.bottom())),
+            ):
+                if abs(wx - cx) <= 8 and abs(wy - cy) <= 8:
+                    return i, name
+            if bb.contains(wx, wy):
+                return i, "move"
+        return None
+
+    def _draw_one_shape(self, p: QPainter, stype: str, sd: dict,
+                         label_num: int = 0):
+        """Vẽ 1 shape không có handles — dùng cho các shape không-active trong list."""
+        if not sd:
+            return
+        if stype == "rect":
+            wx, wy = self._img_to_widget(sd["x"], sd["y"])
+            ww = int(sd["w"] * self._scale); wh = int(sd["h"] * self._scale)
+            p.drawRect(wx, wy, ww, wh)
+            if label_num:
+                p.drawText(wx + 4, wy + 14, f"#{label_num}")
+        elif stype == "ellipse":
+            wx, wy = self._img_to_widget(sd["x"], sd["y"])
+            ww = int(sd["w"] * self._scale); wh = int(sd["h"] * self._scale)
+            p.drawEllipse(wx, wy, ww, wh)
+            if label_num:
+                p.drawText(wx + 4, wy + 14, f"#{label_num}")
+        elif stype == "circle":
+            wx, wy = self._img_to_widget(sd["cx"], sd["cy"])
+            wr = int(sd["r"] * self._scale)
+            p.drawEllipse(wx - wr, wy - wr, wr * 2, wr * 2)
+            if label_num:
+                p.drawText(wx - wr + 4, wy - wr + 14, f"#{label_num}")
+        elif stype == "polygon" and sd.get("pts"):
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QPolygonF
+            pts_w = [QPointF(*self._img_to_widget(px, py)) for px, py in sd["pts"]]
+            p.drawPolygon(QPolygonF(pts_w))
+            if label_num and pts_w:
+                p.drawText(int(pts_w[0].x()) + 4,
+                            int(pts_w[0].y()) + 14, f"#{label_num}")
 
     def set_origin(self, x: Optional[float], y: Optional[float]):
         """Đặt điểm tham chiếu (origin) trên ảnh. Truyền (None,None) để ẩn."""
@@ -310,6 +485,18 @@ class InteractiveImageLabel(QLabel):
             col = QColor(0, 212, 255)
         fill = QColor(col.red(), col.green(), col.blue(), 28)
 
+        # Multi-mode: vẽ tất cả shapes đã commit (ngoài active đang edit) — dim hơn
+        if self._multi and self._shapes:
+            other_col = QColor(col.red(), col.green(), col.blue(), 200)
+            other_fill = QColor(col.red(), col.green(), col.blue(), 14)
+            p.setPen(QPen(other_col, 2, Qt.DotLine))
+            p.setBrush(QBrush(other_fill))
+            p.setFont(QFont("Courier New", 9, QFont.Bold))
+            for i, entry in enumerate(self._shapes):
+                if i == self._active_idx:
+                    continue
+                self._draw_one_shape(p, entry["type"], entry["data"], i + 1)
+
         # Shape đã hoàn tất (saved)
         sd = self._shape_data
         if sd:
@@ -457,31 +644,52 @@ class InteractiveImageLabel(QLabel):
                 self._poly_drawing.append((ix_f, iy_f))
                 self._render()
                 return
-            # rect / circle / ellipse — kiểm edit handle/body trước khi vẽ mới
-            if self._shape in ("rect", "ellipse", "circle") and self._shape_data:
-                corner = self._hit_corner(pos.x(), pos.y())
-                if corner:
-                    self._edit_action = corner
-                    self._edit_anchor_w = pos
-                    self._edit_orig_data = dict(self._shape_data)
-                    return
-                if self._hit_body(pos.x(), pos.y()):
-                    self._edit_action = "move"
-                    self._edit_anchor_w = pos
-                    self._edit_orig_data = dict(self._shape_data)
-                    return
-            # Click ngoài shape (hoặc chưa có shape) → vẽ mới (replace shape cũ)
+            # rect / circle / ellipse — multi: scan list trước; single: shape_data
+            self.setFocus()
+            if self._shape in ("rect", "ellipse", "circle"):
+                if self._multi:
+                    hit = self._hit_test_shapes_list(pos.x(), pos.y())
+                    if hit is not None:
+                        idx, action = hit
+                        # Commit active hiện tại trước khi đổi sang shape khác
+                        self._commit_active_to_list()
+                        entry = self._shapes[idx]
+                        self._active_idx = idx
+                        self._shape = entry["type"]
+                        self._shape_data = dict(entry["data"])
+                        self._edit_action = action  # "move"|"tl"|"tr"|"bl"|"br"
+                        self._edit_anchor_w = pos
+                        self._edit_orig_data = dict(entry["data"])
+                        self._render()
+                        return
+                # Single-mode (hoặc multi không hit) → check edit trên _shape_data
+                if self._shape_data:
+                    corner = self._hit_corner(pos.x(), pos.y())
+                    if corner:
+                        self._edit_action = corner
+                        self._edit_anchor_w = pos
+                        self._edit_orig_data = dict(self._shape_data)
+                        return
+                    if self._hit_body(pos.x(), pos.y()):
+                        self._edit_action = "move"
+                        self._edit_anchor_w = pos
+                        self._edit_orig_data = dict(self._shape_data)
+                        return
+            # Click ngoài shape (hoặc chưa có shape) → vẽ mới
+            if self._multi:
+                # Commit active hiện tại; multi-mode KHÔNG xoá list — append mới
+                self._commit_active_to_list()
+                self._active_idx = None
             self._drag_start = pos
             self._dragging   = True
             self._rect = QRect(pos, QSize(0, 0))
-            self._shape_data = {}    # xoá shape cũ để không hiển thị chồng
+            self._shape_data = {}    # xoá shape cũ (single mode); multi → tạo entry mới khi release
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if self.mode in ("roi", "template") and self._shape == "polygon" \
                 and len(self._poly_drawing) >= 3:
             pts = list(self._poly_drawing)
             self._poly_drawing = []
-            self._shape_data = {"pts": pts}
             xs = [px for px, _ in pts]; ys = [py for _, py in pts]
             x = int(min(xs)); y = int(min(ys))
             w = max(1, int(max(xs) - min(xs)))
@@ -490,9 +698,14 @@ class InteractiveImageLabel(QLabel):
                 H2, W2 = self._arr.shape[:2]
                 x = max(0, min(x, W2 - 1)); y = max(0, min(y, H2 - 1))
                 w = max(1, min(w, W2 - x)); h = max(1, min(h, H2 - y))
-            self.shape_drawn.emit("polygon", {"pts": pts,
-                                                "x": x, "y": y, "w": w, "h": h})
+            self._shape_data = {"pts": pts, "x": x, "y": y, "w": w, "h": h}
+            if self._multi:
+                self._shapes.append({"type": "polygon",
+                                      "data": dict(self._shape_data)})
+                self._active_idx = len(self._shapes) - 1
+            self.shape_drawn.emit("polygon", dict(self._shape_data))
             self.roi_changed.emit(x, y, w, h)
+            self._emit_shapes_changed()
             self._render()
         else:
             super().mouseDoubleClickEvent(event)
@@ -528,12 +741,15 @@ class InteractiveImageLabel(QLabel):
             sd = self._shape_data
             if sd and self._shape in ("rect", "ellipse", "circle") \
                     and "x" in sd and "y" in sd:
+                if self._multi:
+                    self._commit_active_to_list()
                 self.shape_drawn.emit(self._shape, dict(sd))
                 self.roi_changed.emit(int(sd["x"]), int(sd["y"]),
                                        int(sd["w"]), int(sd["h"]))
                 if self.mode == "template":
                     self.template_drawn.emit(int(sd["x"]), int(sd["y"]),
                                               int(sd["w"]), int(sd["h"]))
+                self._emit_shapes_changed()
             self._render()
             return
         if not self._dragging:
@@ -551,10 +767,8 @@ class InteractiveImageLabel(QLabel):
 
         if self._shape == "rect":
             self._shape_data = {"x": ix, "y": iy, "w": iw2, "h": ih2}
-            self.shape_drawn.emit("rect", dict(self._shape_data))
         elif self._shape == "ellipse":
             self._shape_data = {"x": ix, "y": iy, "w": iw2, "h": ih2}
-            self.shape_drawn.emit("ellipse", dict(self._shape_data))
         elif self._shape == "circle":
             cx_w = self._drag_start.x() if self._drag_start else 0
             cy_w = self._drag_start.y() if self._drag_start else 0
@@ -567,11 +781,19 @@ class InteractiveImageLabel(QLabel):
                 iw2 = min(iw2, W2 - ix); ih2 = min(ih2, H2 - iy)
             self._shape_data = {"cx": cx_i, "cy": cy_i, "r": r_i,
                                  "x": ix, "y": iy, "w": iw2, "h": ih2}
-            self.shape_drawn.emit("circle", dict(self._shape_data))
 
+        if self._multi and self._shape_data:
+            # Append shape mới vào list, set active = last
+            self._shapes.append({"type": self._shape,
+                                  "data": dict(self._shape_data)})
+            self._active_idx = len(self._shapes) - 1
+
+        if self._shape in ("rect", "ellipse", "circle"):
+            self.shape_drawn.emit(self._shape, dict(self._shape_data))
         self.roi_changed.emit(ix, iy, iw2, ih2)
         if self.mode == "template":
             self.template_drawn.emit(ix, iy, iw2, ih2)
+        self._emit_shapes_changed()
         self._render()
 
     def _update_origin_from_widget(self, wx: int, wy: int):
@@ -587,6 +809,14 @@ class InteractiveImageLabel(QLabel):
         self._show_origin = True
         self._render()
         self.origin_changed.emit(ix_f, iy_f)
+
+    def keyPressEvent(self, event):
+        if self._multi and event.key() in (Qt.Key_Delete, Qt.Key_Backspace) \
+                and self._active_idx is not None:
+            self.delete_active_shape()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def resizeEvent(self, event):
         self._render()

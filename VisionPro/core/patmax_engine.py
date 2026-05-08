@@ -220,6 +220,199 @@ def train_patmax(image: np.ndarray,
     return model
 
 
+def train_patmax_multi_region(image: np.ndarray,
+                                regions: List[dict],
+                                origin_offset: Tuple[float, float] = (0.5, 0.5),
+                                canny_low: int = 50,
+                                canny_high: int = 150,
+                                train_mode: str = "evaluate",
+                                angle_low: float = 0.0,
+                                angle_high: float = 0.0,
+                                angle_step: float = 5.0,
+                                scale_low: float = 1.0,
+                                scale_high: float = 1.0,
+                                scale_step: float = 0.1) -> Optional[PatMaxModel]:
+    """Train 1 PatMax model GỘP từ nhiều ROI (multi-region pattern).
+
+    Bbox = union các ROI; mask = OR mask của từng region.
+    Edges/patch ngoài union mask bị zero/mean để chỉ pattern union được match.
+    `regions`: list of {"type": "rect|circle|ellipse|polygon", **shape_data}.
+    """
+    if not regions:
+        return None
+    H, W = image.shape[:2]
+
+    # Tính bbox per-region (toạ độ ảnh)
+    bboxes = []
+    for r in regions:
+        t = r.get("type", "rect")
+        if t == "circle":
+            cx = int(r.get("cx", 0)); cy = int(r.get("cy", 0))
+            rd = int(r.get("r", 0))
+            bboxes.append((cx - rd, cy - rd, 2 * rd, 2 * rd))
+        else:
+            bboxes.append((int(r.get("x", 0)), int(r.get("y", 0)),
+                            int(r.get("w", 0)), int(r.get("h", 0))))
+    # Union bbox
+    x0 = max(0, min(b[0] for b in bboxes))
+    y0 = max(0, min(b[1] for b in bboxes))
+    x1 = min(W, max(b[0] + b[2] for b in bboxes))
+    y1 = min(H, max(b[1] + b[3] for b in bboxes))
+    uw = max(1, x1 - x0); uh = max(1, y1 - y0)
+
+    # Build union mask trong toạ độ patch (uh × uw)
+    union_mask = np.zeros((uh, uw), dtype=np.uint8)
+    for r in regions:
+        t = r.get("type", "rect")
+        # Tạo dữ liệu shape relative tới (x0, y0) để dùng _build_shape_mask
+        if t == "circle":
+            shape_data = {"cx": int(r.get("cx", 0)), "cy": int(r.get("cy", 0)),
+                          "r":  int(r.get("r", 0))}
+        elif t == "polygon":
+            shape_data = {"pts": [(int(px), int(py)) for px, py in r.get("pts", [])]}
+        else:
+            shape_data = {"x": int(r.get("x", 0)), "y": int(r.get("y", 0)),
+                          "w": int(r.get("w", 0)), "h": int(r.get("h", 0))}
+        m = _build_shape_mask(t, shape_data, x0, y0, uw, uh)
+        if m is None and t == "rect":
+            # rect có _build_shape_mask trả None — fill thủ công
+            rx = max(0, int(r.get("x", 0)) - x0)
+            ry = max(0, int(r.get("y", 0)) - y0)
+            rw = max(1, min(int(r.get("w", 0)), uw - rx))
+            rh = max(1, min(int(r.get("h", 0)), uh - ry))
+            m = np.zeros((uh, uw), dtype=np.uint8)
+            m[ry:ry + rh, rx:rx + rw] = 255
+        if m is not None:
+            union_mask = np.maximum(union_mask, m)
+
+    bgr = image[y0:y1, x0:x1].copy()
+    if len(bgr.shape) == 2:
+        bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray_smooth = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(gray_smooth, canny_low, canny_high)
+
+    if union_mask.any():
+        mean_val = int(gray_smooth[union_mask > 0].mean())
+        gray_smooth = np.where(union_mask > 0, gray_smooth, mean_val).astype(np.uint8)
+        edges = np.where(union_mask > 0, edges, 0).astype(np.uint8)
+
+    th = cv2.resize(bgr, (80, 80))
+    e_small = cv2.resize(edges, (80, 80))
+    th[e_small > 0] = [0, 220, 80]
+
+    ox = uw * origin_offset[0]; oy = uh * origin_offset[1]
+    model_hash = hashlib.md5(gray.tobytes()).hexdigest()[:8]
+    print(f"[PatMax Train multi-region] union ROI=({x0},{y0},{uw},{uh})  "
+          f"regions={len(regions)}  edges={int(np.count_nonzero(edges))}  "
+          f"hash={model_hash}")
+
+    model = PatMaxModel(
+        trained=True,
+        train_roi=(x0, y0, uw, uh),
+        origin_x=ox, origin_y=oy,
+        pattern_w=uw, pattern_h=uh,
+        patch_bgr=bgr, patch_gray=gray_smooth,
+        edge_image=edges, thumbnail=th,
+        edge_count=int(np.count_nonzero(edges)),
+        model_hash=model_hash,
+        canny_low=canny_low, canny_high=canny_high,
+        shape_type="multi", shape_data={"regions": regions},
+        mask=union_mask,
+        train_mode=train_mode if train_mode in ("evaluate", "create") else "evaluate",
+        angle_low=angle_low, angle_high=angle_high, angle_step=angle_step,
+        scale_low=scale_low, scale_high=scale_high,
+    )
+    if model.train_mode == "create":
+        n = precompute_templates(model)
+        print(f"[PatMax Train multi-region] precomputed {n} DOF templates")
+    return model
+
+
+def train_patmax_multi_pattern(image: np.ndarray,
+                                regions: List[dict],
+                                origin_offset: Tuple[float, float] = (0.5, 0.5),
+                                canny_low: int = 50,
+                                canny_high: int = 150,
+                                train_mode: str = "evaluate",
+                                angle_low: float = 0.0,
+                                angle_high: float = 0.0,
+                                angle_step: float = 5.0,
+                                scale_low: float = 1.0,
+                                scale_high: float = 1.0,
+                                scale_step: float = 0.1) -> List[PatMaxModel]:
+    """Train list of PatMaxModels — mỗi region 1 model độc lập."""
+    models: List[PatMaxModel] = []
+    for r in regions:
+        t = r.get("type", "rect")
+        if t == "circle":
+            cx = int(r.get("cx", 0)); cy = int(r.get("cy", 0))
+            rd = int(r.get("r", 0))
+            roi = (cx - rd, cy - rd, 2 * rd, 2 * rd)
+            sd = {"cx": cx, "cy": cy, "r": rd}
+        elif t == "polygon":
+            pts = r.get("pts") or []
+            xs = [px for px, _ in pts]; ys = [py for _, py in pts]
+            x = int(min(xs)) if xs else 0; y = int(min(ys)) if ys else 0
+            w = max(1, int(max(xs) - min(xs))) if xs else 1
+            h = max(1, int(max(ys) - min(ys))) if ys else 1
+            roi = (x, y, w, h)
+            sd = {"pts": pts, "x": x, "y": y, "w": w, "h": h}
+        else:
+            x = int(r.get("x", 0)); y = int(r.get("y", 0))
+            w = int(r.get("w", 0)); h = int(r.get("h", 0))
+            roi = (x, y, w, h); sd = {"x": x, "y": y, "w": w, "h": h}
+        m = train_patmax(image, roi, origin_offset=origin_offset,
+                          canny_low=canny_low, canny_high=canny_high,
+                          shape_type=t, shape_data=sd, train_mode=train_mode,
+                          angle_low=angle_low, angle_high=angle_high,
+                          angle_step=angle_step,
+                          scale_low=scale_low, scale_high=scale_high,
+                          scale_step=scale_step)
+        if m is not None:
+            models.append(m)
+    return models
+
+
+def run_patmax_multi(image: np.ndarray,
+                      models: List[PatMaxModel],
+                      accept_threshold: float = 0.5,
+                      angle_low: float = 0.0,
+                      angle_high: float = 0.0,
+                      angle_step: float = 5.0,
+                      scale_low: float = 1.0,
+                      scale_high: float = 1.0,
+                      scale_step: float = 0.1,
+                      num_results_per_model: int = 1,
+                      overlap_threshold: float = 0.5,
+                      ) -> Tuple[List[PatMaxResult], np.ndarray]:
+    """Search trên list models — gộp results, score map = max overlay."""
+    all_results: List[PatMaxResult] = []
+    score_acc: Optional[np.ndarray] = None
+    for mi, model in enumerate(models):
+        if not model.is_valid():
+            continue
+        results, sm = run_patmax(image, model,
+                                  accept_threshold=accept_threshold,
+                                  angle_low=angle_low, angle_high=angle_high,
+                                  angle_step=angle_step,
+                                  scale_low=scale_low, scale_high=scale_high,
+                                  scale_step=scale_step,
+                                  num_results=num_results_per_model,
+                                  overlap_threshold=overlap_threshold)
+        all_results.extend(results)
+        if score_acc is None:
+            score_acc = sm.astype(np.float32) if sm is not None else None
+        elif sm is not None and sm.shape == score_acc.shape:
+            score_acc = np.maximum(score_acc, sm.astype(np.float32))
+    all_results.sort(key=lambda r: -r.score)
+    if score_acc is None:
+        score_acc = _empty_vis(image)
+    else:
+        score_acc = score_acc.astype(np.uint8)
+    return all_results, score_acc
+
+
 def _build_shape_mask(shape_type: str, shape_data: Optional[dict],
                        roi_x: int, roi_y: int, w: int, h: int
                        ) -> Optional[np.ndarray]:

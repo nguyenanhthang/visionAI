@@ -145,41 +145,61 @@ def proc_patmax(inputs, params):
     """
     CogPatMaxPatternAlignTool — dùng PatMaxEngine.
     Model được train trong PatMaxDialog (double-click node).
+    Hỗ trợ multi-pattern: nếu params có "_patmax_models" (list) sẽ search
+    qua tất cả models và gộp kết quả qua run_patmax_multi.
     """
-    from core.patmax_engine import (PatMaxModel, run_patmax,
+    from core.patmax_engine import (PatMaxModel, run_patmax, run_patmax_multi,
                                      draw_patmax_results, _empty_vis)
     img = inputs.get("image")
     if img is None:
         return {"image": None, "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
 
+    models_list = params.get("_patmax_models") or []
     model: PatMaxModel = params.get("_patmax_model") or PatMaxModel()
-    if not model.is_valid():
+    use_multi = (params.get("_patmax_roi_mode") == "multi_pattern"
+                 and isinstance(models_list, list)
+                 and any(m.is_valid() for m in models_list))
+
+    if not use_multi and not model.is_valid():
         vis = _empty_vis(_bgr(img))
         return {"image": vis, "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
 
-    ang_low  = model.angle_low
-    ang_high = model.angle_high
-    ang_step = max(0.5, model.angle_step)
-    sc_low   = model.scale_low
-    sc_high  = model.scale_high
-    sc_step  = max(0.01, getattr(model, "scale_step", 0.1) or 0.1)
+    ref = models_list[0] if use_multi else model
+    ang_low  = ref.angle_low
+    ang_high = ref.angle_high
+    ang_step = max(0.5, ref.angle_step)
+    sc_low   = ref.scale_low
+    sc_high  = ref.scale_high
+    sc_step  = max(0.01, getattr(ref, "scale_step", 0.1) or 0.1)
 
     # Ưu tiên giá trị đã save trong model (PatMaxDialog auto-save). Fall back
     # node.params chỉ khi model chưa có (PatMaxModel default = 1, ổn).
-    nr = max(1, int(model.num_results or 0)) or int(params.get("num_results", 1))
-    ot = float(getattr(model, "overlap_threshold", 0.5) or 0.5)
-    at = float(model.accept_threshold or 0.5)
+    nr = max(1, int(ref.num_results or 0)) or int(params.get("num_results", 1))
+    ot = float(getattr(ref, "overlap_threshold", 0.5) or 0.5)
+    at = float(ref.accept_threshold or 0.5)
 
-    results, score_map = run_patmax(
-        _bgr(img), model,
-        accept_threshold=at,
-        angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
-        scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
-        num_results=nr,
-        overlap_threshold=ot,
-    )
+    if use_multi:
+        results, score_map = run_patmax_multi(
+            _bgr(img), [m for m in models_list if m.is_valid()],
+            accept_threshold=at,
+            angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
+            scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
+            num_results_per_model=nr,
+            overlap_threshold=ot,
+        )
+        # Vẽ với model đầu tiên (origin reference) — multi-pattern share style
+        model = ref
+    else:
+        results, score_map = run_patmax(
+            _bgr(img), model,
+            accept_threshold=at,
+            angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
+            scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
+            num_results=nr,
+            overlap_threshold=ot,
+        )
 
     vis = draw_patmax_results(_bgr(img), results, model)
 
