@@ -25,7 +25,10 @@ from PySide6.QtGui import (QPixmap, QImage, QFont, QColor, QPainter,
 
 from core.flow_graph import NodeInstance, FlowGraph
 from core.patmax_engine import (PatMaxModel, PatMaxResult, train_patmax,
-                                  run_patmax, draw_patmax_results,
+                                  train_patmax_multi_region,
+                                  train_patmax_multi_pattern,
+                                  run_patmax, run_patmax_multi,
+                                  draw_patmax_results,
                                   save_model, load_model)
 
 
@@ -170,8 +173,8 @@ class ResultTable(QTableWidget):
             for j, (val, fmt) in enumerate([
                 (str(i+1),         "{}"),
                 (r.score,          "{:.4f}"),
-                (r.x,              "{:.2f}"),
-                (r.y,              "{:.2f}"),
+                (r.origin_x,       "{:.2f}"),
+                (r.origin_y,       "{:.2f}"),
                 (r.angle,          "{:+.2f}"),
                 (r.scale,          "{:.3f}"),
             ]):
@@ -198,6 +201,10 @@ class PatMaxDialog(QDialog):
         self._results: List[PatMaxResult] = []
         self._score_map_img: Optional[np.ndarray] = None
         self._current_image: Optional[np.ndarray] = None
+        # ROI mode: "single" | "multi_region" | "multi_pattern"
+        self._roi_mode: str = node.params.get("_patmax_roi_mode", "single")
+        # Multi-pattern models (chỉ dùng khi roi_mode == "multi_pattern")
+        self._models: List[PatMaxModel] = node.params.get("_patmax_models") or []
 
         self.setWindowTitle(f"🎯  PatMax Pattern Align Tool  —  {node.tool.name}")
         self.setMinimumSize(1100, 720)
@@ -269,6 +276,12 @@ class PatMaxDialog(QDialog):
         self._tabs.addTab(self._build_settings_tab(), "⚒ Settings")
         ll.addWidget(self._tabs)
 
+        # Load Settings spinboxes từ model + connect auto-save
+        self._load_settings_from_model()
+        self._wire_settings_autosave()
+        # Apply default Display mode = Basic (ẩn Canny + Train Mode)
+        self._on_train_display_changed(0)
+
         # Save/Load model buttons
         savload = QWidget()
         sl = QHBoxLayout(savload); sl.setContentsMargins(0,0,0,0); sl.setSpacing(6)
@@ -311,6 +324,14 @@ class PatMaxDialog(QDialog):
         for b in (self._btn_view_image, self._btn_view_scoremap, self._btn_view_edges):
             itl.addWidget(b)
 
+        itl.addSpacing(12)
+        self._btn_refresh = self._mk_small_btn("🔄 Refresh")
+        self._btn_refresh.setToolTip(
+            "Lấy ảnh mới từ upstream — xoá result_vis/score_map cũ, "
+            "giữ ROI + origin")
+        self._btn_refresh.clicked.connect(self._on_refresh_click)
+        itl.addWidget(self._btn_refresh)
+
         itl.addStretch()
         self._view_info = QLabel("")
         self._view_info.setStyleSheet("color:#1e2d45; font-size:10px; font-family:'Courier New';")
@@ -320,8 +341,16 @@ class PatMaxDialog(QDialog):
         # Interactive image
         self._img_label = InteractiveImageLabel(mode="roi")
         self._img_label.roi_changed.connect(self._on_roi_drawn)
+        self._img_label.origin_changed.connect(self._on_origin_dragged)
+        self._img_label.shape_drawn.connect(self._on_shape_drawn)
+        self._img_label.shapes_changed.connect(self._on_shapes_changed)
         self._img_label.setMinimumSize(600, 400)
+        # Bật multi-shape ngay nếu mode đã là multi_*
+        if self._roi_mode in ("multi_region", "multi_pattern"):
+            self._img_label.set_multi_shape(True)
         rl.addWidget(self._img_label, 1)
+        self._current_shape: str = "rect"
+        self._current_shape_data: Optional[dict] = None
 
         # Status bar
         self._img_status = QLabel("Load image source → Run pipeline → Draw ROI → Train")
@@ -362,22 +391,120 @@ class PatMaxDialog(QDialog):
     #  Build tabs
     # ════════════════════════════════════════════════════════════════
     def _build_train_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
-        lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
+        inner = QWidget()
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
 
-        hint = QLabel("1. Kéo chuột trên ảnh để vẽ vùng Pattern\n"
-                       "2. Chỉnh tham số Train bên dưới\n"
-                       "3. Nhấn ▶ Train Pattern")
+        w = inner
+        lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
+
+        hint = QLabel("1. Chọn loại shape ROI (Rect/Circle/Ellipse/Polygon)\n"
+                       "2. Vẽ vùng Pattern trên ảnh — Polygon: click từng đỉnh,\n"
+                       "    double-click để đóng, right-click để huỷ\n"
+                       "3. Chỉnh tham số Train → ▶ Train Pattern")
         hint.setStyleSheet(
             "background:#0d1a2a; color:#ffd700; font-size:11px;"
             "padding:8px; border-radius:4px; line-height:1.5;")
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
-        # Origin setting
+        # Config picker — Canny vs Train Mode, chỉ hiện 1 trong 2
+        mode_row = QWidget(); mr_lay = QHBoxLayout(mode_row)
+        mr_lay.setContentsMargins(0, 0, 0, 0); mr_lay.setSpacing(6)
+        lbl_dm = QLabel("Config:")
+        lbl_dm.setStyleSheet("color:#94a3b8; font-size:11px;")
+        lbl_dm.setMinimumWidth(60)
+        self._train_display_combo = QComboBox()
+        self._train_display_combo.addItems([
+            "Edge Detection (Canny)",
+            "Train Mode (DOF)",
+        ])
+        self._train_display_combo.setStyleSheet(
+            "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+            "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+            "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+            "selection-background-color:#1a2236;}")
+        self._train_display_combo.currentIndexChanged.connect(
+            self._on_train_display_changed)
+        mr_lay.addWidget(lbl_dm); mr_lay.addWidget(self._train_display_combo, 1)
+        lay.addWidget(mode_row)
+
+        # ROI Mode — Single / Multi-Region (gộp 1 pattern) / Multi-Pattern (độc lập)
+        roi_mode_row = QWidget(); rm_lay = QHBoxLayout(roi_mode_row)
+        rm_lay.setContentsMargins(0, 0, 0, 0); rm_lay.setSpacing(6)
+        lbl_rm = QLabel("ROI Mode:")
+        lbl_rm.setStyleSheet("color:#94a3b8; font-size:11px;")
+        lbl_rm.setMinimumWidth(60)
+        self._roi_mode_combo = QComboBox()
+        self._roi_mode_combo.addItems([
+            "Single ROI",
+            "Multi-Region (gộp 1 pattern)",
+            "Multi-Pattern (nhiều pattern độc lập)",
+        ])
+        self._roi_mode_combo.setStyleSheet(
+            "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+            "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+            "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+            "selection-background-color:#1a2236;}")
+        self._roi_mode_combo.setToolTip(
+            "Single: 1 ROI duy nhất (vẽ lại = thay).\n"
+            "Multi-Region: vẽ nhiều ROI → gộp thành 1 pattern duy nhất.\n"
+            "Multi-Pattern: vẽ nhiều ROI → train mỗi cái 1 pattern riêng,\n"
+            "search trả kết quả gộp từ tất cả pattern."
+        )
+        self._roi_mode_combo.currentIndexChanged.connect(self._on_roi_mode_changed)
+        # Khôi phục mode đã lưu
+        mode_idx = {"single": 0, "multi_region": 1, "multi_pattern": 2}.get(
+            self._roi_mode, 0)
+        self._roi_mode_combo.setCurrentIndex(mode_idx)
+        rm_lay.addWidget(lbl_rm); rm_lay.addWidget(self._roi_mode_combo, 1)
+        lay.addWidget(roi_mode_row)
+
+        # Shape list (chỉ hiện trong multi mode)
+        self._shape_list_lbl = QLabel("Shapes: 0")
+        self._shape_list_lbl.setStyleSheet(
+            "color:#ffd700; font-size:10px; font-family:'Courier New';"
+            "padding:3px 6px; background:#0d1a2a; border-radius:3px;")
+        self._shape_list_lbl.setVisible(mode_idx > 0)
+        lay.addWidget(self._shape_list_lbl)
+
+        btn_clear_shapes = QPushButton("🗑  Clear All Shapes")
+        btn_clear_shapes.setFixedHeight(24)
+        btn_clear_shapes.setStyleSheet(
+            "QPushButton{background:#2a1a1a;border:1px solid #5c2a2a;"
+            "border-radius:3px;color:#ff8c8c;font-size:10px;}"
+            "QPushButton:hover{background:#5c2a2a;color:#fff;}")
+        btn_clear_shapes.clicked.connect(self._on_clear_shapes)
+        btn_clear_shapes.setVisible(mode_idx > 0)
+        self._btn_clear_shapes = btn_clear_shapes
+        lay.addWidget(btn_clear_shapes)
+
+        # Shape selector
+        shape_grp = QGroupBox("ROI Shape")
+        sg2 = QVBoxLayout(shape_grp); sg2.setContentsMargins(8, 22, 8, 8); sg2.setSpacing(6)
+        self._shape_combo = QComboBox()
+        self._shape_combo.addItems(["Rectangle", "Circle", "Ellipse", "Polygon"])
+        self._shape_combo.setStyleSheet(
+            "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+            "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+            "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+            "selection-background-color:#1a2236;}")
+        self._shape_combo.currentIndexChanged.connect(self._on_shape_changed)
+        sg2.addWidget(self._shape_combo)
+        lay.addWidget(shape_grp)
+
+        # Origin setting — layout gọn 1 hàng combo + 1 hàng X/Y
         orig_grp = QGroupBox("Pattern Origin Point")
-        og = QVBoxLayout(orig_grp); og.setContentsMargins(8,12,8,8); og.setSpacing(4)
-        og.addWidget(QLabel("Điểm tham chiếu trong pattern:"))
+        og = QVBoxLayout(orig_grp); og.setContentsMargins(10, 26, 10, 10); og.setSpacing(8)
+
+        # Hàng 1: Preset combo
+        preset_row = QWidget(); pr_lay = QHBoxLayout(preset_row)
+        pr_lay.setContentsMargins(0, 0, 0, 0); pr_lay.setSpacing(6)
+        lbl_pre = QLabel("Preset:")
+        lbl_pre.setStyleSheet("color:#94a3b8; font-size:11px;")
+        lbl_pre.setMinimumWidth(46)
         self._origin_combo = QComboBox()
         self._origin_combo.addItems([
             "Center (50%, 50%)",
@@ -394,7 +521,49 @@ class PatMaxDialog(QDialog):
             "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
             "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
             "selection-background-color:#1a2236;}")
-        og.addWidget(self._origin_combo)
+        pr_lay.addWidget(lbl_pre); pr_lay.addWidget(self._origin_combo, 1)
+        og.addWidget(preset_row)
+
+        # Hàng 2: X / Y cùng dòng
+        xy_row = QWidget(); xy_lay = QHBoxLayout(xy_row)
+        xy_lay.setContentsMargins(0, 0, 0, 0); xy_lay.setSpacing(6)
+        sp_style = ("QDoubleSpinBox{background:#0a0e1a;border:1px solid #1e2d45;"
+                    "color:#e2e8f0;padding:2px 4px;border-radius:3px;}")
+        lbl_x = QLabel("X:"); lbl_x.setStyleSheet("color:#94a3b8; font-size:11px;")
+        self._sp_origin_x = QDoubleSpinBox()
+        self._sp_origin_x.setRange(-99999.0, 99999.0)
+        self._sp_origin_x.setDecimals(2); self._sp_origin_x.setSingleStep(1.0)
+        self._sp_origin_x.setStyleSheet(sp_style)
+        lbl_y = QLabel("Y:"); lbl_y.setStyleSheet("color:#94a3b8; font-size:11px;")
+        self._sp_origin_y = QDoubleSpinBox()
+        self._sp_origin_y.setRange(-99999.0, 99999.0)
+        self._sp_origin_y.setDecimals(2); self._sp_origin_y.setSingleStep(1.0)
+        self._sp_origin_y.setStyleSheet(sp_style)
+        xy_lay.addWidget(lbl_x); xy_lay.addWidget(self._sp_origin_x, 1)
+        xy_lay.addSpacing(6)
+        xy_lay.addWidget(lbl_y); xy_lay.addWidget(self._sp_origin_y, 1)
+        og.addWidget(xy_row)
+
+        # Hint
+        hint_o = QLabel("💡 Kéo dấu O vàng — có thể kéo ra ngoài ROI")
+        hint_o.setStyleSheet("color:#ffd700; font-size:10px;")
+        hint_o.setWordWrap(True)
+        og.addWidget(hint_o)
+
+        # Reset Image button
+        btn_reset = QPushButton("🔄  Reset Image")
+        btn_reset.setFixedHeight(28)
+        btn_reset.setStyleSheet(
+            "QPushButton{background:#1a2236;border:1px solid #1e2d45;"
+            "border-radius:4px;color:#94a3b8;font-size:11px;font-weight:600;}"
+            "QPushButton:hover{background:#0f3460;color:#00d4ff;border-color:#00d4ff;}")
+        btn_reset.clicked.connect(self._reset_image)
+        og.addWidget(btn_reset)
+
+        self._origin_combo.currentIndexChanged.connect(self._on_origin_preset_changed)
+        self._sp_origin_x.valueChanged.connect(self._on_origin_spin_changed)
+        self._sp_origin_y.valueChanged.connect(self._on_origin_spin_changed)
+        self._origin_updating = False  # guard chống loop tín hiệu
         lay.addWidget(orig_grp)
 
         # Canny params
@@ -402,7 +571,32 @@ class PatMaxDialog(QDialog):
         cg = QVBoxLayout(canny_grp); cg.setContentsMargins(8,12,8,8); cg.setSpacing(4)
         self._canny_low  = self._mk_spin("Low Threshold",  50,  0, 500, cg)
         self._canny_high = self._mk_spin("High Threshold", 150, 0, 500, cg)
+        self._canny_grp = canny_grp
         lay.addWidget(canny_grp)
+
+        # Train Mode
+        tm_grp = QGroupBox("Train Mode")
+        self._tm_grp = tm_grp
+        tmg = QVBoxLayout(tm_grp); tmg.setContentsMargins(10, 26, 10, 10); tmg.setSpacing(6)
+        self._train_mode_combo = QComboBox()
+        self._train_mode_combo.addItems([
+            "Evaluate DOFs At Runtime",
+            "Create DOF Templates",
+        ])
+        self._train_mode_combo.setStyleSheet(
+            "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+            "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+            "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+            "selection-background-color:#1a2236;}")
+        tmg.addWidget(self._train_mode_combo)
+        tm_hint = QLabel(
+            "• Evaluate DOFs At Runtime: train nhanh, search xử lý DOF khi run\n"
+            "• Create DOF Templates: precompute mọi (angle, scale) — search\n"
+            "  nhanh hơn nhưng train tốn thời gian + bộ nhớ")
+        tm_hint.setStyleSheet("color:#94a3b8; font-size:10px;")
+        tm_hint.setWordWrap(True)
+        tmg.addWidget(tm_hint)
+        lay.addWidget(tm_grp)
 
         # Train button
         self._btn_train = QPushButton("⚙  Train Pattern")
@@ -423,7 +617,7 @@ class PatMaxDialog(QDialog):
         self._train_status.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._train_status)
         lay.addStretch()
-        return w
+        return scroll
 
     def _build_search_tab(self) -> QWidget:
         w = QWidget(); lay = QVBoxLayout(w)
@@ -545,19 +739,190 @@ class PatMaxDialog(QDialog):
     # ════════════════════════════════════════════════════════════════
     #  Actions
     # ════════════════════════════════════════════════════════════════
+    def _load_settings_from_model(self):
+        """Khôi phục giá trị spinbox Settings từ self._model (nếu valid)."""
+        m = self._model
+        if not m:
+            return
+        try:
+            self._sp_threshold.setValue(float(getattr(m, "accept_threshold", 0.5)))
+            ang_lo = float(getattr(m, "angle_low", 0.0))
+            ang_hi = float(getattr(m, "angle_high", 0.0))
+            self._sp_ang_low.setValue(ang_lo)
+            self._sp_ang_high.setValue(ang_hi)
+            self._sp_ang_step.setValue(float(getattr(m, "angle_step", 5.0)))
+            self._chk_angle.setChecked(abs(ang_hi - ang_lo) > 0.5)
+
+            sc_lo = float(getattr(m, "scale_low", 1.0))
+            sc_hi = float(getattr(m, "scale_high", 1.0))
+            self._sp_sc_low.setValue(sc_lo)
+            self._sp_sc_high.setValue(sc_hi)
+            self._sp_sc_step.setValue(float(getattr(m, "scale_step", 0.1)))
+            self._chk_scale.setChecked(abs(sc_hi - sc_lo) > 0.01)
+
+            self._sp_num_results.setValue(int(getattr(m, "num_results", 1)))
+            self._sp_overlap.setValue(float(getattr(m, "overlap_threshold", 0.5)))
+        except Exception as e:
+            print(f"[PatMaxDialog] _load_settings_from_model: {e}")
+
+    def _wire_settings_autosave(self):
+        """Khi đổi spinbox Settings → ghi ngay vào model + node.params."""
+        self._sp_threshold.valueChanged.connect(self._save_settings_to_model)
+        self._sp_ang_low.valueChanged.connect(self._save_settings_to_model)
+        self._sp_ang_high.valueChanged.connect(self._save_settings_to_model)
+        self._sp_ang_step.valueChanged.connect(self._save_settings_to_model)
+        self._sp_sc_low.valueChanged.connect(self._save_settings_to_model)
+        self._sp_sc_high.valueChanged.connect(self._save_settings_to_model)
+        self._sp_sc_step.valueChanged.connect(self._save_settings_to_model)
+        self._sp_num_results.valueChanged.connect(self._save_settings_to_model)
+        self._sp_overlap.valueChanged.connect(self._save_settings_to_model)
+        self._chk_angle.stateChanged.connect(self._save_settings_to_model)
+        self._chk_scale.stateChanged.connect(self._save_settings_to_model)
+
+    def _save_settings_to_model(self, *_):
+        """Ghi giá trị spinbox Settings vào self._model + node.params."""
+        m = self._model
+        if m is None:
+            return
+        m.accept_threshold = float(self._sp_threshold.value())
+        m.angle_low  = float(self._sp_ang_low.value())  if self._chk_angle.isChecked() else 0.0
+        m.angle_high = float(self._sp_ang_high.value()) if self._chk_angle.isChecked() else 0.0
+        m.angle_step = float(self._sp_ang_step.value())
+        m.scale_low  = float(self._sp_sc_low.value())   if self._chk_scale.isChecked() else 1.0
+        m.scale_high = float(self._sp_sc_high.value())  if self._chk_scale.isChecked() else 1.0
+        m.scale_step = float(self._sp_sc_step.value())
+        m.num_results = int(self._sp_num_results.value())
+        m.overlap_threshold = float(self._sp_overlap.value())
+        # Đảm bảo node.params có reference tới model (cùng instance, an toàn)
+        self._node.params["_patmax_model"] = m
+
+    def _on_train_display_changed(self, idx: int):
+        """idx=0 → chỉ Canny; idx=1 → chỉ Train Mode (1 trong 2)."""
+        show_canny = (idx == 0)
+        if hasattr(self, "_canny_grp"):
+            self._canny_grp.setVisible(show_canny)
+        if hasattr(self, "_tm_grp"):
+            self._tm_grp.setVisible(not show_canny)
+
+    def _on_refresh_click(self):
+        """Force refresh — luôn re-fetch và clear stale state."""
+        self._image_sig = None  # bypass equality check
+        if self._refresh_image_if_changed():
+            self._set_view("image")
+        else:
+            self._img_status.setText("⚠ Không có ảnh upstream để refresh.")
+
+    def _img_signature(self, arr) -> Optional[str]:
+        """Hash ngắn cho ảnh (down-sample 16x16 + md5) — phát hiện ảnh mới."""
+        if arr is None or not isinstance(arr, np.ndarray):
+            return None
+        try:
+            import hashlib, cv2
+            small = cv2.resize(arr, (16, 16))
+            return hashlib.md5(small.tobytes()).hexdigest()[:12]
+        except Exception:
+            return f"{arr.shape}-{arr.dtype}"
+
+    def _refresh_image_if_changed(self) -> bool:
+        """Nếu ảnh upstream khác ảnh hiện tại → xoá kết quả cũ, cập nhật canvas.
+        ROI + origin marker vẫn giữ lại (đọc từ model). Trả về True nếu đã refresh.
+        """
+        img = self._get_input_image()
+        if img is None or not isinstance(img, np.ndarray):
+            return False
+        new_sig = self._img_signature(img)
+        old_sig = getattr(self, "_image_sig", None)
+        if new_sig == old_sig:
+            return False
+        self._image_sig = new_sig
+        self._current_image = img
+        # Xoá render cũ — không phụ thuộc ảnh
+        self._results = []
+        self._score_map_img = None
+        self._result_vis = None
+        if hasattr(self, "_result_table"):
+            self._result_table.setRowCount(0)
+        if hasattr(self, "_search_summary"):
+            self._search_summary.setText("Image mới — chạy search lại.")
+            self._search_summary.setStyleSheet(
+                "background:#0d1220; color:#94a3b8; font-size:11px;"
+                "font-family:'Courier New'; padding:8px; border-radius:4px;")
+        # Cập nhật canvas: ảnh mới + restore ROI/origin từ model
+        self._img_label.set_image(img)
+        if self._model and self._model.train_roi:
+            x, y, w2, h2 = self._model.train_roi
+            st = getattr(self._model, "shape_type", "rect") or "rect"
+            sd = getattr(self._model, "shape_data", None)
+            self._img_label.set_shape_mode(st)
+            if sd:
+                self._img_label.set_shape_data(st, sd)
+            else:
+                self._img_label.set_rect_from_params(x, y, w2, h2)
+            self._img_label.set_origin(x + self._model.origin_x,
+                                        y + self._model.origin_y)
+        else:
+            self._img_label.set_origin(None, None)
+        h, w = img.shape[:2]
+        self._img_status.setText(
+            f"🔄 Image refreshed: {w}×{h}  —  drawings cũ đã xoá")
+        # View phải về raw image (vì result_vis đã clear)
+        self._current_view = "image"
+        return True
+
     def _load_upstream_image(self):
         """Lấy ảnh từ upstream node."""
         img = self._get_input_image()
         if img is not None and isinstance(img, np.ndarray):
             self._current_image = img
+            self._image_sig = self._img_signature(img)
             self._img_label.set_image(img)
             h, w = img.shape[:2]
             self._img_status.setText(
                 f"Image loaded: {w}×{h}  —  Kéo chuột để vẽ vùng Pattern")
+            # Restore train_mode combo nếu model đã có
+            tm = getattr(self._model, "train_mode", "evaluate") or "evaluate"
+            self._train_mode_combo.setCurrentIndex(1 if tm == "create" else 0)
+            # Restore multi-ROI nếu mode đã lưu
+            if self._roi_mode == "multi_region" and self._model.is_valid() \
+                    and self._model.shape_type == "multi":
+                regions = (self._model.shape_data or {}).get("regions") or []
+                if regions:
+                    self._img_label.set_multi_shape(True)
+                    QTimer.singleShot(110,
+                        lambda r=list(regions): self._img_label.set_shapes(r))
+                    self._on_shapes_changed(regions)
+                    return
+            if self._roi_mode == "multi_pattern" and self._models:
+                ms_list = []
+                for mm in self._models:
+                    if mm.shape_data and mm.shape_type:
+                        e = {"type": mm.shape_type}; e.update(mm.shape_data)
+                        ms_list.append(e)
+                if ms_list:
+                    self._img_label.set_multi_shape(True)
+                    QTimer.singleShot(110,
+                        lambda L=ms_list: self._img_label.set_shapes(L))
+                    self._on_shapes_changed(ms_list)
+                    return
             # Restore ROI nếu có
             if self._model.train_roi:
                 x,y,w2,h2 = self._model.train_roi
-                QTimer.singleShot(100, lambda: self._img_label.set_rect_from_params(x,y,w2,h2))
+                st = getattr(self._model, "shape_type", "rect") or "rect"
+                sd = getattr(self._model, "shape_data", None)
+                self._current_shape = st
+                self._current_shape_data = dict(sd) if sd else None
+                shape_idx = {"rect":0,"circle":1,"ellipse":2,"polygon":3}.get(st, 0)
+                self._shape_combo.setCurrentIndex(shape_idx)
+                self._img_label.set_shape_mode(st)
+                if sd:
+                    QTimer.singleShot(100, lambda: self._img_label.set_shape_data(st, sd))
+                else:
+                    QTimer.singleShot(100, lambda: self._img_label.set_rect_from_params(x,y,w2,h2))
+                # Restore origin marker từ model
+                ox = x + float(self._model.origin_x)
+                oy = y + float(self._model.origin_y)
+                QTimer.singleShot(120, lambda: self._set_origin(ox, oy, from_user=False))
+                QTimer.singleShot(125, lambda: self._origin_combo.setCurrentIndex(7))
         else:
             self._img_status.setText(
                 "⚠  Không có ảnh.  "
@@ -566,62 +931,342 @@ class PatMaxDialog(QDialog):
     def _on_roi_drawn(self, x, y, w, h):
         self._current_roi = (x, y, w, h)
         self._img_status.setText(
-            f"ROI đã vẽ: ({x},{y})  {w}×{h} px  —  Nhấn ⚙ Train Pattern")
+            f"ROI đã vẽ: ({x},{y})  {w}×{h} px  ({self._current_shape})  "
+            f"—  Nhấn ⚙ Train Pattern")
+        # Cập nhật điểm origin theo preset hiện tại trong ROI mới
+        self._apply_origin_preset_to_roi()
+
+    def _on_shape_drawn(self, shape_type: str, data: dict):
+        self._current_shape = shape_type
+        self._current_shape_data = dict(data)
+
+    def _on_shape_changed(self, idx: int):
+        m = {0: "rect", 1: "circle", 2: "ellipse", 3: "polygon"}
+        s = m.get(idx, "rect")
+        self._current_shape = s
+        # Trong multi mode: KHÔNG xoá shape_data hiện có (giữ list); chỉ đổi shape mới sẽ vẽ
+        if self._roi_mode == "single":
+            self._current_shape_data = None
+            self._current_roi = None
+        if hasattr(self, "_img_label"):
+            if self._roi_mode == "single":
+                self._img_label.set_shape_mode(s)
+            else:
+                self._img_label.set_next_shape_type(s)
+        hints = {
+            "rect":     "Kéo chuột vẽ Rectangle",
+            "circle":   "Kéo từ tâm ra rìa để vẽ Circle",
+            "ellipse":  "Kéo bounding-box cho Ellipse",
+            "polygon":  "Click từng đỉnh — double-click đóng, right-click huỷ",
+        }
+        self._img_status.setText(f"Shape: {s} — {hints[s]}")
+
+    # ── Multi-ROI handlers ─────────────────────────────────────────
+    def _on_roi_mode_changed(self, idx: int):
+        modes = ["single", "multi_region", "multi_pattern"]
+        new_mode = modes[idx] if 0 <= idx < len(modes) else "single"
+        self._roi_mode = new_mode
+        is_multi = (new_mode != "single")
+        # Sync visibility
+        if hasattr(self, "_shape_list_lbl"):
+            self._shape_list_lbl.setVisible(is_multi)
+        if hasattr(self, "_btn_clear_shapes"):
+            self._btn_clear_shapes.setVisible(is_multi)
+        # Sync canvas
+        if hasattr(self, "_img_label"):
+            self._img_label.set_multi_shape(is_multi)
+            if not is_multi:
+                # Clear existing list khi về Single
+                self._img_label.clear_shapes()
+                self._models = []
+        # Save vào params để bền giữa các lần mở dialog
+        self._node.params["_patmax_roi_mode"] = new_mode
+        labels = ["Single ROI",
+                  "Multi-Region (gộp 1 pattern)",
+                  "Multi-Pattern (mỗi ROI 1 pattern)"]
+        self._img_status.setText(f"ROI Mode: {labels[idx]}")
+
+    def _on_clear_shapes(self):
+        if hasattr(self, "_img_label"):
+            self._img_label.clear_shapes()
+        self._current_roi = None
+        self._current_shape_data = None
+        self._models = []
+        if hasattr(self, "_shape_list_lbl"):
+            self._shape_list_lbl.setText("Shapes: 0")
+
+    def _on_shapes_changed(self, shapes: list):
+        if hasattr(self, "_shape_list_lbl"):
+            n = len(shapes)
+            types = [s.get("type", "?")[0:3] for s in shapes]   # rec/cir/ell/pol
+            preview = ", ".join(f"#{i+1}:{t}" for i, t in enumerate(types[:6]))
+            if n > 6:
+                preview += f" ... +{n-6}"
+            self._shape_list_lbl.setText(f"Shapes: {n}  [{preview}]" if n else "Shapes: 0")
+
+    # ── Origin point handling ──────────────────────────────────────
+    def _preset_offset(self, idx: int) -> Optional[Tuple[float, float]]:
+        m = {
+            0: (0.5, 0.5), 1: (0.0, 0.0), 2: (0.5, 0.0), 3: (1.0, 0.0),
+            4: (0.0, 0.5), 5: (1.0, 0.5), 6: (0.5, 1.0),
+        }
+        return m.get(idx)   # 7 = Custom → None
+
+    def _apply_origin_preset_to_roi(self):
+        """Khi đổi preset hoặc vẽ ROI mới: đặt origin theo preset."""
+        if self._current_roi is None:
+            return
+        idx = self._origin_combo.currentIndex()
+        off = self._preset_offset(idx)
+        if off is None:
+            # Custom — giữ nguyên giá trị spinbox, chỉ đảm bảo trong ROI
+            ox = self._sp_origin_x.value()
+            oy = self._sp_origin_y.value()
+        else:
+            x, y, w, h = self._current_roi
+            ox = x + w * off[0]
+            oy = y + h * off[1]
+        self._set_origin(ox, oy, from_user=False)
+
+    def _set_origin(self, ox: float, oy: float, from_user: bool):
+        """Cập nhật origin: spinboxes + canvas marker. from_user=True khi user nhập tay."""
+        self._origin_updating = True
+        try:
+            self._sp_origin_x.setValue(float(ox))
+            self._sp_origin_y.setValue(float(oy))
+            self._img_label.set_origin(ox, oy)
+        finally:
+            self._origin_updating = False
+
+    def _on_origin_preset_changed(self, idx: int):
+        if self._preset_offset(idx) is not None:
+            self._apply_origin_preset_to_roi()
+        # Nếu Custom → không reset, để user kéo/nhập tay
+
+    def _on_origin_spin_changed(self, _val):
+        if self._origin_updating:
+            return
+        ox = self._sp_origin_x.value()
+        oy = self._sp_origin_y.value()
+        self._origin_updating = True
+        try:
+            self._img_label.set_origin(ox, oy)
+            # Nếu user chỉnh tay → chuyển combo về Custom
+            if self._origin_combo.currentIndex() != 7:
+                self._origin_combo.setCurrentIndex(7)
+        finally:
+            self._origin_updating = False
+
+    def _transform_origin(self, result) -> Tuple[float, float]:
+        """Biến đổi origin (lưu trong model) sang vị trí match được."""
+        import math
+        m = self._model
+        if not m or not m.train_roi:
+            return float(result.x), float(result.y)
+        w = float(m.pattern_w); h = float(m.pattern_h)
+        # Offset origin so với tâm pattern (toạ độ pattern, có thể âm/>w,h)
+        dx = float(m.origin_x) - w / 2.0
+        dy = float(m.origin_y) - h / 2.0
+        rad = math.radians(-float(result.angle))
+        ca = math.cos(rad); sa = math.sin(rad)
+        s  = float(result.scale) if result.scale else 1.0
+        ox = float(result.x) + s * (dx * ca - dy * sa)
+        oy = float(result.y) + s * (dx * sa + dy * ca)
+        return ox, oy
+
+    def _reset_image(self):
+        """Reload ảnh từ upstream, xoá ROI/origin/results/score-map hiện tại."""
+        # Clear state
+        self._current_roi = None
+        self._current_shape_data = None
+        self._results = []
+        self._score_map_img = None
+        if hasattr(self, "_result_vis"):
+            self._result_vis = None
+        # Clear canvas markers
+        self._img_label.set_origin(None, None)
+        self._img_label.set_shape_mode(self._current_shape)  # clears _rect/_poly/_data
+        # Reset origin spinboxes & combo
+        self._origin_updating = True
+        try:
+            self._sp_origin_x.setValue(0.0)
+            self._sp_origin_y.setValue(0.0)
+            self._origin_combo.setCurrentIndex(0)
+        finally:
+            self._origin_updating = False
+        # Reload ảnh upstream
+        img = self._get_input_image()
+        if img is not None and isinstance(img, np.ndarray):
+            self._current_image = img
+            self._img_label.set_image(img)
+            h, w = img.shape[:2]
+            self._img_status.setText(
+                f"🔄 Image reset: {w}×{h}  —  Vẽ ROI mới để train")
+        else:
+            self._img_status.setText("⚠ Không có ảnh upstream để reset.")
+        # Clear search summary
+        if hasattr(self, "_search_summary"):
+            self._search_summary.setText("Image reset — chạy search lại nếu cần.")
+            self._search_summary.setStyleSheet(
+                "background:#0d1220; color:#94a3b8; font-size:11px;"
+                "font-family:'Courier New'; padding:8px; border-radius:4px;")
+        if hasattr(self, "_result_table"):
+            self._result_table.setRowCount(0)
+        self._set_view("image")
+
+    def _on_origin_dragged(self, ox: float, oy: float):
+        """Callback khi user kéo origin trên canvas."""
+        self._origin_updating = True
+        try:
+            self._sp_origin_x.setValue(float(ox))
+            self._sp_origin_y.setValue(float(oy))
+            if self._origin_combo.currentIndex() != 7:
+                self._origin_combo.setCurrentIndex(7)
+        finally:
+            self._origin_updating = False
 
     def _train(self):
         if self._current_image is None:
             QMessageBox.warning(self, "Train", "Chưa có ảnh. Hãy chạy pipeline trước.")
             return
-        if self._current_roi is None:
-            QMessageBox.warning(self, "Train",
-                                "Hãy kéo chuột trên ảnh để vẽ vùng Pattern trước.")
-            return
 
-        x, y, w, h = self._current_roi
-        if w < 8 or h < 8:
-            QMessageBox.warning(self, "Train", "Vùng ROI quá nhỏ (min 8×8 px).")
-            return
-
-        # Origin offset
-        origin_map = {
-            0: (0.5, 0.5), 1: (0.0, 0.0), 2: (0.5, 0.0), 3: (1.0, 0.0),
-            4: (0.0, 0.5), 5: (1.0, 0.5), 6: (0.5, 1.0), 7: (0.5, 0.5),
-        }
-        origin_off = origin_map.get(self._origin_combo.currentIndex(), (0.5, 0.5))
+        is_multi = (self._roi_mode in ("multi_region", "multi_pattern"))
+        if is_multi:
+            shapes = self._img_label.get_shapes() if hasattr(self, "_img_label") else []
+            if not shapes:
+                QMessageBox.warning(self, "Train",
+                                    "Chưa có ROI nào. Vẽ ít nhất 1 vùng Pattern.")
+                return
+        else:
+            if self._current_roi is None:
+                QMessageBox.warning(self, "Train",
+                                    "Hãy kéo chuột trên ảnh để vẽ vùng Pattern trước.")
+                return
+            x, y, w, h = self._current_roi
+            if w < 8 or h < 8:
+                QMessageBox.warning(self, "Train", "Vùng ROI quá nhỏ (min 8×8 px).")
+                return
 
         self._btn_train.setEnabled(False)
         self._train_status.setText("Training...")
         self._train_status.setStyleSheet("color:#ffd700; font-size:11px;")
 
         try:
-            model = train_patmax(
-                self._current_image,
-                self._current_roi,
-                origin_offset=origin_off,
-                canny_low=self._canny_low.value(),
-                canny_high=self._canny_high.value(),
-            )
-            # Lưu search params vào model
-            model.accept_threshold = self._sp_threshold.value()
-            model.angle_low  = self._sp_ang_low.value()  if self._chk_angle.isChecked() else 0.0
-            model.angle_high = self._sp_ang_high.value() if self._chk_angle.isChecked() else 0.0
-            model.angle_step = self._sp_ang_step.value()
-            model.scale_low  = self._sp_sc_low.value()   if self._chk_scale.isChecked() else 1.0
-            model.scale_high = self._sp_sc_high.value()  if self._chk_scale.isChecked() else 1.0
-            model.num_results= self._sp_num_results.value()
+            tm = "create" if self._train_mode_combo.currentIndex() == 1 else "evaluate"
+            ang_low_t  = self._sp_ang_low.value()  if self._chk_angle.isChecked() else 0.0
+            ang_high_t = self._sp_ang_high.value() if self._chk_angle.isChecked() else 0.0
+            sc_low_t   = self._sp_sc_low.value()   if self._chk_scale.isChecked() else 1.0
+            sc_high_t  = self._sp_sc_high.value()  if self._chk_scale.isChecked() else 1.0
 
-            self._model = model
-            self._node.params["_patmax_model"] = model
+            if self._roi_mode == "multi_region":
+                model = train_patmax_multi_region(
+                    self._current_image, shapes,
+                    origin_offset=(0.5, 0.5),
+                    canny_low=self._canny_low.value(),
+                    canny_high=self._canny_high.value(),
+                    train_mode=tm,
+                    angle_low=ang_low_t, angle_high=ang_high_t,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low_t, scale_high=sc_high_t,
+                    scale_step=self._sp_sc_step.value(),
+                )
+                if model is None:
+                    raise RuntimeError("Multi-region train trả về None.")
+                model.accept_threshold = self._sp_threshold.value()
+                model.num_results = self._sp_num_results.value()
+                self._model = model
+                self._models = [model]
+                self._node.params["_patmax_model"] = model
+                self._node.params.pop("_patmax_models", None)
+                ux, uy = model.train_roi[0], model.train_roi[1]
+                self._set_origin(ux + model.origin_x, uy + model.origin_y,
+                                  from_user=False)
+                self._model_preview.update_model(model)
+                self._status_chip.setText(
+                    f"● TRAINED  multi-region ({len(shapes)} ROIs)")
+                self._status_chip.setStyleSheet(
+                    "color:#39ff14; font-size:12px; font-weight:700; background:transparent;")
+                self._train_status.setText(
+                    f"✔ Multi-Region OK  |  {model.edge_count} edge px  |  "
+                    f"Pattern {model.pattern_w}×{model.pattern_h}  ({len(shapes)} ROIs)")
+                self._train_status.setStyleSheet("color:#39ff14; font-size:11px;")
 
-            self._model_preview.update_model(model)
-            self._status_chip.setText(f"● TRAINED  hash:{model.model_hash}")
-            self._status_chip.setStyleSheet(
-                "color:#39ff14; font-size:12px; font-weight:700; background:transparent;")
+            elif self._roi_mode == "multi_pattern":
+                models = train_patmax_multi_pattern(
+                    self._current_image, shapes,
+                    origin_offset=(0.5, 0.5),
+                    canny_low=self._canny_low.value(),
+                    canny_high=self._canny_high.value(),
+                    train_mode=tm,
+                    angle_low=ang_low_t, angle_high=ang_high_t,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low_t, scale_high=sc_high_t,
+                    scale_step=self._sp_sc_step.value(),
+                )
+                if not models:
+                    raise RuntimeError("Multi-pattern train không tạo được model nào.")
+                for m in models:
+                    m.accept_threshold = self._sp_threshold.value()
+                    m.num_results = self._sp_num_results.value()
+                self._models = models
+                self._model = models[0]
+                # Lưu list vào node.params (proc_patmax sẽ phát hiện và dùng run_patmax_multi)
+                self._node.params["_patmax_models"] = models
+                self._node.params["_patmax_model"]  = models[0]
+                self._model_preview.update_model(models[0])
+                self._status_chip.setText(
+                    f"● TRAINED  multi-pattern ({len(models)} patterns)")
+                self._status_chip.setStyleSheet(
+                    "color:#39ff14; font-size:12px; font-weight:700; background:transparent;")
+                edges_total = sum(m.edge_count for m in models)
+                self._train_status.setText(
+                    f"✔ Multi-Pattern OK  |  {len(models)} patterns  |  "
+                    f"Σ edges = {edges_total}")
+                self._train_status.setStyleSheet("color:#39ff14; font-size:11px;")
 
-            self._train_status.setText(
-                f"✔ Trained OK  |  {model.edge_count} edge pixels  |  "
-                f"Pattern {model.pattern_w}×{model.pattern_h}")
-            self._train_status.setStyleSheet("color:#39ff14; font-size:11px;")
+            else:
+                # Single — original path
+                x, y, w, h = self._current_roi
+                idx = self._origin_combo.currentIndex()
+                preset = self._preset_offset(idx)
+                if preset is not None:
+                    origin_off = preset
+                else:
+                    ox = self._sp_origin_x.value()
+                    oy = self._sp_origin_y.value()
+                    denom_w = float(w) if w > 0 else 1.0
+                    denom_h = float(h) if h > 0 else 1.0
+                    origin_off = ((ox - x) / denom_w, (oy - y) / denom_h)
+
+                model = train_patmax(
+                    self._current_image, self._current_roi,
+                    origin_offset=origin_off,
+                    canny_low=self._canny_low.value(),
+                    canny_high=self._canny_high.value(),
+                    shape_type=self._current_shape,
+                    shape_data=self._current_shape_data,
+                    train_mode=tm,
+                    angle_low=ang_low_t, angle_high=ang_high_t,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low_t, scale_high=sc_high_t,
+                    scale_step=self._sp_sc_step.value(),
+                )
+                model.accept_threshold = self._sp_threshold.value()
+                model.num_results = self._sp_num_results.value()
+                self._model = model
+                self._models = [model]
+                self._node.params["_patmax_model"] = model
+                self._node.params.pop("_patmax_models", None)
+                self._set_origin(x + model.origin_x, y + model.origin_y,
+                                  from_user=False)
+                self._model_preview.update_model(model)
+                self._status_chip.setText(f"● TRAINED  hash:{model.model_hash}")
+                self._status_chip.setStyleSheet(
+                    "color:#39ff14; font-size:12px; font-weight:700; background:transparent;")
+                self._train_status.setText(
+                    f"✔ Trained OK  |  {model.edge_count} edge pixels  |  "
+                    f"Pattern {model.pattern_w}×{model.pattern_h}")
+                self._train_status.setStyleSheet("color:#39ff14; font-size:11px;")
 
             # Show edge model
             self._set_view("edges")
@@ -637,11 +1282,14 @@ class PatMaxDialog(QDialog):
         if not self._model.is_valid():
             QMessageBox.warning(self, "Search", "Chưa train model.")
             return
+        # Tự refresh nếu upstream đổi ảnh
+        self._refresh_image_if_changed()
         img = self._current_image if self._current_image is not None else self._get_input_image()
         if img is None:
             QMessageBox.warning(self, "Search", "Không có ảnh để search.")
             return
         self._current_image = img
+        self._image_sig = self._img_signature(img)
 
         self._search_progress.show()
         self._search_progress.setValue(30)
@@ -655,16 +1303,28 @@ class PatMaxDialog(QDialog):
 
             self._search_progress.setValue(50)
 
-            results, score_map_vis = run_patmax(
-                img, self._model,
-                accept_threshold=self._sp_threshold.value(),
-                angle_low=ang_low, angle_high=ang_high,
-                angle_step=self._sp_ang_step.value(),
-                scale_low=sc_low, scale_high=sc_high,
-                scale_step=self._sp_sc_step.value(),
-                num_results=self._sp_num_results.value(),
-                overlap_threshold=self._sp_overlap.value(),
-            )
+            if self._roi_mode == "multi_pattern" and self._models:
+                results, score_map_vis = run_patmax_multi(
+                    img, self._models,
+                    accept_threshold=self._sp_threshold.value(),
+                    angle_low=ang_low, angle_high=ang_high,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low, scale_high=sc_high,
+                    scale_step=self._sp_sc_step.value(),
+                    num_results_per_model=self._sp_num_results.value(),
+                    overlap_threshold=self._sp_overlap.value(),
+                )
+            else:
+                results, score_map_vis = run_patmax(
+                    img, self._model,
+                    accept_threshold=self._sp_threshold.value(),
+                    angle_low=ang_low, angle_high=ang_high,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low, scale_high=sc_high,
+                    scale_step=self._sp_sc_step.value(),
+                    num_results=self._sp_num_results.value(),
+                    overlap_threshold=self._sp_overlap.value(),
+                )
 
             self._search_progress.setValue(80)
             self._results = results
@@ -683,14 +1343,12 @@ class PatMaxDialog(QDialog):
                 self._search_summary.setText(
                     f"Found: {n} result(s)\n"
                     f"Best: score={best.score:.4f}  "
-                    f"x={best.x:.2f}  y={best.y:.2f}  "
+                    f"origin=({best.origin_x:.2f}, {best.origin_y:.2f})  "
                     f"angle={best.angle:+.2f}°")
                 self._search_summary.setStyleSheet(
                     "background:#0d2a1a; color:#39ff14; font-size:11px;"
                     "font-family:'Courier New'; padding:8px; border-radius:4px;"
                     "border:1px solid #39ff1433;")
-                # Cập nhật suggested threshold
-                self._sp_threshold.setValue(round(best.score * 0.85, 3))
             else:
                 # Tìm best score từ console log (chạy lại với threshold=0 để biết)
                 results_all, _ = run_patmax(
@@ -709,16 +1367,14 @@ class PatMaxDialog(QDialog):
                         f"NOT FOUND above threshold={self._sp_threshold.value():.3f}\n"
                         f"Best score found: {best_s:.4f}\n"
                         f"➡ Suggested threshold: {suggest:.3f}\n"
-                        f"Click 'Apply Suggest' hoặc giảm threshold.")
+                        f"Hạ Min Score xuống ≤ {suggest:.3f} rồi Run Search lại.")
                     self._search_summary.setStyleSheet(
                         "background:#2a1a0d; color:#ffd700; font-size:11px;"
                         "font-family:'Courier New'; padding:8px; border-radius:4px;"
                         "border:1px solid #ffd70033;")
-                    # Auto-fill suggested threshold
-                    self._sp_threshold.setValue(suggest)
                     self._img_status.setText(
-                        f"⚠ Threshold tự động điều chỉnh xuống {suggest:.3f} — "
-                        f"nhấn Run Search lại")
+                        f"⚠ Best score = {best_s:.4f} — Min Score giữ nguyên, "
+                        f"chỉnh tay nếu muốn.")
                 else:
                     self._search_summary.setText(
                         "NOT FOUND\nModel không match với ảnh này.\n"
@@ -734,11 +1390,19 @@ class PatMaxDialog(QDialog):
             node.outputs["num_found"] = n
             node.outputs["image"]     = result_vis
             if n > 0:
-                node.outputs["score"] = results[0].score
-                node.outputs["x"]     = results[0].x
-                node.outputs["y"]     = results[0].y
-                node.outputs["angle"] = results[0].angle
-                node.outputs["scale"] = results[0].scale
+                best = results[0]
+                # x, y = toạ độ điểm tham chiếu (yellow) — chính là output chính
+                node.outputs["score"]    = best.score
+                node.outputs["x"]        = best.origin_x
+                node.outputs["y"]        = best.origin_y
+                node.outputs["origin_x"] = best.origin_x
+                node.outputs["origin_y"] = best.origin_y
+                node.outputs["center_x"] = best.x
+                node.outputs["center_y"] = best.y
+                node.outputs["angle"]    = best.angle
+                node.outputs["scale"]    = best.scale
+                # Cập nhật marker tham chiếu trên ảnh kết quả (theo template)
+                self._set_origin(best.origin_x, best.origin_y, from_user=False)
             node.status = "pass" if n > 0 else "fail"
 
             self._set_view("image")
@@ -785,8 +1449,16 @@ class PatMaxDialog(QDialog):
             img = _rv if _rv is not None else self._current_image
             if img is not None:
                 self._img_label.set_image(img)
+            # Khi đang xem result_vis: marker origin đã vẽ trong ảnh, ẩn overlay
+            # để không chồng. Khi xem raw image: bật overlay theo spinbox hiện tại.
+            if _rv is not None:
+                self._img_label.set_origin(None, None)
+            else:
+                self._img_label.set_origin(self._sp_origin_x.value(),
+                                           self._sp_origin_y.value())
             self._view_info.setText("Output image with results")
         elif view == "scoremap":
+            self._img_label.set_origin(None, None)
             img = getattr(self, "_score_map_img", None)
             if img is not None:
                 self._img_label.set_image(img)
@@ -795,6 +1467,7 @@ class PatMaxDialog(QDialog):
                 self._img_label.set_image(None)
                 self._view_info.setText("Run search first")
         elif view == "edges":
+            self._img_label.set_origin(None, None)
             if self._model.is_valid() and self._model.edge_image is not None:
                 import cv2
                 edge_vis = cv2.cvtColor(self._model.edge_image, cv2.COLOR_GRAY2BGR)
@@ -835,6 +1508,24 @@ class PatMaxDialog(QDialog):
                 self._model = model
                 self._node.params["_patmax_model"] = model
                 self._model_preview.update_model(model)
+                # Restore ROI + origin marker + shape từ model
+                if model.train_roi:
+                    rx, ry, rw, rh = model.train_roi
+                    self._current_roi = model.train_roi
+                    st = getattr(model, "shape_type", "rect") or "rect"
+                    sd = getattr(model, "shape_data", None)
+                    self._current_shape = st
+                    self._current_shape_data = dict(sd) if sd else None
+                    self._shape_combo.setCurrentIndex(
+                        {"rect":0,"circle":1,"ellipse":2,"polygon":3}.get(st, 0))
+                    self._img_label.set_shape_mode(st)
+                    if sd:
+                        self._img_label.set_shape_data(st, sd)
+                    else:
+                        self._img_label.set_rect_from_params(rx, ry, rw, rh)
+                    self._set_origin(rx + model.origin_x, ry + model.origin_y,
+                                     from_user=False)
+                    self._origin_combo.setCurrentIndex(7)
                 self._status_chip.setText(f"● LOADED  hash:{model.model_hash}")
                 self._status_chip.setStyleSheet(
                     "color:#00d4ff; font-size:12px; font-weight:700; background:transparent;")
@@ -849,6 +1540,8 @@ class PatMaxDialog(QDialog):
     def _run_pipeline_node(self):
         """Chạy pipeline node PatMax (dùng model đã train)."""
         node = self._node
+        # Refresh nếu ảnh upstream đã đổi
+        self._refresh_image_if_changed()
         img  = self._current_image if self._current_image is not None else self._get_input_image()
         if img is None:
             QMessageBox.warning(self, "Run", "Không có ảnh.")
@@ -877,17 +1570,21 @@ class PatMaxDialog(QDialog):
     #  Helpers
     # ════════════════════════════════════════════════════════════════
     def _get_input_image(self) -> Optional[np.ndarray]:
+        """Trả về RAW upstream image (KHÔNG dùng node.outputs vì đó là
+        result_vis có sẵn marker baked-in, sẽ chồng với overlay)."""
         node = self._node
-        # Từ output của chính node (đã chạy)
-        img = node.outputs.get("image")
-        if img is not None and isinstance(img, np.ndarray):
-            return img
-        # Từ upstream
+        # Ưu tiên upstream — đây là ảnh input gốc
         for conn in self._graph.connections:
             if conn.dst_id == node.node_id and conn.dst_port == "image":
                 src = self._graph.nodes.get(conn.src_id)
                 if src and "image" in src.outputs:
-                    return src.outputs["image"]
+                    img = src.outputs["image"]
+                    if isinstance(img, np.ndarray):
+                        return img
+        # Không có upstream connect → fallback xuống output của chính node
+        img = node.outputs.get("image")
+        if img is not None and isinstance(img, np.ndarray):
+            return img
         return None
 
     def _mk_btn(self, text, bg, fg) -> QPushButton:

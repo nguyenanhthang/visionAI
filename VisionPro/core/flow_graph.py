@@ -210,6 +210,12 @@ class FlowGraph:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False,
                       default=_json_safe)
 
+    @classmethod
+    def load(cls, path: str) -> "FlowGraph":
+        with open(path, "r", encoding="utf-8") as f:
+            return cls.from_dict(json.load(f))
+
+
 def _json_safe(obj):
     """Custom JSON serializer — bỏ qua numpy arrays và objects không serializable."""
     import numpy as np
@@ -218,8 +224,3 @@ def _json_safe(obj):
     if hasattr(obj, '__class__'):
         return f"<{obj.__class__.__name__}>"
     raise TypeError(f"Not serializable: {type(obj)}")
-
-    @classmethod
-    def load(cls, path: str) -> "FlowGraph":
-        with open(path, "r", encoding="utf-8") as f:
-            return cls.from_dict(json.load(f))
