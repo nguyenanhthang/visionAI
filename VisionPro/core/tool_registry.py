@@ -31,6 +31,8 @@ class ParamDef:
     choices: List[str] = field(default_factory=list)
     step: Any = 1
     tooltip: str = ""
+    # Conditional visibility: dict {param_name: required_value}
+    visible_if: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -72,20 +74,54 @@ def _draw_pass_fail(img, is_pass, text=""):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_acquire_image(inputs, params):
-    """CogAcqFifoTool — Acquire image từ file hoặc camera."""
+    """CogAcqFifoTool — Acquire image từ file đơn hoặc folder (frame index).
+
+    Ưu tiên: folder_path > file_path.
+    Khi folder_path là thư mục có ảnh, sẽ lấy ảnh tại index `frame_index`
+    (modulo số file). Hỗ trợ .png .jpg .jpeg .bmp .tif .tiff.
+    """
+    mode = params.get("source_mode", "Folder")
+    folder = params.get("folder_path", "") or ""
+    files = []
+    if mode == "Folder" and folder and os.path.isdir(folder):
+        exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+        try:
+            files = sorted(
+                f for f in os.listdir(folder)
+                if f.lower().endswith(exts) and os.path.isfile(os.path.join(folder, f))
+            )
+        except OSError:
+            files = []
+
+    if files:
+        idx = int(params.get("frame_index", 0)) % len(files)
+        path = os.path.join(folder, files[idx])
+        img = cv2.imread(path)
+        if img is not None:
+            h, w = img.shape[:2]
+            # Auto-advance: lần Run kế tiếp sẽ sang ảnh kế tiếp (cycle)
+            if params.get("auto_advance", True):
+                params["frame_index"] = (idx + 1) % len(files)
+            return {"image": img, "width": w, "height": h,
+                    "acquired": True, "frame_number": idx,
+                    "file_name": files[idx], "frame_count": len(files)}
+
     path = params.get("file_path", "")
     if path and os.path.exists(path):
         img = cv2.imread(path)
         if img is not None:
-            h,w = img.shape[:2]
+            h, w = img.shape[:2]
             return {"image": img, "width": w, "height": h,
-                    "acquired": True, "frame_number": 0}
+                    "acquired": True, "frame_number": 0,
+                    "file_name": os.path.basename(path), "frame_count": 1}
+
     w = max(1, params.get("width", 640))
     h = max(1, params.get("height", 480))
-    img = np.zeros((h,w,3), dtype=np.uint8)
-    cv2.putText(img,"No Image Acquired",(w//2-120,h//2),
-                cv2.FONT_HERSHEY_SIMPLEX,1,(50,50,80),2)
-    return {"image":img,"width":w,"height":h,"acquired":False,"frame_number":0}
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    cv2.putText(img, "No Image Acquired", (w//2 - 120, h//2),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (50, 50, 80), 2)
+    return {"image": img, "width": w, "height": h, "acquired": False,
+            "frame_number": 0, "file_name": "", "frame_count": 0}
 
 def proc_camera_acquire(inputs, params):
     """CogAcqFifoTool (Camera) — Capture từ camera."""
@@ -128,25 +164,55 @@ def proc_patmax(inputs, params):
     ang_step = max(0.5, model.angle_step)
     sc_low   = model.scale_low
     sc_high  = model.scale_high
+    sc_step  = max(0.01, getattr(model, "scale_step", 0.1) or 0.1)
+
+    # Ưu tiên giá trị đã save trong model (PatMaxDialog auto-save). Fall back
+    # node.params chỉ khi model chưa có (PatMaxModel default = 1, ổn).
+    nr = max(1, int(model.num_results or 0)) or int(params.get("num_results", 1))
+    ot = float(getattr(model, "overlap_threshold", 0.5) or 0.5)
+    at = float(model.accept_threshold or 0.5)
 
     results, score_map = run_patmax(
         _bgr(img), model,
-        accept_threshold=params.get("accept_threshold", model.accept_threshold),
+        accept_threshold=at,
         angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
-        scale_low=sc_low,  scale_high=sc_high,  scale_step=0.05,
-        num_results=params.get("num_results", model.num_results),
-        overlap_threshold=params.get("overlap_threshold", 0.5),
+        scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
+        num_results=nr,
+        overlap_threshold=ot,
     )
 
     vis = draw_patmax_results(_bgr(img), results, model)
 
+    objects = [
+        {"x": r.origin_x, "y": r.origin_y, "score": r.score,
+         "angle": r.angle, "scale": r.scale,
+         "center_x": r.x, "center_y": r.y,
+         "origin_x": r.origin_x, "origin_y": r.origin_y}
+        for r in results
+    ]
     if results:
         r = results[0]
-        return {"image": vis, "found": True, "score": r.score,
-                "x": r.x, "y": r.y, "angle": r.angle, "scale": r.scale,
-                "num_found": len(results)}
-    return {"image": vis, "found": False, "score": 0.0,
-            "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
+        out = {"image": vis, "found": True, "score": r.score,
+               "x": r.origin_x, "y": r.origin_y,
+               "angle": r.angle, "scale": r.scale,
+               "num_found": len(results), "objects": objects}
+    else:
+        out = {"image": vis, "found": False, "score": 0.0,
+               "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+               "num_found": 0, "objects": []}
+    # Extra terminals: [{"object": int, "field": str, "name": str}, ...]
+    for term in (params.get("_extra_terminals") or []):
+        try:
+            obj_idx = int(term.get("object", 0))
+            field = str(term.get("field", "x"))
+            name = term.get("name") or f"{field}_{obj_idx}"
+            if 0 <= obj_idx < len(objects):
+                out[name] = objects[obj_idx].get(field, 0.0)
+            else:
+                out[name] = 0.0
+        except Exception:
+            continue
+    return out
 
 
 def proc_patfind(inputs, params):
@@ -1210,10 +1276,25 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
   ToolDef("acquire_image","Acquire Image","Acquire Image",
-    "Load ảnh từ file — CogAcqFifoTool","#0f3460","🖼",
+    "Load ảnh từ file hoặc folder — CogAcqFifoTool","#0f3460","🖼",
     [],[PortDef("image","image"),PortDef("width","number"),PortDef("height","number"),
-        PortDef("acquired","bool")],
-    [P("file_path","Image File","str","",tooltip="Đường dẫn file ảnh"),
+        PortDef("acquired","bool"),PortDef("frame_number","number"),
+        PortDef("frame_count","number"),PortDef("file_name","str")],
+    [ParamDef("source_mode","Source Mode","enum","Folder",
+              choices=["Folder","File"],
+              tooltip="Chọn nguồn ảnh: 1 thư mục cycle qua các ảnh, hoặc 1 file"),
+     ParamDef("folder_path","Image Folder","str","",
+              tooltip="Thư mục chứa ảnh",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("frame_index","Frame Index","int",0,0,99999,
+              tooltip="Index ảnh trong folder — sẽ tự modulo theo số file",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("auto_advance","Auto Advance","bool",True,
+              tooltip="Mỗi lần Run sẽ tự sang ảnh kế tiếp (cycle qua folder)",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("file_path","Image File","str","",
+              tooltip="Đường dẫn 1 file ảnh",
+              visible_if={"source_mode":"File"}),
      P("width","Width","int",640,1,8192),P("height","Height","int",480,1,8192)],
     proc_acquire_image, "CogAcqFifoTool"),
 
@@ -1233,7 +1314,8 @@ TOOL_REGISTRY: List[ToolDef] = [
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
      PortDef("x","number"),PortDef("y","number"),PortDef("angle","number"),
-     PortDef("scale","number"),PortDef("num_found","number")],
+     PortDef("scale","number"),PortDef("num_found","number"),
+     PortDef("objects","list")],
     [P("accept_threshold","Accept Threshold","float",0.5,0,1,step=0.01,
        tooltip="Ngưỡng điểm số chấp nhận (0-1)"),
      P("angle_range","Angle Range (°)","float",0,0,180,step=5,

@@ -92,6 +92,7 @@ class AOIScene(QGraphicsScene):
         self._signals.delete_req.connect(self._delete_node)
         self._signals.open_props.connect(self.node_selected)
         self._signals.moved.connect(self._on_node_moved)
+        self._signals.ports_changed.connect(self._on_ports_changed)
 
         self._drag_port: Optional[PortItem] = None
         self._temp_curve: Optional[TempCurve] = None
@@ -142,6 +143,21 @@ class AOIScene(QGraphicsScene):
         self.graph.remove_node(node_id)
         self.node_deselected.emit()
         self.graph_changed.emit()
+
+    def _on_ports_changed(self, node_id: str):
+        """Khi node thêm/xoá output terminal — vẽ lại các connection liên quan."""
+        for conn in self.graph.connections_for_node(node_id):
+            ci = self._conn_items.get(conn.conn_id)
+            if not ci:
+                continue
+            si = self._node_items.get(conn.src_id)
+            di = self._node_items.get(conn.dst_id)
+            if not si or not di:
+                continue
+            sp = si.get_port_scene_pos(conn.src_port, True)
+            dp = di.get_port_scene_pos(conn.dst_port, False)
+            if sp and dp:
+                ci.update_positions(sp, dp)
 
     def _on_node_moved(self, node_id: str, x: float, y: float):
         for conn in self.graph.connections_for_node(node_id):
