@@ -272,6 +272,8 @@ class PatMaxDialog(QDialog):
         # Load Settings spinboxes từ model + connect auto-save
         self._load_settings_from_model()
         self._wire_settings_autosave()
+        # Apply default Display mode = Basic (ẩn Canny + Train Mode)
+        self._on_train_display_changed(0)
 
         # Save/Load model buttons
         savload = QWidget()
@@ -397,6 +399,24 @@ class PatMaxDialog(QDialog):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
+        # Display mode picker — Basic ẩn Canny + Train Mode, Advanced hiện đầy đủ
+        mode_row = QWidget(); mr_lay = QHBoxLayout(mode_row)
+        mr_lay.setContentsMargins(0, 0, 0, 0); mr_lay.setSpacing(6)
+        lbl_dm = QLabel("Display:")
+        lbl_dm.setStyleSheet("color:#94a3b8; font-size:11px;")
+        lbl_dm.setMinimumWidth(60)
+        self._train_display_combo = QComboBox()
+        self._train_display_combo.addItems(["Basic", "Advanced"])
+        self._train_display_combo.setStyleSheet(
+            "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+            "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+            "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+            "selection-background-color:#1a2236;}")
+        self._train_display_combo.currentIndexChanged.connect(
+            self._on_train_display_changed)
+        mr_lay.addWidget(lbl_dm); mr_lay.addWidget(self._train_display_combo, 1)
+        lay.addWidget(mode_row)
+
         # Shape selector
         shape_grp = QGroupBox("ROI Shape")
         sg2 = QVBoxLayout(shape_grp); sg2.setContentsMargins(8, 22, 8, 8); sg2.setSpacing(6)
@@ -487,10 +507,12 @@ class PatMaxDialog(QDialog):
         cg = QVBoxLayout(canny_grp); cg.setContentsMargins(8,12,8,8); cg.setSpacing(4)
         self._canny_low  = self._mk_spin("Low Threshold",  50,  0, 500, cg)
         self._canny_high = self._mk_spin("High Threshold", 150, 0, 500, cg)
+        self._canny_grp = canny_grp
         lay.addWidget(canny_grp)
 
         # Train Mode
         tm_grp = QGroupBox("Train Mode")
+        self._tm_grp = tm_grp
         tmg = QVBoxLayout(tm_grp); tmg.setContentsMargins(10, 26, 10, 10); tmg.setSpacing(6)
         self._train_mode_combo = QComboBox()
         self._train_mode_combo.addItems([
@@ -709,6 +731,14 @@ class PatMaxDialog(QDialog):
         m.overlap_threshold = float(self._sp_overlap.value())
         # Đảm bảo node.params có reference tới model (cùng instance, an toàn)
         self._node.params["_patmax_model"] = m
+
+    def _on_train_display_changed(self, idx: int):
+        """Basic: ẩn Edge Detection + Train Mode. Advanced: hiện."""
+        advanced = (idx == 1)
+        if hasattr(self, "_canny_grp"):
+            self._canny_grp.setVisible(advanced)
+        if hasattr(self, "_tm_grp"):
+            self._tm_grp.setVisible(advanced)
 
     def _on_refresh_click(self):
         """Force refresh — luôn re-fetch và clear stale state."""

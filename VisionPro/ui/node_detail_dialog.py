@@ -537,10 +537,10 @@ class NodeDetailDialog(QDialog):
                          border:none;font-size:11px;font-weight:600;}
             QTabBar::tab:selected{color:#00d4ff;border-bottom:2px solid #00d4ff;}
         """)
-        params_scroll = QScrollArea(); params_scroll.setWidgetResizable(True)
-        params_scroll.setFrameShape(QFrame.NoFrame)
-        params_scroll.setWidget(self._build_params_widget())
-        tabs.addTab(params_scroll, "⚙ Params")
+        self._params_scroll = QScrollArea(); self._params_scroll.setWidgetResizable(True)
+        self._params_scroll.setFrameShape(QFrame.NoFrame)
+        self._params_scroll.setWidget(self._build_params_widget())
+        tabs.addTab(self._params_scroll, "⚙ Params")
         tabs.addTab(self._build_ports_widget(), "🔌 Ports")
         ll.addWidget(tabs)
 
@@ -681,6 +681,14 @@ class NodeDetailDialog(QDialog):
         else:
             self._param_rows = {}
             for param in tool.params:
+                # Conditional visibility (visible_if)
+                if getattr(param, "visible_if", None):
+                    ok = True
+                    for k, v in param.visible_if.items():
+                        if node.params.get(k) != v:
+                            ok = False; break
+                    if not ok:
+                        continue
                 pr = ParamRow(param, node.params.get(param.name, param.default))
                 if param.tooltip:
                     pr.setToolTip(param.tooltip)
@@ -843,8 +851,19 @@ class NodeDetailDialog(QDialog):
         self._on_run()
 
     def _on_param(self, node_id, name, value):
-        if self._graph and node_id in self._graph.nodes:
-            self._graph.nodes[node_id].params[name] = value
+        if not (self._graph and node_id in self._graph.nodes):
+            return
+        node = self._graph.nodes[node_id]
+        node.params[name] = value
+        # Nếu có param khác phụ thuộc tên này → rebuild Params tab để cập nhật
+        if any(getattr(p, "visible_if", None) and name in p.visible_if
+                for p in node.tool.params):
+            self._rebuild_params_tab()
+
+    def _rebuild_params_tab(self):
+        """Rebuild Params tab — dùng khi visible_if của param khác đổi."""
+        if hasattr(self, "_params_scroll") and self._params_scroll is not None:
+            self._params_scroll.setWidget(self._build_params_widget())
 
     # ════════════════════════════════════════════════════════════════
     #  Run

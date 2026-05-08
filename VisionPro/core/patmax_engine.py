@@ -256,10 +256,12 @@ def _build_shape_mask(shape_type: str, shape_data: Optional[dict],
 # ═══════════════════════════════════════════════════════════════
 def _match_template(gray_img: np.ndarray,
                      img_edges: np.ndarray,
-                     t: Dict) -> Optional[Dict]:
+                     t: Dict,
+                     max_locations: int = 1) -> List[Dict]:
     """
-    Thử match một template đã build sẵn.
-    Trả về dict {score, cx, cy, tx, ty, nW, nH, ...} hoặc None nếu quá to.
+    Match một template đã build sẵn — trả TOP-K peaks trên score map.
+    Cho phép multi-object detection (mỗi peak ≈ một object). Caller
+    sau đó phân biệt overlap qua NMS.
     """
     patch_rot = t["patch"]
     edge_rot_d = t["edge_dil"]
@@ -268,61 +270,65 @@ def _match_template(gray_img: np.ndarray,
     H, W = gray_img.shape[:2]
 
     if nW >= W - 2 or nH >= H - 2:
-        return None
+        return []
 
-    # ── Method 1: NCC trên grayscale patch ──────────────────────
+    # Score maps đầy đủ
     try:
         res_ncc = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_CCOEFF_NORMED)
-        _, s_ncc, _, loc_ncc = cv2.minMaxLoc(res_ncc)
     except cv2.error:
-        s_ncc = 0.0; loc_ncc = (0, 0)
-
-    # ── Method 2: Edge-on-edge ───────────────────────────────────
-    img_e_f    = img_edges.astype(np.float32) / 255.0
-    templ_e_f  = edge_rot_d.astype(np.float32) / 255.0
-
+        return []
+    img_e_f   = img_edges.astype(np.float32) / 255.0
+    templ_e_f = edge_rot_d.astype(np.float32) / 255.0
     try:
         res_edge = cv2.matchTemplate(img_e_f, templ_e_f, cv2.TM_CCOEFF_NORMED)
-        _, s_edge, _, loc_edge = cv2.minMaxLoc(res_edge)
     except cv2.error:
-        s_edge = 0.0; loc_edge = loc_ncc
-
-    # ── Method 3: SQDIFF_NORMED (complement) ────────────────────
+        res_edge = np.zeros_like(res_ncc)
     try:
         res_sq = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_SQDIFF_NORMED)
-        s_sq_min, _, loc_sq_min, _ = cv2.minMaxLoc(res_sq)
-        s_sq = 1.0 - float(s_sq_min)   # convert: nhỏ = tốt → lớn = tốt
+        res_sq_inv = 1.0 - res_sq          # nhỏ = tốt → đảo
     except cv2.error:
-        s_sq = 0.0; loc_sq_min = loc_ncc
+        res_sq_inv = np.zeros_like(res_ncc)
 
-    # ── Weighted combination ─────────────────────────────────────
-    # NCC 50%, edge 30%, sqdiff 20%
-    s_ncc  = max(0.0, float(s_ncc))
-    s_edge = max(0.0, float(s_edge))
-    s_sq   = max(0.0, float(s_sq))
+    s_ncc_map  = np.maximum(res_ncc, 0.0).astype(np.float32)
+    s_edge_map = np.maximum(res_edge, 0.0).astype(np.float32)
+    s_sq_map   = np.clip(res_sq_inv, 0.0, 1.0).astype(np.float32)
+    score_map  = 0.5 * s_ncc_map + 0.3 * s_edge_map + 0.2 * s_sq_map
 
-    score_combined = 0.5 * s_ncc + 0.3 * s_edge + 0.2 * s_sq
+    # Local NMS: suppress peaks gần nhau bằng cách lấy max trong cửa sổ
+    win = max(3, min(nW, nH) // 2)
+    if win % 2 == 0: win += 1
+    kernel = np.ones((win, win), dtype=np.uint8)
+    local_max = cv2.dilate(score_map, kernel)
+    peaks_mask = (score_map == local_max) & (score_map > 0)
 
-    # Lấy vị trí từ method tốt nhất (NCC thường chính xác nhất về vị trí)
-    best_loc = loc_ncc
-    # Nếu NCC rất thấp nhưng edge tốt hơn nhiều → dùng edge loc
-    if s_edge > s_ncc * 1.5:
-        best_loc = loc_edge
+    ys, xs = np.where(peaks_mask)
+    if len(ys) == 0:
+        return []
+    scores = score_map[ys, xs]
 
-    tx, ty = best_loc
-    cx = float(tx + nW / 2)
-    cy = float(ty + nH / 2)
+    # Lấy top-K peaks
+    K = max(1, int(max_locations))
+    if len(scores) > K:
+        idx = np.argpartition(-scores, K)[:K]
+        idx = idx[np.argsort(-scores[idx])]
+    else:
+        idx = np.argsort(-scores)
 
-    return {
-        "score":   score_combined,
-        "s_ncc":   s_ncc,
-        "s_edge":  s_edge,
-        "s_sq":    s_sq,
-        "cx": cx, "cy": cy,
-        "tx": tx, "ty": ty,
-        "nW": nW, "nH": nH,
-        "angle": angle, "scale": scale,
-    }
+    out: List[Dict] = []
+    for i in idx:
+        ty = int(ys[i]); tx = int(xs[i])
+        out.append({
+            "score":  float(scores[i]),
+            "s_ncc":  float(s_ncc_map[ty, tx]),
+            "s_edge": float(s_edge_map[ty, tx]),
+            "s_sq":   float(s_sq_map[ty, tx]),
+            "cx": float(tx + nW / 2),
+            "cy": float(ty + nH / 2),
+            "tx": tx, "ty": ty,
+            "nW": nW, "nH": nH,
+            "angle": angle, "scale": scale,
+        })
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -373,25 +379,26 @@ def run_patmax(image: np.ndarray,
     score_map = np.zeros((H, W), dtype=np.float32)
     best_any = 0.0
 
+    # Oversample peaks per template — global NMS sau đó dedupe vị trí trùng
+    peaks_per_template = max(num_results * 4, 8)
+
     for t in templates:
-        result = _match_template(gray_img, img_edges, t)
-        if result is None:
-            continue
+        results_t = _match_template(gray_img, img_edges, t, peaks_per_template)
+        for result in results_t:
+            score = result["score"]
+            best_any = max(best_any, score)
 
-        score = result["score"]
-        best_any = max(best_any, score)
+            tx, ty = result["tx"], result["ty"]
+            nW, nH = result["nW"], result["nH"]
+            s_for_map = result["s_ncc"]
+            if (0 <= ty < H - nH) and (0 <= tx < W - nW):
+                cy_i = min(int(result["cy"]), H - 1)
+                cx_i = min(int(result["cx"]), W - 1)
+                if score_map[cy_i, cx_i] < s_for_map:
+                    score_map[cy_i, cx_i] = s_for_map
 
-        tx, ty = result["tx"], result["ty"]
-        nW, nH = result["nW"], result["nH"]
-        s_for_map = result["s_ncc"]
-        if (0 <= ty < H - nH) and (0 <= tx < W - nW):
-            cy_i = min(int(result["cy"]), H-1)
-            cx_i = min(int(result["cx"]), W-1)
-            if score_map[cy_i, cx_i] < s_for_map:
-                score_map[cy_i, cx_i] = s_for_map
-
-        if score >= accept_threshold:
-            candidates.append(result)
+            if score >= accept_threshold:
+                candidates.append(result)
 
     print(f"[PatMax Search] best_score={best_any:.4f}  "
           f"candidates_above_threshold={len(candidates)}  "
