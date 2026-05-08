@@ -1267,17 +1267,21 @@ class PatMaxDialog(QDialog):
     #  Helpers
     # ════════════════════════════════════════════════════════════════
     def _get_input_image(self) -> Optional[np.ndarray]:
+        """Trả về RAW upstream image (KHÔNG dùng node.outputs vì đó là
+        result_vis có sẵn marker baked-in, sẽ chồng với overlay)."""
         node = self._node
-        # Từ output của chính node (đã chạy)
-        img = node.outputs.get("image")
-        if img is not None and isinstance(img, np.ndarray):
-            return img
-        # Từ upstream
+        # Ưu tiên upstream — đây là ảnh input gốc
         for conn in self._graph.connections:
             if conn.dst_id == node.node_id and conn.dst_port == "image":
                 src = self._graph.nodes.get(conn.src_id)
                 if src and "image" in src.outputs:
-                    return src.outputs["image"]
+                    img = src.outputs["image"]
+                    if isinstance(img, np.ndarray):
+                        return img
+        # Không có upstream connect → fallback xuống output của chính node
+        img = node.outputs.get("image")
+        if img is not None and isinstance(img, np.ndarray):
+            return img
         return None
 
     def _mk_btn(self, text, bg, fg) -> QPushButton:

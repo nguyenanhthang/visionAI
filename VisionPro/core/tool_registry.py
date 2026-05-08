@@ -96,6 +96,9 @@ def proc_acquire_image(inputs, params):
         img = cv2.imread(path)
         if img is not None:
             h, w = img.shape[:2]
+            # Auto-advance: lần Run kế tiếp sẽ sang ảnh kế tiếp (cycle)
+            if params.get("auto_advance", True):
+                params["frame_index"] = (idx + 1) % len(files)
             return {"image": img, "width": w, "height": h,
                     "acquired": True, "frame_number": idx,
                     "file_name": files[idx], "frame_count": len(files)}
@@ -1249,6 +1252,8 @@ TOOL_REGISTRY: List[ToolDef] = [
         tooltip="Thư mục chứa ảnh (ưu tiên hơn file_path khi có ảnh)"),
      P("frame_index","Frame Index","int",0,0,99999,
         tooltip="Index ảnh trong folder — sẽ tự modulo theo số file"),
+     P("auto_advance","Auto Advance","bool",True,
+        tooltip="Mỗi lần Run sẽ tự sang ảnh kế tiếp (cycle qua folder)"),
      P("file_path","Image File","str","",tooltip="Đường dẫn 1 file ảnh"),
      P("width","Width","int",640,1,8192),P("height","Height","int",480,1,8192)],
     proc_acquire_image, "CogAcqFifoTool"),
