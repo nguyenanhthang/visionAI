@@ -399,14 +399,17 @@ class PatMaxDialog(QDialog):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
-        # Display mode picker — Basic ẩn Canny + Train Mode, Advanced hiện đầy đủ
+        # Config picker — Canny vs Train Mode, chỉ hiện 1 trong 2
         mode_row = QWidget(); mr_lay = QHBoxLayout(mode_row)
         mr_lay.setContentsMargins(0, 0, 0, 0); mr_lay.setSpacing(6)
-        lbl_dm = QLabel("Display:")
+        lbl_dm = QLabel("Config:")
         lbl_dm.setStyleSheet("color:#94a3b8; font-size:11px;")
         lbl_dm.setMinimumWidth(60)
         self._train_display_combo = QComboBox()
-        self._train_display_combo.addItems(["Basic", "Advanced"])
+        self._train_display_combo.addItems([
+            "Edge Detection (Canny)",
+            "Train Mode (DOF)",
+        ])
         self._train_display_combo.setStyleSheet(
             "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
             "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
@@ -733,12 +736,12 @@ class PatMaxDialog(QDialog):
         self._node.params["_patmax_model"] = m
 
     def _on_train_display_changed(self, idx: int):
-        """Basic: ẩn Edge Detection + Train Mode. Advanced: hiện."""
-        advanced = (idx == 1)
+        """idx=0 → chỉ Canny; idx=1 → chỉ Train Mode (1 trong 2)."""
+        show_canny = (idx == 0)
         if hasattr(self, "_canny_grp"):
-            self._canny_grp.setVisible(advanced)
+            self._canny_grp.setVisible(show_canny)
         if hasattr(self, "_tm_grp"):
-            self._tm_grp.setVisible(advanced)
+            self._tm_grp.setVisible(not show_canny)
 
     def _on_refresh_click(self):
         """Force refresh — luôn re-fetch và clear stale state."""

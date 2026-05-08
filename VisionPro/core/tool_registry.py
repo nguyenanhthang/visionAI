@@ -164,14 +164,21 @@ def proc_patmax(inputs, params):
     ang_step = max(0.5, model.angle_step)
     sc_low   = model.scale_low
     sc_high  = model.scale_high
+    sc_step  = max(0.01, getattr(model, "scale_step", 0.1) or 0.1)
+
+    # Ưu tiên giá trị đã save trong model (PatMaxDialog auto-save). Fall back
+    # node.params chỉ khi model chưa có (PatMaxModel default = 1, ổn).
+    nr = max(1, int(model.num_results or 0)) or int(params.get("num_results", 1))
+    ot = float(getattr(model, "overlap_threshold", 0.5) or 0.5)
+    at = float(model.accept_threshold or 0.5)
 
     results, score_map = run_patmax(
         _bgr(img), model,
-        accept_threshold=params.get("accept_threshold", model.accept_threshold),
+        accept_threshold=at,
         angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
-        scale_low=sc_low,  scale_high=sc_high,  scale_step=0.05,
-        num_results=params.get("num_results", model.num_results),
-        overlap_threshold=params.get("overlap_threshold", 0.5),
+        scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
+        num_results=nr,
+        overlap_threshold=ot,
     )
 
     vis = draw_patmax_results(_bgr(img), results, model)
