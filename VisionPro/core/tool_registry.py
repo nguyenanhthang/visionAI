@@ -31,6 +31,8 @@ class ParamDef:
     choices: List[str] = field(default_factory=list)
     step: Any = 1
     tooltip: str = ""
+    # Conditional visibility: dict {param_name: required_value}
+    visible_if: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,9 +80,10 @@ def proc_acquire_image(inputs, params):
     Khi folder_path là thư mục có ảnh, sẽ lấy ảnh tại index `frame_index`
     (modulo số file). Hỗ trợ .png .jpg .jpeg .bmp .tif .tiff.
     """
+    mode = params.get("source_mode", "Folder")
     folder = params.get("folder_path", "") or ""
     files = []
-    if folder and os.path.isdir(folder):
+    if mode == "Folder" and folder and os.path.isdir(folder):
         exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
         try:
             files = sorted(
@@ -173,14 +176,36 @@ def proc_patmax(inputs, params):
 
     vis = draw_patmax_results(_bgr(img), results, model)
 
+    objects = [
+        {"x": r.origin_x, "y": r.origin_y, "score": r.score,
+         "angle": r.angle, "scale": r.scale,
+         "center_x": r.x, "center_y": r.y,
+         "origin_x": r.origin_x, "origin_y": r.origin_y}
+        for r in results
+    ]
     if results:
         r = results[0]
-        return {"image": vis, "found": True, "score": r.score,
-                "x": r.origin_x, "y": r.origin_y,
-                "angle": r.angle, "scale": r.scale,
-                "num_found": len(results)}
-    return {"image": vis, "found": False, "score": 0.0,
-            "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
+        out = {"image": vis, "found": True, "score": r.score,
+               "x": r.origin_x, "y": r.origin_y,
+               "angle": r.angle, "scale": r.scale,
+               "num_found": len(results), "objects": objects}
+    else:
+        out = {"image": vis, "found": False, "score": 0.0,
+               "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+               "num_found": 0, "objects": []}
+    # Extra terminals: [{"object": int, "field": str, "name": str}, ...]
+    for term in (params.get("_extra_terminals") or []):
+        try:
+            obj_idx = int(term.get("object", 0))
+            field = str(term.get("field", "x"))
+            name = term.get("name") or f"{field}_{obj_idx}"
+            if 0 <= obj_idx < len(objects):
+                out[name] = objects[obj_idx].get(field, 0.0)
+            else:
+                out[name] = 0.0
+        except Exception:
+            continue
+    return out
 
 
 def proc_patfind(inputs, params):
@@ -1248,13 +1273,21 @@ TOOL_REGISTRY: List[ToolDef] = [
     [],[PortDef("image","image"),PortDef("width","number"),PortDef("height","number"),
         PortDef("acquired","bool"),PortDef("frame_number","number"),
         PortDef("frame_count","number"),PortDef("file_name","str")],
-    [P("folder_path","Image Folder","str","",
-        tooltip="Thư mục chứa ảnh (ưu tiên hơn file_path khi có ảnh)"),
-     P("frame_index","Frame Index","int",0,0,99999,
-        tooltip="Index ảnh trong folder — sẽ tự modulo theo số file"),
-     P("auto_advance","Auto Advance","bool",True,
-        tooltip="Mỗi lần Run sẽ tự sang ảnh kế tiếp (cycle qua folder)"),
-     P("file_path","Image File","str","",tooltip="Đường dẫn 1 file ảnh"),
+    [ParamDef("source_mode","Source Mode","enum","Folder",
+              choices=["Folder","File"],
+              tooltip="Chọn nguồn ảnh: 1 thư mục cycle qua các ảnh, hoặc 1 file"),
+     ParamDef("folder_path","Image Folder","str","",
+              tooltip="Thư mục chứa ảnh",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("frame_index","Frame Index","int",0,0,99999,
+              tooltip="Index ảnh trong folder — sẽ tự modulo theo số file",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("auto_advance","Auto Advance","bool",True,
+              tooltip="Mỗi lần Run sẽ tự sang ảnh kế tiếp (cycle qua folder)",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("file_path","Image File","str","",
+              tooltip="Đường dẫn 1 file ảnh",
+              visible_if={"source_mode":"File"}),
      P("width","Width","int",640,1,8192),P("height","Height","int",480,1,8192)],
     proc_acquire_image, "CogAcqFifoTool"),
 
@@ -1274,7 +1307,8 @@ TOOL_REGISTRY: List[ToolDef] = [
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
      PortDef("x","number"),PortDef("y","number"),PortDef("angle","number"),
-     PortDef("scale","number"),PortDef("num_found","number")],
+     PortDef("scale","number"),PortDef("num_found","number"),
+     PortDef("objects","list")],
     [P("accept_threshold","Accept Threshold","float",0.5,0,1,step=0.01,
        tooltip="Ngưỡng điểm số chấp nhận (0-1)"),
      P("angle_range","Angle Range (°)","float",0,0,180,step=5,
