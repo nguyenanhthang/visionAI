@@ -1136,8 +1136,6 @@ class PatMaxDialog(QDialog):
                     "background:#0d2a1a; color:#39ff14; font-size:11px;"
                     "font-family:'Courier New'; padding:8px; border-radius:4px;"
                     "border:1px solid #39ff1433;")
-                # Cập nhật suggested threshold
-                self._sp_threshold.setValue(round(best.score * 0.85, 3))
             else:
                 # Tìm best score từ console log (chạy lại với threshold=0 để biết)
                 results_all, _ = run_patmax(
@@ -1156,16 +1154,14 @@ class PatMaxDialog(QDialog):
                         f"NOT FOUND above threshold={self._sp_threshold.value():.3f}\n"
                         f"Best score found: {best_s:.4f}\n"
                         f"➡ Suggested threshold: {suggest:.3f}\n"
-                        f"Click 'Apply Suggest' hoặc giảm threshold.")
+                        f"Hạ Min Score xuống ≤ {suggest:.3f} rồi Run Search lại.")
                     self._search_summary.setStyleSheet(
                         "background:#2a1a0d; color:#ffd700; font-size:11px;"
                         "font-family:'Courier New'; padding:8px; border-radius:4px;"
                         "border:1px solid #ffd70033;")
-                    # Auto-fill suggested threshold
-                    self._sp_threshold.setValue(suggest)
                     self._img_status.setText(
-                        f"⚠ Threshold tự động điều chỉnh xuống {suggest:.3f} — "
-                        f"nhấn Run Search lại")
+                        f"⚠ Best score = {best_s:.4f} — Min Score giữ nguyên, "
+                        f"chỉnh tay nếu muốn.")
                 else:
                     self._search_summary.setText(
                         "NOT FOUND\nModel không match với ảnh này.\n"

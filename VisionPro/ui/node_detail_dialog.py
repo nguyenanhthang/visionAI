@@ -62,6 +62,10 @@ class InteractiveImageLabel(QLabel):
         self._shape: str = "rect"
         self._shape_data: dict = {}                                # toạ độ ảnh
         self._poly_drawing: list = []                              # [(x,y), ...] đang vẽ
+        # Edit-mode state cho shape đã vẽ xong (move / resize qua corner handles)
+        self._edit_action: Optional[str] = None    # "move" | "tl" | "tr" | "bl" | "br"
+        self._edit_anchor_w: Optional[QPoint] = None
+        self._edit_orig_data: dict = {}
 
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(400, 300)
@@ -166,6 +170,97 @@ class InteractiveImageLabel(QLabel):
             return 0, 0
         return int((wx - self._off_x) / self._scale), int((wy - self._off_y) / self._scale)
 
+    # ── Edit-mode helpers (move / resize shape đã vẽ xong) ─────────
+    def _shape_widget_bbox(self) -> Optional[QRect]:
+        """Bbox (widget coords) của shape đang lưu trong _shape_data."""
+        sd = self._shape_data
+        if not sd or self._shape not in ("rect", "ellipse", "circle"):
+            return None
+        if self._shape == "circle":
+            wx, wy = self._img_to_widget(sd["cx"], sd["cy"])
+            wr = int(sd["r"] * self._scale)
+            return QRect(wx - wr, wy - wr, 2 * wr, 2 * wr)
+        wx, wy = self._img_to_widget(sd["x"], sd["y"])
+        ww = int(sd["w"] * self._scale)
+        wh = int(sd["h"] * self._scale)
+        return QRect(wx, wy, ww, wh)
+
+    def _hit_corner(self, wx: int, wy: int, tol: int = 8) -> Optional[str]:
+        bb = self._shape_widget_bbox()
+        if bb is None:
+            return None
+        for name, (cx, cy) in (
+            ("tl", (bb.left(),  bb.top())),
+            ("tr", (bb.right(), bb.top())),
+            ("bl", (bb.left(),  bb.bottom())),
+            ("br", (bb.right(), bb.bottom())),
+        ):
+            if abs(wx - cx) <= tol and abs(wy - cy) <= tol:
+                return name
+        return None
+
+    def _hit_body(self, wx: int, wy: int) -> bool:
+        bb = self._shape_widget_bbox()
+        return bb is not None and bb.contains(wx, wy)
+
+    def _apply_edit(self, pos: QPoint):
+        """Áp delta widget→ảnh, cập nhật _shape_data theo _edit_action."""
+        if self._edit_anchor_w is None or not self._edit_orig_data \
+                or self._scale <= 0:
+            return
+        dx_i = (pos.x() - self._edit_anchor_w.x()) / self._scale
+        dy_i = (pos.y() - self._edit_anchor_w.y()) / self._scale
+        sd = dict(self._edit_orig_data)
+        if self._arr is not None:
+            H, W = self._arr.shape[:2]
+        else:
+            H = W = 10 ** 9
+
+        if self._shape in ("rect", "ellipse"):
+            x = sd["x"]; y = sd["y"]; w = sd["w"]; h = sd["h"]
+            act = self._edit_action
+            if act == "move":
+                x = max(0, min(int(round(x + dx_i)), W - w))
+                y = max(0, min(int(round(y + dy_i)), H - h))
+            elif act == "tl":
+                nx = int(round(x + dx_i)); ny = int(round(y + dy_i))
+                nw = w + (x - nx); nh = h + (y - ny)
+                if nw >= 4 and nh >= 4 and nx >= 0 and ny >= 0:
+                    x, y, w, h = nx, ny, nw, nh
+            elif act == "tr":
+                ny = int(round(y + dy_i))
+                nh = h + (y - ny); nw = int(round(w + dx_i))
+                if nw >= 4 and nh >= 4 and ny >= 0 and (x + nw) <= W:
+                    y, w, h = ny, nw, nh
+            elif act == "bl":
+                nx = int(round(x + dx_i))
+                nw = w + (x - nx); nh = int(round(h + dy_i))
+                if nw >= 4 and nh >= 4 and nx >= 0 and (y + nh) <= H:
+                    x, w, h = nx, nw, nh
+            elif act == "br":
+                nw = int(round(w + dx_i)); nh = int(round(h + dy_i))
+                if nw >= 4 and nh >= 4 and (x + nw) <= W and (y + nh) <= H:
+                    w, h = nw, nh
+            sd.update({"x": x, "y": y, "w": w, "h": h})
+
+        elif self._shape == "circle":
+            cx = sd["cx"]; cy = sd["cy"]; r = sd["r"]
+            if self._edit_action == "move":
+                cx = max(r, min(int(round(cx + dx_i)), W - r))
+                cy = max(r, min(int(round(cy + dy_i)), H - r))
+            else:
+                # Bất kỳ corner nào → resize bán kính theo khoảng cách tới tâm
+                wx_c, wy_c = self._img_to_widget(cx, cy)
+                d_w = ((pos.x() - wx_c) ** 2 + (pos.y() - wy_c) ** 2) ** 0.5
+                r = max(4, int(round(d_w / self._scale)))
+                r = min(r, cx, cy, W - cx, H - cy)
+            x = max(0, cx - r); y = max(0, cy - r)
+            sd.update({"cx": cx, "cy": cy, "r": r,
+                        "x": x, "y": y, "w": 2 * r, "h": 2 * r})
+
+        self._shape_data = sd
+        self._render()
+
     def _render(self):
         if self._arr is None:
             self.setText("No Image\nRun pipeline first or load image source.")
@@ -240,6 +335,20 @@ class InteractiveImageLabel(QLabel):
                 from PySide6.QtGui import QPolygonF
                 pts_w = [QPointF(*self._img_to_widget(px, py)) for px, py in sd["pts"]]
                 p.drawPolygon(QPolygonF(pts_w))
+
+            # Corner handles cho rect/ellipse/circle — chỉ hiện khi
+            # KHÔNG đang vẽ rubber-band, để user biết có thể move/resize.
+            if (self.mode in ("roi", "template")
+                    and self._shape in ("rect", "ellipse", "circle")
+                    and not self._dragging):
+                bb = self._shape_widget_bbox()
+                if bb is not None:
+                    p.setPen(QPen(col, 1)); p.setBrush(QBrush(col))
+                    for cx, cy in ((bb.left(),  bb.top()),
+                                    (bb.right(), bb.top()),
+                                    (bb.left(),  bb.bottom()),
+                                    (bb.right(), bb.bottom())):
+                        p.drawRect(cx - 4, cy - 4, 8, 8)
 
         # Đang drag rect/circle/ellipse
         draw_rect = self._rect
@@ -348,10 +457,24 @@ class InteractiveImageLabel(QLabel):
                 self._poly_drawing.append((ix_f, iy_f))
                 self._render()
                 return
-            # rect / circle / ellipse
+            # rect / circle / ellipse — kiểm edit handle/body trước khi vẽ mới
+            if self._shape in ("rect", "ellipse", "circle") and self._shape_data:
+                corner = self._hit_corner(pos.x(), pos.y())
+                if corner:
+                    self._edit_action = corner
+                    self._edit_anchor_w = pos
+                    self._edit_orig_data = dict(self._shape_data)
+                    return
+                if self._hit_body(pos.x(), pos.y()):
+                    self._edit_action = "move"
+                    self._edit_anchor_w = pos
+                    self._edit_orig_data = dict(self._shape_data)
+                    return
+            # Click ngoài shape (hoặc chưa có shape) → vẽ mới (replace shape cũ)
             self._drag_start = pos
             self._dragging   = True
             self._rect = QRect(pos, QSize(0, 0))
+            self._shape_data = {}    # xoá shape cũ để không hiển thị chồng
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if self.mode in ("roi", "template") and self._shape == "polygon" \
@@ -379,6 +502,9 @@ class InteractiveImageLabel(QLabel):
         if self._dragging_origin:
             self._update_origin_from_widget(pos.x(), pos.y())
             return
+        if self._edit_action:
+            self._apply_edit(pos)
+            return
         if not self._dragging or self._drag_start is None:
             return
         if self._shape == "circle":
@@ -393,6 +519,22 @@ class InteractiveImageLabel(QLabel):
     def mouseReleaseEvent(self, event: QMouseEvent):
         if self._dragging_origin:
             self._dragging_origin = False
+            return
+        if self._edit_action:
+            # Kết thúc move/resize — phát signal cho dialog cha cập nhật ROI
+            self._edit_action = None
+            self._edit_anchor_w = None
+            self._edit_orig_data = {}
+            sd = self._shape_data
+            if sd and self._shape in ("rect", "ellipse", "circle") \
+                    and "x" in sd and "y" in sd:
+                self.shape_drawn.emit(self._shape, dict(sd))
+                self.roi_changed.emit(int(sd["x"]), int(sd["y"]),
+                                       int(sd["w"]), int(sd["h"]))
+                if self.mode == "template":
+                    self.template_drawn.emit(int(sd["x"]), int(sd["y"]),
+                                              int(sd["w"]), int(sd["h"]))
+            self._render()
             return
         if not self._dragging:
             return

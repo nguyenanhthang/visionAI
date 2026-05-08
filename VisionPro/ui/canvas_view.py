@@ -173,12 +173,25 @@ class AOIScene(QGraphicsScene):
                     ci.update_positions(sp, dp)
 
     def _port_at(self, scene_pos: QPointF) -> Optional[PortItem]:
+        """Tìm PortItem GẦN NHẤT trong bán kính SNAP (px scene).
+        QGraphicsScene.items() trả về theo z-order, không theo khoảng cách —
+        nên với các port xếp dọc khít nhau (Acquire Image: image/width/height/...)
+        có thể trả về nhầm port khác → fix: chọn theo Euclidean distance.
+        """
         SNAP = 16.0
+        best: Optional[PortItem] = None
+        best_d2 = SNAP * SNAP + 1
         for item in self.items(QRectF(scene_pos.x()-SNAP, scene_pos.y()-SNAP,
                                        SNAP*2, SNAP*2)):
-            if isinstance(item, PortItem):
-                return item
-        return None
+            if not isinstance(item, PortItem):
+                continue
+            c = item.scene_center()
+            dx = c.x() - scene_pos.x(); dy = c.y() - scene_pos.y()
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best_d2 = d2
+                best = item
+        return best
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
