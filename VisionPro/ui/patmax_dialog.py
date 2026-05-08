@@ -170,8 +170,8 @@ class ResultTable(QTableWidget):
             for j, (val, fmt) in enumerate([
                 (str(i+1),         "{}"),
                 (r.score,          "{:.4f}"),
-                (r.x,              "{:.2f}"),
-                (r.y,              "{:.2f}"),
+                (r.origin_x,       "{:.2f}"),
+                (r.origin_y,       "{:.2f}"),
                 (r.angle,          "{:+.2f}"),
                 (r.scale,          "{:.3f}"),
             ]):
@@ -366,8 +366,14 @@ class PatMaxDialog(QDialog):
     #  Build tabs
     # ════════════════════════════════════════════════════════════════
     def _build_train_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
-        lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
+        inner = QWidget()
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+
+        w = inner
+        lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8); lay.setSpacing(8)
 
         hint = QLabel("1. Chọn loại shape ROI (Rect/Circle/Ellipse/Polygon)\n"
                        "2. Vẽ vùng Pattern trên ảnh — Polygon: click từng đỉnh,\n"
@@ -490,7 +496,7 @@ class PatMaxDialog(QDialog):
         self._train_status.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._train_status)
         lay.addStretch()
-        return w
+        return scroll
 
     def _build_search_tab(self) -> QWidget:
         w = QWidget(); lay = QVBoxLayout(w)
@@ -922,7 +928,7 @@ class PatMaxDialog(QDialog):
                 self._search_summary.setText(
                     f"Found: {n} result(s)\n"
                     f"Best: score={best.score:.4f}  "
-                    f"x={best.x:.2f}  y={best.y:.2f}  "
+                    f"origin=({best.origin_x:.2f}, {best.origin_y:.2f})  "
                     f"angle={best.angle:+.2f}°")
                 self._search_summary.setStyleSheet(
                     "background:#0d2a1a; color:#39ff14; font-size:11px;"
@@ -974,13 +980,16 @@ class PatMaxDialog(QDialog):
             node.outputs["image"]     = result_vis
             if n > 0:
                 best = results[0]
+                # x, y = toạ độ điểm tham chiếu (yellow) — chính là output chính
                 node.outputs["score"]    = best.score
-                node.outputs["x"]        = best.x
-                node.outputs["y"]        = best.y
-                node.outputs["angle"]    = best.angle
-                node.outputs["scale"]    = best.scale
+                node.outputs["x"]        = best.origin_x
+                node.outputs["y"]        = best.origin_y
                 node.outputs["origin_x"] = best.origin_x
                 node.outputs["origin_y"] = best.origin_y
+                node.outputs["center_x"] = best.x
+                node.outputs["center_y"] = best.y
+                node.outputs["angle"]    = best.angle
+                node.outputs["scale"]    = best.scale
                 # Cập nhật marker tham chiếu trên ảnh kết quả (theo template)
                 self._set_origin(best.origin_x, best.origin_y, from_user=False)
             node.status = "pass" if n > 0 else "fail"

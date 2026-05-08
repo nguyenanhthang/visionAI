@@ -452,50 +452,45 @@ def draw_patmax_results(image: np.ndarray,
             pts = np.array(r.corners, dtype=np.int32)
             cv2.polylines(vis, [pts], True, col, 2)
 
-        # Pattern center: ch\u1ea5m + v\u00f2ng nh\u1ecf (kh\u00f4ng crosshair \u0111\u1ec3 kh\u1ecfi \u0111\u00e8 origin)
-        cx, cy = int(r.x), int(r.y)
-        sz = max(14, int(min(r.width, r.height) * 0.18))
-        cv2.circle(vis, (cx, cy), 7, col, 2, cv2.LINE_AA)
-        cv2.circle(vis, (cx, cy), 3, col, -1, cv2.LINE_AA)
-
-        # Angle arrow (t\u1eeb t\u00e2m template)
-        if abs(r.angle) > 0.5:
-            rad = math.radians(-r.angle)
-            ex  = int(cx + math.cos(rad) * sz * 2)
-            ey  = int(cy + math.sin(rad) * sz * 2)
-            cv2.arrowedLine(vis, (cx,cy), (ex,ey), (255,210,0), 2, tipLength=0.3)
-
-        # Origin marker (transformed) \u2014 X-shape v\u00e0ng \u0111\u1ec3 t\u00e1ch bi\u1ec7t visual
+        # T\u00ednh origin (transformed) \u2014 \u0111\u00e2y l\u00e0 MARKER CH\u00cdNH (tham chi\u1ebfu)
         if has_origin:
             rad_o = math.radians(-r.angle)
             ca = math.cos(rad_o); sa = math.sin(rad_o)
             s  = r.scale if r.scale else 1.0
             ox = float(r.x) + s * (pdx * ca - pdy * sa)
             oy = float(r.y) + s * (pdx * sa + pdy * ca)
-            ox_i = int(round(ox)); oy_i = int(round(oy))
-            o_col = (0, 215, 255)   # v\u00e0ng (BGR)
-            # \u0110\u01b0\u1eddng n\u1ed1i t\u00e2m template \u2192 origin (ch\u1ec9 n\u1ebfu kh\u00e1c v\u1ecb tr\u00ed)
-            if abs(ox_i - cx) + abs(oy_i - cy) > 6:
-                cv2.line(vis, (cx, cy), (ox_i, oy_i), o_col, 1, cv2.LINE_AA)
-            # X-shape (ch\u00e9o 45\u00b0) \u2014 tr\u00e1nh \u0111\u00e8 + c\u1ee7a result center
-            cv2.line(vis, (ox_i - 10, oy_i - 10), (ox_i + 10, oy_i + 10),
-                     o_col, 2, cv2.LINE_AA)
-            cv2.line(vis, (ox_i - 10, oy_i + 10), (ox_i + 10, oy_i - 10),
-                     o_col, 2, cv2.LINE_AA)
-            cv2.circle(vis, (ox_i, oy_i), 12, o_col, 2, cv2.LINE_AA)
-            cv2.circle(vis, (ox_i, oy_i), 2, o_col, -1, cv2.LINE_AA)
-            # Label \u0111\u1eb7t offset \u0111\u1ec3 kh\u00f4ng tr\u00f9ng nh\u00e3n c\u1ee7a result
-            cv2.putText(vis, f"O({ox:.0f},{oy:.0f})",
-                        (ox_i + 16, oy_i + 16), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.45, o_col, 1, cv2.LINE_AA)
+        else:
+            ox = float(r.x); oy = float(r.y)
+        ox_i = int(round(ox)); oy_i = int(round(oy))
 
-        # Label
+        # Marker tham chi\u1ebfu: v\u00f2ng xanh (theo score) + X v\u00e0ng \u0111\u00e8 l\u00ean \u2014 g\u1ed9p 1 v\u1ecb tr\u00ed
+        sz = max(14, int(min(r.width, r.height) * 0.18))
+        cv2.circle(vis, (ox_i, oy_i), 11, col, 2, cv2.LINE_AA)
+        cv2.circle(vis, (ox_i, oy_i), 3, col, -1, cv2.LINE_AA)
+        o_col = (0, 215, 255)   # v\u00e0ng (BGR)
+        cv2.line(vis, (ox_i - 9, oy_i - 9), (ox_i + 9, oy_i + 9),
+                 o_col, 2, cv2.LINE_AA)
+        cv2.line(vis, (ox_i - 9, oy_i + 9), (ox_i + 9, oy_i - 9),
+                 o_col, 2, cv2.LINE_AA)
+
+        # Angle arrow \u2014 ph\u00e1t t\u1eeb marker (origin)
+        if abs(r.angle) > 0.5:
+            rad = math.radians(-r.angle)
+            ex  = int(ox_i + math.cos(rad) * sz * 2)
+            ey  = int(oy_i + math.sin(rad) * sz * 2)
+            cv2.arrowedLine(vis, (ox_i, oy_i), (ex, ey),
+                             (255, 210, 0), 2, tipLength=0.3)
+
+        # Label: score + to\u1ea1 \u0111\u1ed9 origin
         lx = max(0, int(r.x - r.width/2))
         ly = max(16, int(r.y - r.height/2) - 8)
         label = f"#{i+1} {r.score:.3f}"
         if abs(r.angle) > 0.5:
             label += f" {r.angle:+.1f}\u00b0"
         cv2.putText(vis, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
+        cv2.putText(vis, f"({ox:.0f},{oy:.0f})",
+                    (ox_i + 14, oy_i + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, o_col, 1, cv2.LINE_AA)
 
     n = len(results)
     st_col = (0,220,80) if n > 0 else (0,60,255)
