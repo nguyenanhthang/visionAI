@@ -475,7 +475,9 @@ class PatMaxDialog(QDialog):
 
             lay.addWidget(algo_grp)
 
-        # Config picker — Canny vs Train Mode, chỉ hiện 1 trong 2
+        # Config picker — Canny vs Train Mode, chỉ hiện 1 trong 2.
+        # Ẩn hoàn toàn cho PatMax Align Tool (đã có Algorithm + Train Mode riêng).
+        is_align_tool = (self._node.tool.tool_id == "patmax_align")
         mode_row = QWidget(); mr_lay = QHBoxLayout(mode_row)
         mr_lay.setContentsMargins(0, 0, 0, 0); mr_lay.setSpacing(6)
         lbl_dm = QLabel("Config:")
@@ -494,6 +496,8 @@ class PatMaxDialog(QDialog):
         self._train_display_combo.currentIndexChanged.connect(
             self._on_train_display_changed)
         mr_lay.addWidget(lbl_dm); mr_lay.addWidget(self._train_display_combo, 1)
+        if is_align_tool:
+            mode_row.setVisible(False)
         lay.addWidget(mode_row)
 
         # ROI Mode — Single / Multi-Region (gộp 1 pattern) / Multi-Pattern (độc lập)
@@ -637,11 +641,15 @@ class PatMaxDialog(QDialog):
         self._canny_low  = self._mk_spin("Low Threshold",  50,  0, 500, cg)
         self._canny_high = self._mk_spin("High Threshold", 150, 0, 500, cg)
         self._canny_grp = canny_grp
+        if is_align_tool:
+            canny_grp.setVisible(False)
         lay.addWidget(canny_grp)
 
         # Train Mode
         tm_grp = QGroupBox("Train Mode")
         self._tm_grp = tm_grp
+        if is_align_tool:
+            tm_grp.setVisible(False)
         tmg = QVBoxLayout(tm_grp); tmg.setContentsMargins(10, 26, 10, 10); tmg.setSpacing(6)
         self._train_mode_combo = QComboBox()
         self._train_mode_combo.addItems([
@@ -862,7 +870,14 @@ class PatMaxDialog(QDialog):
         self._node.params["_patmax_model"] = m
 
     def _on_train_display_changed(self, idx: int):
-        """idx=0 → chỉ Canny; idx=1 → chỉ Train Mode (1 trong 2)."""
+        """idx=0 → chỉ Canny; idx=1 → chỉ Train Mode (1 trong 2).
+        PatMax Align Tool: ẩn cả hai."""
+        if self._node.tool.tool_id == "patmax_align":
+            if hasattr(self, "_canny_grp"):
+                self._canny_grp.setVisible(False)
+            if hasattr(self, "_tm_grp"):
+                self._tm_grp.setVisible(False)
+            return
         show_canny = (idx == 0)
         if hasattr(self, "_canny_grp"):
             self._canny_grp.setVisible(show_canny)

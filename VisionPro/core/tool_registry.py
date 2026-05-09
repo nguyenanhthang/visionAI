@@ -235,6 +235,40 @@ def proc_patmax(inputs, params):
     return out
 
 
+def _is_gray_image(img) -> bool:
+    """True nếu ảnh là grayscale (1 kênh, hoặc 3 kênh nhưng B==G==R)."""
+    if img is None:
+        return False
+    if len(img.shape) == 2:
+        return True
+    if len(img.shape) == 3 and img.shape[2] == 1:
+        return True
+    if len(img.shape) == 3 and img.shape[2] >= 3:
+        b, g, r = img[:,:,0], img[:,:,1], img[:,:,2]
+        return bool(np.array_equal(b, g) and np.array_equal(g, r))
+    return False
+
+
+def proc_patmax_align(inputs, params):
+    """
+    PatMax Align Tool — wrapper validate input phải là ảnh gray
+    rồi delegate cho proc_patmax (Algorithm + Train Mode chỉ là metadata
+    được lưu trong node.params).
+    """
+    img = inputs.get("image")
+    if img is not None and not _is_gray_image(img):
+        from core.patmax_engine import _empty_vis
+        vis = _empty_vis(_bgr(img))
+        cv2.putText(vis, "[PatMax Align] Input must be GRAY image",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 80, 255), 2)
+        cv2.putText(vis, "Convert ảnh sang grayscale trước khi nối vào tool.",
+                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 1)
+        return {"image": vis, "found": False, "score": 0.0,
+                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+                "num_found": 0, "objects": []}
+    return proc_patmax(inputs, params)
+
+
 def proc_patfind(inputs, params):
     """
     CogPMAlignTool — PatFind nhanh (NCC), dùng chung PatMaxEngine nhưng không xoay.
@@ -1365,7 +1399,7 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Tìm kiếm trong ±angle_range độ. 0=không xoay"),
      P("angle_step","Angle Step (°)","float",5,1,45,step=1),
      P("num_results","Max Results","int",1,1,20)],
-    proc_patmax, "CogPMAlignTool"),
+    proc_patmax_align, "CogPMAlignTool"),
 
   ToolDef("patfind","PatFind","Pattern Find",
     "Pattern matching nhanh (NCC) — CogPMAlignTool","#16213e","🔍",

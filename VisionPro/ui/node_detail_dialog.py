@@ -47,7 +47,11 @@ class InteractiveImageLabel(QLabel):
         super().__init__(parent)
         self.mode        = mode
         self._arr        = None
-        self._scale      = 1.0
+        self._scale      = 1.0      # = fit_scale * user_zoom (effective)
+        self._fit_scale  = 1.0      # fit-to-widget scale (no user zoom)
+        self._user_zoom  = 1.0      # multiplier ≥ 1 = phóng to, <1 = thu nhỏ
+        self._pan_dx     = 0        # pan offset (widget coords) cộng vào _off_x
+        self._pan_dy     = 0
         self._off_x      = 0
         self._off_y      = 0
         self._rect: Optional[QRect] = None
@@ -90,6 +94,11 @@ class InteractiveImageLabel(QLabel):
 
     # ── Image ──────────────────────────────────────────────────────
     def set_image(self, arr: Optional[np.ndarray]):
+        # Reset zoom/pan khi đổi sang ảnh có kích thước khác (fit lại từ đầu)
+        if arr is None or self._arr is None or arr.shape[:2] != self._arr.shape[:2]:
+            self._user_zoom = 1.0
+            self._pan_dx = 0
+            self._pan_dy = 0
         self._arr = arr
         self._render()
 
@@ -345,6 +354,58 @@ class InteractiveImageLabel(QLabel):
             return 0, 0
         return int((wx - self._off_x) / self._scale), int((wy - self._off_y) / self._scale)
 
+    # ── Wheel zoom (giữ pixel dưới chuột cố định) ──────────────────
+    def wheelEvent(self, event):
+        if self._arr is None or self._fit_scale <= 0:
+            return super().wheelEvent(event)
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return super().wheelEvent(event)
+        factor = 1.15 if delta > 0 else 1.0 / 1.15
+        new_zoom = max(0.2, min(20.0, self._user_zoom * factor))
+        if abs(new_zoom - self._user_zoom) < 1e-4:
+            return
+        # Pixel ảnh dưới con trỏ trước khi zoom
+        try:
+            mp = event.position()
+            mx = float(mp.x()); my = float(mp.y())
+        except AttributeError:
+            mx = float(event.x()); my = float(event.y())
+        scale_old = self._scale
+        if scale_old <= 0:
+            return
+        ix = (mx - self._off_x) / scale_old
+        iy = (my - self._off_y) / scale_old
+        # Tính pan mới sao cho (ix, iy) vẫn nằm dưới (mx, my)
+        h, w = self._arr.shape[:2]
+        new_scale = self._fit_scale * new_zoom
+        new_dw = int(w * new_scale); new_dh = int(h * new_scale)
+        base_off_x = (self.width()  - new_dw) // 2
+        base_off_y = (self.height() - new_dh) // 2
+        target_off_x = mx - ix * new_scale
+        target_off_y = my - iy * new_scale
+        self._user_zoom = new_zoom
+        self._pan_dx = int(round(target_off_x - base_off_x))
+        self._pan_dy = int(round(target_off_y - base_off_y))
+        self._render()
+        event.accept()
+
+    def reset_zoom(self):
+        """Reset về fit-to-widget (zoom=1, pan=0)."""
+        self._user_zoom = 1.0
+        self._pan_dx = 0
+        self._pan_dy = 0
+        self._render()
+
+    def mouseDoubleClickEvent(self, event):
+        """Double-click giữa khoảng trống (không trên shape) → reset zoom."""
+        if (self._arr is not None and self._user_zoom != 1.0
+                and event.button() == Qt.MiddleButton):
+            self.reset_zoom()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     # ── Edit-mode helpers (move / resize shape đã vẽ xong) ─────────
     def _shape_widget_bbox(self) -> Optional[QRect]:
         """Bbox (widget coords) của shape đang lưu trong _shape_data."""
@@ -455,10 +516,11 @@ class InteractiveImageLabel(QLabel):
         pw = max(1, self.width() - 4)
         ph = max(1, self.height() - 4)
         sx = pw / w; sy = ph / h
-        self._scale = min(sx, sy)
+        self._fit_scale = min(sx, sy)
+        self._scale = self._fit_scale * self._user_zoom
         dw = int(w * self._scale); dh = int(h * self._scale)
-        self._off_x = (self.width() - dw) // 2
-        self._off_y = (self.height() - dh) // 2
+        self._off_x = (self.width() - dw) // 2 + self._pan_dx
+        self._off_y = (self.height() - dh) // 2 + self._pan_dy
 
         canvas = QPixmap(self.width(), self.height())
         canvas.fill(QColor(5, 8, 16))
