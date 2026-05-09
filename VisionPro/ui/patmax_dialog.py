@@ -34,156 +34,9 @@ from core.patmax_engine import (PatMaxModel, PatMaxResult, train_patmax,
 
 # ── Reuse InteractiveImageLabel từ node_detail_dialog ────────────
 from ui.node_detail_dialog import InteractiveImageLabel
-
-
-# ════════════════════════════════════════════════════════════════════
-#  Model preview widget
-# ════════════════════════════════════════════════════════════════════
-class ModelPreviewWidget(QWidget):
-    """Hiển thị thông tin model đã train."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(120)
-        self.setStyleSheet(
-            "background:#0a0e1a; border:1px solid #1e2d45; border-radius:6px;")
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 8); lay.setSpacing(12)
-
-        # Thumbnail
-        self._thumb = QLabel()
-        self._thumb.setFixedSize(80, 80)
-        self._thumb.setAlignment(Qt.AlignCenter)
-        self._thumb.setStyleSheet(
-            "background:#050810; border:1px solid #1e2d45; border-radius:4px;")
-        self._thumb.setText("No Model")
-        lay.addWidget(self._thumb)
-
-        # Info
-        info = QWidget()
-        il = QVBoxLayout(info); il.setContentsMargins(0,0,0,0); il.setSpacing(3)
-        self._name_lbl = QLabel("No model trained")
-        self._name_lbl.setStyleSheet(
-            "color:#64748b; font-size:13px; font-weight:700;")
-        self._info1 = QLabel("")
-        self._info1.setStyleSheet("color:#94a3b8; font-size:11px;")
-        self._info2 = QLabel("")
-        self._info2.setStyleSheet("color:#94a3b8; font-size:11px;")
-        self._hash_lbl = QLabel("")
-        self._hash_lbl.setStyleSheet(
-            "color:#1e2d45; font-size:10px; font-family:'Courier New';")
-        il.addWidget(self._name_lbl)
-        il.addWidget(self._info1)
-        il.addWidget(self._info2)
-        il.addWidget(self._hash_lbl)
-        il.addStretch()
-        lay.addWidget(info, 1)
-
-        # Status badge
-        self._badge = QLabel("UNTRAINED")
-        self._badge.setFixedSize(90, 28)
-        self._badge.setAlignment(Qt.AlignCenter)
-        self._badge.setStyleSheet(
-            "background:#1e2d45; color:#64748b; border-radius:4px;"
-            "font-size:11px; font-weight:700; letter-spacing:1px;")
-        lay.addWidget(self._badge)
-
-    def update_model(self, model: Optional[PatMaxModel]):
-        if model is None or not model.trained:
-            self._name_lbl.setText("No model trained")
-            self._name_lbl.setStyleSheet("color:#64748b; font-size:13px; font-weight:700;")
-            self._info1.setText("")
-            self._info2.setText("")
-            self._hash_lbl.setText("")
-            self._badge.setText("UNTRAINED")
-            self._badge.setStyleSheet(
-                "background:#1e2d45; color:#64748b; border-radius:4px;"
-                "font-size:11px; font-weight:700;")
-            self._thumb.setText("No Model")
-            self._thumb.setPixmap(QPixmap())
-            return
-
-        self._name_lbl.setText("Model Trained ✔")
-        self._name_lbl.setStyleSheet(
-            "color:#39ff14; font-size:13px; font-weight:700;")
-        x,y,w,h = model.train_roi or (0,0,0,0)
-        self._info1.setText(
-            f"ROI: ({x},{y})  {w}×{h} px   "
-            f"Edges: {model.edge_count}")
-        self._info2.setText(
-            f"Origin: ({model.origin_x:.1f}, {model.origin_y:.1f})")
-        self._hash_lbl.setText(f"Hash: {model.model_hash}")
-        self._badge.setText("TRAINED")
-        self._badge.setStyleSheet(
-            "background:#1b4332; color:#39ff14; border-radius:4px;"
-            "border:1px solid #39ff14; font-size:11px; font-weight:700;")
-
-        # Thumbnail
-        if model.thumbnail is not None:
-            import cv2
-            arr = model.thumbnail.copy()
-            if len(arr.shape)==2:
-                arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2RGB)
-            elif arr.shape[2]==3:
-                arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
-            h2,w2,ch = arr.shape
-            qimg = QImage(arr.data.tobytes(), w2, h2, ch*w2, QImage.Format_RGB888)
-            pix  = QPixmap.fromImage(qimg).scaled(
-                78, 78, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self._thumb.setPixmap(pix)
-        else:
-            self._thumb.setText("No thumb")
-
-
-# ════════════════════════════════════════════════════════════════════
-#  Result table
-# ════════════════════════════════════════════════════════════════════
-class ResultTable(QTableWidget):
-    result_selected = Signal(int)   # row index
-
-    def __init__(self, parent=None):
-        super().__init__(0, 6, parent)
-        self.setHorizontalHeaderLabels(
-            ["#", "Score", "X", "Y", "Angle (°)", "Scale"])
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.verticalHeader().setVisible(False)
-        self.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.setSelectionBehavior(QTableWidget.SelectRows)
-        self.setAlternatingRowColors(True)
-        self.setStyleSheet("""
-            QTableWidget { background:#0a0e1a; color:#e2e8f0;
-                           gridline-color:#1e2d45; border:1px solid #1e2d45;
-                           font-size:11px; font-family:'Courier New'; }
-            QTableWidget::item:selected { background:#1a2236; color:#00d4ff; }
-            QTableWidget::item:alternate { background:#0d1220; }
-            QHeaderView::section { background:#0d1220; color:#64748b;
-                                   border:1px solid #1e2d45; padding:3px; }
-        """)
-        self.itemSelectionChanged.connect(self._on_selection_changed)
-
-    def _on_selection_changed(self):
-        rows = self.selectionModel().selectedRows()
-        if rows:
-            self.result_selected.emit(rows[0].row())
-
-    def populate(self, results: List[PatMaxResult]):
-        self.setRowCount(0)
-        for i, r in enumerate(results):
-            self.insertRow(i)
-            col = "#39ff14" if r.score >= 0.7 else "#ffd700" if r.score >= 0.5 else "#ff3860"
-            for j, (val, fmt) in enumerate([
-                (str(i+1),         "{}"),
-                (r.score,          "{:.4f}"),
-                (r.origin_x,       "{:.2f}"),
-                (r.origin_y,       "{:.2f}"),
-                (r.angle,          "{:+.2f}"),
-                (r.scale,          "{:.3f}"),
-            ]):
-                txt = fmt.format(val) if not isinstance(val, str) else val
-                item = QTableWidgetItem(txt)
-                item.setTextAlignment(Qt.AlignCenter)
-                if j == 1:   # score
-                    item.setForeground(QColor(col))
-                self.setItem(i, j, item)
+# ── Helper widgets + align panel — tách ra cho dễ debug ─────────
+from ui.patmax_widgets import ModelPreviewWidget, ResultTable
+from ui.patmax_align_panel import build_align_panel, precompute_for_align
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -410,70 +263,11 @@ class PatMaxDialog(QDialog):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
-        # Algorithm + Train Mode dropdowns (chỉ hiện cho PatMax Align Tool)
+        # PatMax Align Tool — Algorithm + Train Mode dropdowns
+        # (UI build + sync vào ui/patmax_align_panel.py — dễ debug riêng)
         if self._node.tool.tool_id == "patmax_align":
-            algo_grp = QGroupBox("PatMax Align Tool")
-            ag = QVBoxLayout(algo_grp)
-            ag.setContentsMargins(10, 22, 10, 10); ag.setSpacing(6)
-
-            # Algorithm
-            algo_row = QWidget(); ar_lay = QHBoxLayout(algo_row)
-            ar_lay.setContentsMargins(0, 0, 0, 0); ar_lay.setSpacing(6)
-            lbl_algo = QLabel("Algorithm:")
-            lbl_algo.setStyleSheet("color:#94a3b8; font-size:11px;")
-            lbl_algo.setMinimumWidth(80)
-            self._algorithm_combo = QComboBox()
-            self._algorithm_combo.addItems([
-                "PatMax",
-                "PatQuick",
-                "PatMax & PatQuick",
-                "PatFlex",
-                "PatMax - High Sensitivity",
-                "Perspective PatMax",
-            ])
-            cur_algo = self._node.params.get("algorithm", "PatMax & PatQuick")
-            if cur_algo in [self._algorithm_combo.itemText(i)
-                            for i in range(self._algorithm_combo.count())]:
-                self._algorithm_combo.setCurrentText(cur_algo)
-            self._algorithm_combo.setStyleSheet(
-                "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
-                "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
-                "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
-                "selection-background-color:#1a2236;}")
-            self._algorithm_combo.currentTextChanged.connect(
-                lambda t: self._node.params.__setitem__("algorithm", t))
-            ar_lay.addWidget(lbl_algo)
-            ar_lay.addWidget(self._algorithm_combo, 1)
-            ag.addWidget(algo_row)
-
-            # Train Mode (Image / Shape Models with Image / Shape Models with Transform)
-            tm_row = QWidget(); tm_lay = QHBoxLayout(tm_row)
-            tm_lay.setContentsMargins(0, 0, 0, 0); tm_lay.setSpacing(6)
-            lbl_tm = QLabel("Train Mode:")
-            lbl_tm.setStyleSheet("color:#94a3b8; font-size:11px;")
-            lbl_tm.setMinimumWidth(80)
-            self._train_mode_align_combo = QComboBox()
-            self._train_mode_align_combo.addItems([
-                "Image",
-                "Shape Models with Image",
-                "Shape Models with Transform",
-            ])
-            cur_tm = self._node.params.get("train_mode", "Image")
-            if cur_tm in [self._train_mode_align_combo.itemText(i)
-                          for i in range(self._train_mode_align_combo.count())]:
-                self._train_mode_align_combo.setCurrentText(cur_tm)
-            self._train_mode_align_combo.setStyleSheet(
-                "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
-                "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
-                "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
-                "selection-background-color:#1a2236;}")
-            self._train_mode_align_combo.currentTextChanged.connect(
-                lambda t: self._node.params.__setitem__("train_mode", t))
-            tm_lay.addWidget(lbl_tm)
-            tm_lay.addWidget(self._train_mode_align_combo, 1)
-            ag.addWidget(tm_row)
-
-            lay.addWidget(algo_grp)
+            self._algorithm_combo, self._train_mode_align_combo = \
+                build_align_panel(self._node, lay)
 
         # Config picker — Canny vs Train Mode, chỉ hiện 1 trong 2.
         # Ẩn hoàn toàn cho PatMax Align Tool (đã có Algorithm + Train Mode riêng).
@@ -991,8 +785,14 @@ class PatMaxDialog(QDialog):
                 sd = getattr(self._model, "shape_data", None)
                 self._current_shape = st
                 self._current_shape_data = dict(sd) if sd else None
+                self._current_roi = tuple(self._model.train_roi)
                 shape_idx = {"rect":0,"circle":1,"ellipse":2,"polygon":3}.get(st, 0)
+                # Block signals: setCurrentIndex sẽ fire _on_shape_changed,
+                # handler đó (single mode) reset _current_roi + _current_shape_data
+                # → mất ROI vừa restore. Set xong unblock + sync trực tiếp.
+                self._shape_combo.blockSignals(True)
                 self._shape_combo.setCurrentIndex(shape_idx)
+                self._shape_combo.blockSignals(False)
                 self._img_label.set_shape_mode(st)
                 if sd:
                     QTimer.singleShot(100, lambda: self._img_label.set_shape_data(st, sd))
@@ -1372,22 +1172,18 @@ class PatMaxDialog(QDialog):
 
             # PatMax Align Tool + Shape Models with Transform → auto-precompute
             # oriented templates ngay khi train xong (search sẽ rất nhanh).
-            if (self._node.tool.tool_id == "patmax_align"
-                    and self._train_mode_align_combo.currentText()
-                        == "Shape Models with Transform"):
+            if self._node.tool.tool_id == "patmax_align":
                 try:
-                    from core.patmax_engine import (_ensure_precomputed,
-                                                     _shape_model_pair,
-                                                     ALGO_WEIGHTS)
-                    algo = self._algorithm_combo.currentText()
-                    weights = ALGO_WEIGHTS.get(algo, ALGO_WEIGHTS["PatMax"])
-                    pg, pe = _shape_model_pair(self._model,
-                                                "Shape Models with Transform")
-                    if pg is not None and pe is not None:
-                        n = len(_ensure_precomputed(
-                            self._model, weights, pg, pe,
-                            ang_low_t, ang_high_t, self._sp_ang_step.value(),
-                            sc_low_t, sc_high_t, self._sp_sc_step.value()))
+                    n = precompute_for_align(
+                        self._model,
+                        algorithm        = self._algorithm_combo.currentText(),
+                        train_mode_align = self._train_mode_align_combo.currentText(),
+                        angle_low  = ang_low_t, angle_high = ang_high_t,
+                        angle_step = self._sp_ang_step.value(),
+                        scale_low  = sc_low_t,  scale_high = sc_high_t,
+                        scale_step = self._sp_sc_step.value(),
+                    )
+                    if n > 0:
                         self._train_status.setText(
                             self._train_status.text()
                             + f"  |  precomputed {n} shape templates")
