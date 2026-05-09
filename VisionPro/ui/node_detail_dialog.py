@@ -1289,15 +1289,25 @@ class NodeDetailDialog(QDialog):
             return
         node = self._graph.nodes[node_id]
         node.params[name] = value
-        # Nếu có param khác phụ thuộc tên này → rebuild Params tab để cập nhật
+        # Nếu có param khác phụ thuộc tên này → rebuild Params tab để cập nhật.
+        # Defer qua event loop: rebuild ngay trong slot sẽ xoá chính widget
+        # đang phát signal (vd QComboBox source_mode toggle Folder ↔ File
+        # nhiều lần) → next toggle hit C++ deleted object → crash app.
         if any(getattr(p, "visible_if", None) and name in p.visible_if
                 for p in node.tool.params):
-            self._rebuild_params_tab()
+            QTimer.singleShot(0, self._rebuild_params_tab)
 
     def _rebuild_params_tab(self):
-        """Rebuild Params tab — dùng khi visible_if của param khác đổi."""
-        if hasattr(self, "_params_scroll") and self._params_scroll is not None:
-            self._params_scroll.setWidget(self._build_params_widget())
+        """Rebuild Params tab — dùng khi visible_if của param khác đổi.
+        An toàn khi dialog đã đóng / scroll widget đã bị Qt xoá."""
+        try:
+            scroll = getattr(self, "_params_scroll", None)
+            if scroll is None:
+                return
+            scroll.setWidget(self._build_params_widget())
+        except RuntimeError:
+            # Underlying C++ widget đã bị xoá — ignore.
+            pass
 
     # ════════════════════════════════════════════════════════════════
     #  Run
