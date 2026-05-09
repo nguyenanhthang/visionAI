@@ -87,12 +87,16 @@ def _build_template(patch_gray: np.ndarray,
                      edge_image: np.ndarray,
                      angle: float,
                      scale: float,
-                     weights: Optional[Tuple[float, float, float]] = None) -> dict:
-    """Tạo template (rotated/scaled) từ patch base + edge base."""
+                     weights: Optional[Tuple[float, float, float]] = None,
+                     mask: Optional[np.ndarray] = None) -> dict:
+    """Tạo template (rotated/scaled) từ patch base + edge base.
+    mask (h × w uint8 0/255): rotated/scaled cùng → dùng cho cv2.matchTemplate."""
     pw = max(4, int(patch_gray.shape[1] * scale))
     ph = max(4, int(patch_gray.shape[0] * scale))
     patch = cv2.resize(patch_gray, (pw, ph))
     edge_p = cv2.resize(edge_image, (pw, ph))
+    mask_s = cv2.resize(mask, (pw, ph), interpolation=cv2.INTER_NEAREST) \
+        if mask is not None else None
     if abs(angle) > 0.1:
         rad = math.radians(angle)
         cos_a = abs(math.cos(rad)); sin_a = abs(math.sin(rad))
@@ -103,17 +107,29 @@ def _build_template(patch_gray: np.ndarray,
         patch_rot = cv2.warpAffine(patch, M, (nW, nH),
                                     borderMode=cv2.BORDER_REPLICATE)
         edge_rot  = cv2.warpAffine(edge_p, M, (nW, nH))
+        if mask_s is not None:
+            mask_rot = cv2.warpAffine(mask_s, M, (nW, nH),
+                                      flags=cv2.INTER_NEAREST)
+        else:
+            mask_rot = None
     else:
         nW, nH = pw, ph
         patch_rot = patch
         edge_rot  = edge_p
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask_rot  = mask_s
+    # Edge dilation thích ứng theo kích thước (cũ: cố định 5×5 → quá dày
+    # với template nhỏ, edges blob ra → NCC edge giảm).
+    k = max(2, min(5, min(nW, nH) // 18))
+    if k % 2 == 0: k += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     edge_dil = cv2.dilate(edge_rot, kernel)
     out = {"angle": float(angle), "scale": float(scale),
             "patch": patch_rot, "edge_dil": edge_dil,
             "nW": nW, "nH": nH}
     if weights is not None:
         out["weights"] = weights
+    if mask_rot is not None:
+        out["mask"] = mask_rot
     return out
 
 
@@ -145,7 +161,8 @@ def precompute_templates(model: PatMaxModel) -> int:
     tmpls = []
     for sc in scales:
         for ang in angles:
-            tmpls.append(_build_template(model.patch_gray, model.edge_image, ang, sc))
+            tmpls.append(_build_template(model.patch_gray, model.edge_image,
+                                          ang, sc, mask=model.mask))
     model.precomputed_templates = tmpls
     return len(tmpls)
 
@@ -178,12 +195,11 @@ def train_patmax(image: np.ndarray,
     gray_smooth = cv2.GaussianBlur(gray, (3,3), 0)
     edges = cv2.Canny(gray_smooth, canny_low, canny_high)
 
-    # Build mask trong toạ độ patch (h × w) cho non-rect shapes
+    # Build mask trong toạ độ patch (h × w) cho non-rect shapes.
+    # Không mean-fill nữa: cv2.matchTemplate có mask nguyên gốc → tính
+    # NCC chỉ trên vùng-shape, không bóp méo bởi corner ngoài shape.
     mask = _build_shape_mask(shape_type, shape_data, x, y, w, h)
     if mask is not None:
-        # Outside-of-shape: set gray = mean (giảm ảnh hưởng NCC), edges = 0
-        mean_val = int(gray_smooth[mask > 0].mean()) if np.count_nonzero(mask) else 127
-        gray_smooth = np.where(mask > 0, gray_smooth, mean_val).astype(np.uint8)
         edges = np.where(mask > 0, edges, 0).astype(np.uint8)
 
     # Thumbnail 80×80
@@ -464,30 +480,54 @@ def _match_template(gray_img: np.ndarray,
     edge_rot_d = t["edge_dil"]
     nW = t["nW"]; nH = t["nH"]
     angle = t["angle"]; scale = t["scale"]
+    mask_rot = t.get("mask")        # uint8 0/255 hoặc None
     H, W = gray_img.shape[:2]
 
     if nW >= W - 2 or nH >= H - 2:
         return []
 
-    # Score maps đầy đủ
+    # cv2.matchTemplate hỗ trợ mask cho TM_CCOEFF_NORMED + TM_SQDIFF_NORMED:
+    # mask phải cùng kích thước template, dtype uint8 hoặc float32 (8-bit OK).
+    # Khi có mask, các pixel ngoài shape không tính vào correlation → loại bỏ
+    # ảnh hưởng của 4 góc bbox (vốn không thuộc circle/ellipse/polygon).
     try:
-        res_ncc = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_CCOEFF_NORMED)
+        if mask_rot is not None:
+            res_ncc = cv2.matchTemplate(gray_img, patch_rot,
+                                        cv2.TM_CCOEFF_NORMED, mask=mask_rot)
+        else:
+            res_ncc = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_CCOEFF_NORMED)
+        # Mask matching đôi khi sinh NaN/Inf khi std≈0 trong vùng mask → dập
+        res_ncc = np.nan_to_num(res_ncc, nan=0.0, posinf=0.0, neginf=0.0)
     except cv2.error:
         return []
+
     img_e_f   = img_edges.astype(np.float32) / 255.0
     templ_e_f = edge_rot_d.astype(np.float32) / 255.0
     try:
-        res_edge = cv2.matchTemplate(img_e_f, templ_e_f, cv2.TM_CCOEFF_NORMED)
+        if mask_rot is not None:
+            res_edge = cv2.matchTemplate(img_e_f, templ_e_f,
+                                         cv2.TM_CCOEFF_NORMED,
+                                         mask=mask_rot.astype(np.float32) / 255.0)
+        else:
+            res_edge = cv2.matchTemplate(img_e_f, templ_e_f, cv2.TM_CCOEFF_NORMED)
+        res_edge = np.nan_to_num(res_edge, nan=0.0, posinf=0.0, neginf=0.0)
     except cv2.error:
         res_edge = np.zeros_like(res_ncc)
+
     try:
-        res_sq = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_SQDIFF_NORMED)
+        if mask_rot is not None:
+            res_sq = cv2.matchTemplate(gray_img, patch_rot,
+                                       cv2.TM_SQDIFF_NORMED, mask=mask_rot)
+        else:
+            res_sq = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_SQDIFF_NORMED)
+        res_sq = np.nan_to_num(res_sq, nan=1.0, posinf=1.0, neginf=1.0)
         res_sq_inv = 1.0 - res_sq          # nhỏ = tốt → đảo
     except cv2.error:
         res_sq_inv = np.zeros_like(res_ncc)
 
-    s_ncc_map  = np.maximum(res_ncc, 0.0).astype(np.float32)
-    s_edge_map = np.maximum(res_edge, 0.0).astype(np.float32)
+    # Mask-mode matchTemplate đôi khi vượt [0,1] do numerical noise → clip.
+    s_ncc_map  = np.clip(res_ncc, 0.0, 1.0).astype(np.float32)
+    s_edge_map = np.clip(res_edge, 0.0, 1.0).astype(np.float32)
     s_sq_map   = np.clip(res_sq_inv, 0.0, 1.0).astype(np.float32)
     # Weights configurable per template (algorithm-dependent).
     # Mặc định bám sát công thức cũ: 0.5 NCC + 0.3 edge + 0.2 SQDIFF.
@@ -571,7 +611,8 @@ def run_patmax(image: np.ndarray,
     else:
         angles, scales = _build_search_grid(angle_low, angle_high, angle_step,
                                               scale_low, scale_high, scale_step)
-        templates = [_build_template(model.patch_gray, model.edge_image, ang, sc)
+        templates = [_build_template(model.patch_gray, model.edge_image,
+                                       ang, sc, mask=model.mask)
                      for sc in scales for ang in angles]
         print(f"[PatMax Search] evaluate-DOF: {len(templates)} templates "
               f"(angles={len(angles)} × scales={len(scales)})  "
@@ -846,12 +887,16 @@ def load_model(path: str) -> Optional[PatMaxModel]:
 #   PatFlex: như PatMax + cho phép cell-level offset (non-rigid xấp xỉ)
 #   Perspective PatMax: như PatMax + 4-corner refinement (homography)
 ALGO_WEIGHTS = {
-    "PatMax":                       (0.20, 0.60, 0.20),
-    "PatQuick":                     (0.75, 0.15, 0.10),
-    "PatMax & PatQuick":            (0.30, 0.50, 0.20),  # final fine-pass
-    "PatFlex":                      (0.20, 0.60, 0.20),
-    "PatMax - High Sensitivity":    (0.10, 0.80, 0.10),
-    "Perspective PatMax":           (0.20, 0.60, 0.20),
+    # (w_ncc, w_edge, w_sqdiff) — phải tổng ~1 để score nằm trong [0,1].
+    # Cân bằng lại sau khi mask được truyền vào matchTemplate (NCC chính
+    # xác hơn) → giảm w_edge, tăng w_ncc/w_sqdiff để score thực tế cao hơn
+    # với cùng pattern. PatMax giữ tinh thần edge-heavy nhưng không cực đoan.
+    "PatMax":                       (0.40, 0.40, 0.20),
+    "PatQuick":                     (0.70, 0.15, 0.15),
+    "PatMax & PatQuick":            (0.45, 0.35, 0.20),  # final fine-pass
+    "PatFlex":                      (0.40, 0.40, 0.20),
+    "PatMax - High Sensitivity":    (0.30, 0.55, 0.15),
+    "Perspective PatMax":           (0.40, 0.40, 0.20),
 }
 
 # (angle_step_factor, scale_step_factor, peaks_factor)
@@ -912,7 +957,8 @@ def _ensure_precomputed(model: PatMaxModel,
         return cached["templates"]
     angles, scales = _build_search_grid(angle_low, angle_high, angle_step,
                                         scale_low, scale_high, scale_step)
-    tmpls = [_build_template(patch_gray, edge_image, a, s, weights)
+    tmpls = [_build_template(patch_gray, edge_image, a, s, weights,
+                              mask=model.mask)
              for s in scales for a in angles]
     model._align_tmpl_cache = {"key": cache_key, "templates": tmpls}
     print(f"[PatMax Align] precomputed {len(tmpls)} oriented templates "
@@ -1087,7 +1133,8 @@ def run_patmax_align(image: np.ndarray,
     else:
         angles, scales = _build_search_grid(angle_low, angle_high, ang_step_eff,
                                             scale_low, scale_high, sc_step_eff)
-        templates = [_build_template(patch_gray, edge_image, a, s, weights)
+        templates = [_build_template(patch_gray, edge_image, a, s, weights,
+                                       mask=model.mask)
                      for s in scales for a in angles]
 
     print(f"[PatMax Align] algorithm={algorithm}  train_mode={train_mode_align}  "
@@ -1102,7 +1149,8 @@ def run_patmax_align(image: np.ndarray,
         sc_step_coarse  = max(0.05, sc_step_eff * 2.0)
         ang_q, sc_q = _build_search_grid(angle_low, angle_high, ang_step_coarse,
                                          scale_low, scale_high, sc_step_coarse)
-        tmpls_q = [_build_template(patch_gray, edge_image, a, s, wq)
+        tmpls_q = [_build_template(patch_gray, edge_image, a, s, wq,
+                                     mask=model.mask)
                    for s in sc_q for a in ang_q]
         cands_q: List[Dict] = []
         for t in tmpls_q:
@@ -1140,7 +1188,8 @@ def run_patmax_align(image: np.ndarray,
                                              s_lo, s_hi, sc_step_eff)
             for sc in sc_f:
                 for ang in ang_f:
-                    t = _build_template(patch_gray, edge_image, ang, sc, weights)
+                    t = _build_template(patch_gray, edge_image, ang, sc, weights,
+                                          mask=model.mask)
                     res_t = _match_template(gray_img, img_edges, t,
                                             max(2, int(num_results * peak_fac) + 1))
                     for r in res_t:
