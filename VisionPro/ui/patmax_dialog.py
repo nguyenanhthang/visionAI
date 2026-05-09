@@ -1210,6 +1210,25 @@ class PatMaxDialog(QDialog):
             QMessageBox.warning(self, "Train", "Chưa có ảnh. Hãy chạy pipeline trước.")
             return
 
+        # PatMax Align Tool yêu cầu input là ảnh gray
+        if self._node.tool.tool_id == "patmax_align":
+            img = self._current_image
+            is_gray = (
+                img.ndim == 2
+                or (img.ndim == 3 and img.shape[2] == 1)
+                or (img.ndim == 3 and img.shape[2] >= 3
+                    and np.array_equal(img[:, :, 0], img[:, :, 1])
+                    and np.array_equal(img[:, :, 1], img[:, :, 2]))
+            )
+            if not is_gray:
+                QMessageBox.warning(
+                    self, "PatMax Align — Train",
+                    "Input phải là ảnh GRAY.\n\n"
+                    "Hãy nối tool Convert to Grayscale (hoặc tương đương) "
+                    "trước PatMax Align Tool rồi thử lại."
+                )
+                return
+
         is_multi = (self._roi_mode in ("multi_region", "multi_pattern"))
         if is_multi:
             shapes = self._img_label.get_shapes() if hasattr(self, "_img_label") else []

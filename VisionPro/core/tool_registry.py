@@ -251,19 +251,14 @@ def _is_gray_image(img) -> bool:
 
 def proc_patmax_align(inputs, params):
     """
-    PatMax Align Tool — wrapper validate input phải là ảnh gray
-    rồi delegate cho proc_patmax (Algorithm + Train Mode chỉ là metadata
-    được lưu trong node.params).
+    PatMax Align Tool — validate input phải là ảnh gray rồi delegate
+    cho proc_patmax (Algorithm + Train Mode chỉ là metadata được lưu
+    trong node.params). Khi không gray, trả ảnh nguyên bản, found=False
+    (không vẽ overlay đỏ) — UI dialog sẽ hiện popup khi user ấn Train.
     """
     img = inputs.get("image")
     if img is not None and not _is_gray_image(img):
-        from core.patmax_engine import _empty_vis
-        vis = _empty_vis(_bgr(img))
-        cv2.putText(vis, "[PatMax Align] Input must be GRAY image",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 80, 255), 2)
-        cv2.putText(vis, "Convert ảnh sang grayscale trước khi nối vào tool.",
-                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 1)
-        return {"image": vis, "found": False, "score": 0.0,
+        return {"image": _bgr(img), "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
     return proc_patmax(inputs, params)
