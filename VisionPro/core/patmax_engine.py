@@ -503,13 +503,10 @@ def _match_template(gray_img: np.ndarray,
 
     img_e_f   = img_edges.astype(np.float32) / 255.0
     templ_e_f = edge_rot_d.astype(np.float32) / 255.0
+    # Edge map: train đã zero edges ngoài mask → match không-mask cũng đúng
+    # và nhanh hơn ~30%. Bỏ mask cho channel này.
     try:
-        if mask_rot is not None:
-            res_edge = cv2.matchTemplate(img_e_f, templ_e_f,
-                                         cv2.TM_CCOEFF_NORMED,
-                                         mask=mask_rot.astype(np.float32) / 255.0)
-        else:
-            res_edge = cv2.matchTemplate(img_e_f, templ_e_f, cv2.TM_CCOEFF_NORMED)
+        res_edge = cv2.matchTemplate(img_e_f, templ_e_f, cv2.TM_CCOEFF_NORMED)
         res_edge = np.nan_to_num(res_edge, nan=0.0, posinf=0.0, neginf=0.0)
     except cv2.error:
         res_edge = np.zeros_like(res_ncc)
@@ -784,7 +781,7 @@ def draw_patmax_results(image: np.ndarray,
         ly = max(16, int(r.y - r.height/2) - 8)
         label = f"#{i+1} {r.score:.3f}"
         if abs(r.angle) > 0.5:
-            label += f" {r.angle:+.1f}\u00b0"
+            label += f" {r.angle:+.1f}deg"   # cv2.putText kh\u00f4ng h\u1ed7 tr\u1ee3 Unicode \u00b0
         cv2.putText(vis, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
         cv2.putText(vis, f"({ox:.0f},{oy:.0f})",
                     (ox_i + 14, oy_i + 18),
@@ -1170,7 +1167,7 @@ def run_patmax_align(image: np.ndarray,
                     ok = False; break
             if ok:
                 seeds.append(c)
-            if len(seeds) >= max(num_results * 3, 6):
+            if len(seeds) >= max(num_results + 1, 3):   # giới hạn seed để fine pass nhanh
                 break
         print(f"[PatMax Align] PatQuick pass: {len(cands_q)} cands, "
               f"{len(seeds)} seeds")

@@ -407,9 +407,9 @@ class MainWindow(QMainWindow):
         self._img_viewer.refresh_node_list()
         self._img_viewer.refresh_current()
 
-        # Refresh any open detail dialogs
+        # Refresh any open detail dialogs (PatMaxDialog không có refresh_outputs)
         for nid, dlg in self._detail_dialogs.items():
-            if dlg.isVisible():
+            if dlg.isVisible() and hasattr(dlg, "refresh_outputs"):
                 dlg.refresh_outputs()
 
         self._finalize_run()
