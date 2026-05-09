@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QImage,
     QPainter,
@@ -36,6 +37,25 @@ def numpy_to_qpixmap(img: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(qimg.copy())
 
 
+class _MovableRoiItem(QGraphicsRectItem):
+    """Rect item kéo được; gọi callback khi thay đổi vị trí."""
+
+    def __init__(self, rect: QRectF, on_change):
+        super().__init__(rect)
+        self._on_change = on_change
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setCursor(Qt.SizeAllCursor)
+        self.setAcceptHoverEvents(True)
+
+    def itemChange(self, change, value):
+        if (change == QGraphicsItem.ItemPositionHasChanged
+                and self._on_change is not None):
+            self._on_change()
+        return super().itemChange(change, value)
+
+
 def _blend_mask(img: np.ndarray, mask: np.ndarray,
                 color: tuple[int, int, int] = (54, 197, 214),
                 alpha: float = 0.45) -> np.ndarray:
@@ -62,6 +82,7 @@ class ImageCanvas(QGraphicsView):
 
     measure_segment_drawn = Signal(int, int, int, int)  # row1, col1, row2, col2
     roi_drawn = Signal(int, int, int, int)  # x, y, w, h (image coords)
+    persistent_roi_changed = Signal(int, int, int, int)  # khi user kéo overlay
     mouse_moved = Signal(int, int, object)  # row, col, pixel value (int|tuple|None)
 
     def __init__(self, parent=None):
@@ -94,6 +115,11 @@ class ImageCanvas(QGraphicsView):
         self._roi_start: Optional[QPointF] = None
         self._roi_item: Optional[QGraphicsRectItem] = None
 
+        # Persistent ROI overlay (movable rect — dùng cho ROI tool)
+        self._roi_persistent: Optional[_MovableRoiItem] = None
+        self._roi_persistent_size: tuple[int, int] = (0, 0)
+        self._roi_persistent_suppress: bool = False
+
     # -- public API ---------------------------------------------------------
     def set_image(self, img: np.ndarray) -> None:
         self._image = img
@@ -119,12 +145,21 @@ class ImageCanvas(QGraphicsView):
         else:
             display = self._image
         pixmap = numpy_to_qpixmap(display)
+        # Lưu persistent ROI để dựng lại sau scene.clear()
+        keep_roi = None
+        if self._roi_persistent is not None:
+            pos = self._roi_persistent.pos()
+            keep_roi = (int(pos.x()), int(pos.y()),
+                        self._roi_persistent_size[0], self._roi_persistent_size[1])
         self._scene.clear()
         self._segment_item = None
         self._roi_item = None
+        self._roi_persistent = None
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._pixmap_item.setTransformationMode(Qt.SmoothTransformation)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
+        if keep_roi is not None:
+            self.set_persistent_roi(*keep_roi)
 
     def fit_to_view(self) -> None:
         if self._pixmap_item is None:
@@ -163,6 +198,54 @@ class ImageCanvas(QGraphicsView):
             if (enabled or self._measure_mode)
             else Qt.ArrowCursor
         )
+
+    # ---- Persistent ROI overlay (movable) ----
+    def set_persistent_roi(self, x: int, y: int, w: int, h: int) -> None:
+        """Hiển thị overlay rect kéo được (cho ROI tool); gọi nhiều lần để cập nhật."""
+        if self._image is None or w <= 0 or h <= 0:
+            return
+        if self._roi_persistent is not None:
+            # Update existing item to tránh recreate (giữ trạng thái drag)
+            self._roi_persistent_suppress = True
+            self._roi_persistent.setRect(QRectF(0, 0, w, h))
+            self._roi_persistent.setPos(x, y)
+            self._roi_persistent_size = (w, h)
+            self._roi_persistent_suppress = False
+            return
+        pen = QPen(QColor("#36c5d6"), 0)
+        pen.setCosmetic(True)
+        pen.setWidth(2)
+        pen.setStyle(Qt.DashLine)
+        rect_item = _MovableRoiItem(QRectF(0, 0, w, h),
+                                     self._on_persistent_roi_change)
+        rect_item.setPen(pen)
+        rect_item.setBrush(QBrush(QColor(54, 197, 214, 40)))
+        rect_item.setPos(x, y)
+        rect_item.setZValue(100)
+        self._scene.addItem(rect_item)
+        self._roi_persistent = rect_item
+        self._roi_persistent_size = (w, h)
+
+    def clear_persistent_roi(self) -> None:
+        if self._roi_persistent is not None:
+            self._scene.removeItem(self._roi_persistent)
+            self._roi_persistent = None
+            self._roi_persistent_size = (0, 0)
+
+    def _on_persistent_roi_change(self) -> None:
+        if self._roi_persistent_suppress or self._roi_persistent is None or self._image is None:
+            return
+        pos = self._roi_persistent.pos()
+        w, h = self._roi_persistent_size
+        H, W = self._image.shape[:2]
+        # Clamp
+        x = max(0, min(int(pos.x()), W - w))
+        y = max(0, min(int(pos.y()), H - h))
+        if x != int(pos.x()) or y != int(pos.y()):
+            self._roi_persistent_suppress = True
+            self._roi_persistent.setPos(x, y)
+            self._roi_persistent_suppress = False
+        self.persistent_roi_changed.emit(x, y, w, h)
 
     def has_image(self) -> bool:
         return self._image is not None

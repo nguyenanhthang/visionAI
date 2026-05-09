@@ -4,17 +4,41 @@
 MVTec HALCON cho machine vision. Có fallback OpenCV/numpy cho mọi tool nên app
 chạy được kể cả khi chưa có HALCON binding / licence.
 
-## Sidebar (collapsible — gập/mở từng nhóm)
+## Layout
 
-| Nhóm           | Tools                                                              |
-| -------------- | ------------------------------------------------------------------ |
-| 📷 Acquisition | Connect / Live (FPS) / Snapshot / Disconnect                       |
-| 🪄 Pre-process | Filter (Gauss/Median/Mean/Sharpen) + Morphology (dilate/erode/…)   |
-| 🩹 Mask / ROI  | Sinh từ gray range / HSV / ROI vẽ tay; invert/clear/save/load      |
-| 🎯 Locate      | Blob, Adaptive Threshold, Edges (sub-pixel), Contours, Pattern Match (+ Pick ROI) |
-| 📐 Measure     | Caliper (Measure 1D), Histogram                                    |
-| 🔢 Identify    | ID Read (QR / Barcode 1D)                                          |
-| 🎨 Inspect     | Color stats trong ROI; Image Diff (golden template)                |
+Pipeline-first — **không còn sidebar trái**. Mọi cấu hình tool nằm trong dock
+phải gồm 2 tab:
+
+- **▶ Pipeline** — danh sách node kéo-thả, mỗi node có thumbnail + ☑ enable + ✕ remove. Bên dưới list là **Properties panel**: click 1 node → form thuộc tính hiện ra, chỉnh value → **live preview** ngay (debounce 180 ms). Toggle "Live preview" để tắt và bấm "Apply" thủ công.
+- **🧰 Resources** — collapsible sections cho:
+  - 📷 **Acquisition** — Connect / Live (FPS) / Snapshot
+  - 🩹 **Mask** — sinh từ gray range / HSV / ROI vẽ tay; invert / clear / save / load / show
+  - 🧩 **Template** — load file / Pick ROI / save / clear + preview
+  - 📋 **Reference** — load reference (cho Image Diff)
+  - 🖱 **Canvas inputs** — vẽ Caliper segment, chọn Color ROI
+
+## Tools (registered trong pipeline)
+
+| Tool                | Chain | Category    | HALCON op                                                       |
+| ------------------- | ----- | ----------- | --------------------------------------------------------------- |
+| 🪄 Filter           | ✓     | Pre-process | gauss_filter / median_image / mean_image / emphasize            |
+| 🧱 Morphology       | ✓     | Pre-process | dilation / erosion / opening / closing / gradient / tophat / blackhat |
+| 🔄 Convert          | ✓     | Pre-process | gray / HSV / Lab / channel split / invert / equalize / CLAHE    |
+| ↻  Rotate           | ✓     | Pre-process | rotate_image (góc, scale, interp, expand canvas)                |
+| ▭  ROI              | ✓     | Pre-process | crop_rectangle1 (mode=crop) / reduce_domain (mode=mask). Click node → canvas tự bật ROI mode, kéo chuột vẽ rect, kéo overlay để di chuyển; mọi thay đổi đều đồng bộ live với params x/y/w/h |
+| ⬛ Blob             |       | Locate      | threshold + connection + select_shape                           |
+| 🌓 Adaptive Thresh. |       | Locate      | dyn_threshold (fallback cv2.adaptiveThreshold)                  |
+| ✶  Edges            |       | Locate      | edges_sub_pix                                                   |
+| 〜 Contours         |       | Locate      | gen_contours_skeleton_xld + select_contours_xld                 |
+| 🎯 Pattern Match    |       | Locate      | create_shape_model + find_shape_model                           |
+| 📐 Caliper          |       | Measure     | gen_measure_rectangle2 + measure_pairs                          |
+| 📊 Histogram        |       | Measure     | gray_histo                                                      |
+| 🔢 ID Read          |       | Identify    | find_data_code_2d                                               |
+| 🎨 Color stats      |       | Inspect     | intensity / mean_n trong ROI                                    |
+| 📋 Image Diff       |       | Inspect     | sub_image + threshold + connection (golden compare)             |
+
+`Chain=✓` nghĩa là output ảnh được chuyển sang node sau (Filter, Morphology,
+Rotate dùng cho preprocessing).
 
 ### Mask system
 - Sinh mask từ **gray range**, **HSV range** hoặc **ROI vẽ tay** trên ảnh.

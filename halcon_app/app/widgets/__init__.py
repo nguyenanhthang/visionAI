@@ -5,6 +5,7 @@ from .image_canvas import ImageCanvas
 from .operator_panel import OperatorSidebar
 from .param_dialog import ParamDialog
 from .pipeline_panel import PipelinePanel
+from .resources_panel import ResourcesPanel
 from .results_view import ResultsView
 
 __all__ = [
@@ -16,5 +17,6 @@ __all__ = [
     "OperatorSidebar",
     "ParamDialog",
     "PipelinePanel",
+    "ResourcesPanel",
     "ResultsView",
 ]
