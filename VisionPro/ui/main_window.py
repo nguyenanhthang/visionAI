@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
             self._open_yolo_studio(initial_img)
             return
 
-        if node.tool.tool_id in ("patmax", "patfind"):
+        if node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
             from ui.patmax_dialog import PatMaxDialog
             dlg = PatMaxDialog(node, self._graph, self)
             dlg.run_requested.connect(self._on_detail_run)

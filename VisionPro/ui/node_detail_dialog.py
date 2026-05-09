@@ -967,7 +967,7 @@ class NodeDetailDialog(QDialog):
                     w2 = node.params.get("crop_w", 320); h2 = node.params.get("crop_h", 240)
                 QTimer.singleShot(120, lambda: self._img_label.set_rect_from_params(x2, y2, w2, h2))
 
-        elif tool.tool_id in ("patmax", "patfind"):
+        elif tool.tool_id in ("patmax", "patmax_align", "patfind"):
             # PatMax/PatFind → mở PatMaxDialog chuyên dụng
             self._mode_hint.setText(
                 "🎯  PatMax/PatFind — Cửa sổ Train & Search chuyên dụng đang mở...")
@@ -1339,7 +1339,7 @@ class NodeDetailDialog(QDialog):
                         self._img_label.set_rect_from_params(*drawn)
 
             # patmax/patfind: hiển thị output image từ engine
-            elif node.tool.tool_id in ("patmax", "patfind"):
+            elif node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
                 pass   # PatMaxDialog tự quản lý display
 
         elif not node.error_msg:
