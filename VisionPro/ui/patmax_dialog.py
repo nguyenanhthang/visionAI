@@ -410,6 +410,71 @@ class PatMaxDialog(QDialog):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
+        # Algorithm + Train Mode dropdowns (chỉ hiện cho PatMax Align Tool)
+        if self._node.tool.tool_id == "patmax_align":
+            algo_grp = QGroupBox("PatMax Align Tool")
+            ag = QVBoxLayout(algo_grp)
+            ag.setContentsMargins(10, 22, 10, 10); ag.setSpacing(6)
+
+            # Algorithm
+            algo_row = QWidget(); ar_lay = QHBoxLayout(algo_row)
+            ar_lay.setContentsMargins(0, 0, 0, 0); ar_lay.setSpacing(6)
+            lbl_algo = QLabel("Algorithm:")
+            lbl_algo.setStyleSheet("color:#94a3b8; font-size:11px;")
+            lbl_algo.setMinimumWidth(80)
+            self._algorithm_combo = QComboBox()
+            self._algorithm_combo.addItems([
+                "PatMax",
+                "PatQuick",
+                "PatMax & PatQuick",
+                "PatFlex",
+                "PatMax - High Sensitivity",
+                "Perspective PatMax",
+            ])
+            cur_algo = self._node.params.get("algorithm", "PatMax & PatQuick")
+            if cur_algo in [self._algorithm_combo.itemText(i)
+                            for i in range(self._algorithm_combo.count())]:
+                self._algorithm_combo.setCurrentText(cur_algo)
+            self._algorithm_combo.setStyleSheet(
+                "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+                "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+                "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+                "selection-background-color:#1a2236;}")
+            self._algorithm_combo.currentTextChanged.connect(
+                lambda t: self._node.params.__setitem__("algorithm", t))
+            ar_lay.addWidget(lbl_algo)
+            ar_lay.addWidget(self._algorithm_combo, 1)
+            ag.addWidget(algo_row)
+
+            # Train Mode (Image / Shape Models with Image / Shape Models with Transform)
+            tm_row = QWidget(); tm_lay = QHBoxLayout(tm_row)
+            tm_lay.setContentsMargins(0, 0, 0, 0); tm_lay.setSpacing(6)
+            lbl_tm = QLabel("Train Mode:")
+            lbl_tm.setStyleSheet("color:#94a3b8; font-size:11px;")
+            lbl_tm.setMinimumWidth(80)
+            self._train_mode_align_combo = QComboBox()
+            self._train_mode_align_combo.addItems([
+                "Image",
+                "Shape Models with Image",
+                "Shape Models with Transform",
+            ])
+            cur_tm = self._node.params.get("train_mode", "Image")
+            if cur_tm in [self._train_mode_align_combo.itemText(i)
+                          for i in range(self._train_mode_align_combo.count())]:
+                self._train_mode_align_combo.setCurrentText(cur_tm)
+            self._train_mode_align_combo.setStyleSheet(
+                "QComboBox{background:#0a0e1a;border:1px solid #1e2d45;"
+                "color:#e2e8f0;padding:3px 6px;border-radius:4px;}"
+                "QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;"
+                "selection-background-color:#1a2236;}")
+            self._train_mode_align_combo.currentTextChanged.connect(
+                lambda t: self._node.params.__setitem__("train_mode", t))
+            tm_lay.addWidget(lbl_tm)
+            tm_lay.addWidget(self._train_mode_align_combo, 1)
+            ag.addWidget(tm_row)
+
+            lay.addWidget(algo_grp)
+
         # Config picker — Canny vs Train Mode, chỉ hiện 1 trong 2
         mode_row = QWidget(); mr_lay = QHBoxLayout(mode_row)
         mr_lay.setContentsMargins(0, 0, 0, 0); mr_lay.setSpacing(6)
