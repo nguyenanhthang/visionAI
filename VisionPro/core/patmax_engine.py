@@ -86,7 +86,8 @@ class PatMaxModel:
 def _build_template(patch_gray: np.ndarray,
                      edge_image: np.ndarray,
                      angle: float,
-                     scale: float) -> dict:
+                     scale: float,
+                     weights: Optional[Tuple[float, float, float]] = None) -> dict:
     """Tạo template (rotated/scaled) từ patch base + edge base."""
     pw = max(4, int(patch_gray.shape[1] * scale))
     ph = max(4, int(patch_gray.shape[0] * scale))
@@ -108,9 +109,12 @@ def _build_template(patch_gray: np.ndarray,
         edge_rot  = edge_p
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     edge_dil = cv2.dilate(edge_rot, kernel)
-    return {"angle": float(angle), "scale": float(scale),
+    out = {"angle": float(angle), "scale": float(scale),
             "patch": patch_rot, "edge_dil": edge_dil,
             "nW": nW, "nH": nH}
+    if weights is not None:
+        out["weights"] = weights
+    return out
 
 
 def _build_search_grid(angle_low, angle_high, angle_step,
@@ -485,7 +489,12 @@ def _match_template(gray_img: np.ndarray,
     s_ncc_map  = np.maximum(res_ncc, 0.0).astype(np.float32)
     s_edge_map = np.maximum(res_edge, 0.0).astype(np.float32)
     s_sq_map   = np.clip(res_sq_inv, 0.0, 1.0).astype(np.float32)
-    score_map  = 0.5 * s_ncc_map + 0.3 * s_edge_map + 0.2 * s_sq_map
+    # Weights configurable per template (algorithm-dependent).
+    # Mặc định bám sát công thức cũ: 0.5 NCC + 0.3 edge + 0.2 SQDIFF.
+    w_ncc, w_edge, w_sq = t.get("weights", (0.5, 0.3, 0.2))
+    score_map  = (w_ncc * s_ncc_map
+                  + w_edge * s_edge_map
+                  + w_sq   * s_sq_map)
 
     # Local NMS: suppress peaks gần nhau bằng cách lấy max trong cửa sổ
     win = max(3, min(nW, nH) // 2)
@@ -822,3 +831,395 @@ def load_model(path: str) -> Optional[PatMaxModel]:
     except Exception as e:
         print(f"[PatMax] load_model error: {e}")
         return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  PATMAX ALIGN TOOL — Algorithm + Train Mode dispatcher
+#  Cognex VisionPro xấp xỉ behavioral (engine có sẵn không phải proprietary).
+# ═══════════════════════════════════════════════════════════════════
+
+# (w_ncc, w_edge, w_sqdiff) cho từng algorithm — bám sát đặc tính public:
+#   PatMax: edge-heavy (geometric)
+#   PatQuick: NCC-heavy (raw intensity, nhanh)
+#   PatMax & PatQuick: 2-pass (PatQuick coarse → PatMax fine)
+#   High Sensitivity: cực edge-heavy + step nhỏ
+#   PatFlex: như PatMax + cho phép cell-level offset (non-rigid xấp xỉ)
+#   Perspective PatMax: như PatMax + 4-corner refinement (homography)
+ALGO_WEIGHTS = {
+    "PatMax":                       (0.20, 0.60, 0.20),
+    "PatQuick":                     (0.75, 0.15, 0.10),
+    "PatMax & PatQuick":            (0.30, 0.50, 0.20),  # final fine-pass
+    "PatFlex":                      (0.20, 0.60, 0.20),
+    "PatMax - High Sensitivity":    (0.10, 0.80, 0.10),
+    "Perspective PatMax":           (0.20, 0.60, 0.20),
+}
+
+# (angle_step_factor, scale_step_factor, peaks_factor)
+ALGO_GRID = {
+    "PatMax":                       (1.0, 1.0, 1.0),
+    "PatQuick":                     (2.0, 2.0, 0.5),
+    "PatMax & PatQuick":            (1.0, 1.0, 1.0),  # 2-pass managed bên dưới
+    "PatFlex":                      (1.0, 1.0, 1.0),
+    "PatMax - High Sensitivity":    (0.5, 0.5, 2.0),
+    "Perspective PatMax":           (1.0, 1.0, 1.0),
+}
+
+
+def _shape_model_pair(model: PatMaxModel,
+                      train_mode_align: str
+                      ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Chọn cặp (patch_gray, edge_image) phù hợp với Train Mode.
+
+    - "Image": dùng raw patch + edge gốc (default).
+    - "Shape Models with Image": chuẩn hoá raw patch (CLAHE) để giảm
+      ảnh hưởng intensity, edge giữ nguyên — engine vẫn xài cả 2.
+    - "Shape Models with Transform": dùng edge làm 'patch' (giả grayscale),
+      khiến NCC cũng so trên edge → robust tuyệt đối với lighting nhưng
+      kén pattern có nhiều cạnh rõ.
+    """
+    p_gray = model.patch_gray
+    p_edge = model.edge_image
+    if p_gray is None or p_edge is None:
+        return p_gray, p_edge
+
+    if train_mode_align == "Shape Models with Image":
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        return clahe.apply(p_gray), p_edge
+
+    if train_mode_align == "Shape Models with Transform":
+        # patch_gray ← edge dilated (giảm aliasing khi xoay)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        edge_thick = cv2.dilate(p_edge, kernel)
+        return edge_thick, p_edge
+
+    return p_gray, p_edge
+
+
+def _ensure_precomputed(model: PatMaxModel,
+                        weights: Tuple[float, float, float],
+                        patch_gray: np.ndarray,
+                        edge_image: np.ndarray,
+                        angle_low: float, angle_high: float, angle_step: float,
+                        scale_low: float, scale_high: float, scale_step: float
+                        ) -> List[Dict]:
+    """Build (hoặc cache) precomputed templates cho path 'Shape Models with Transform'."""
+    cache_key = (round(angle_low, 2), round(angle_high, 2), round(angle_step, 2),
+                 round(scale_low, 3), round(scale_high, 3), round(scale_step, 3),
+                 weights)
+    cached = getattr(model, "_align_tmpl_cache", None)
+    if cached and cached.get("key") == cache_key:
+        return cached["templates"]
+    angles, scales = _build_search_grid(angle_low, angle_high, angle_step,
+                                        scale_low, scale_high, scale_step)
+    tmpls = [_build_template(patch_gray, edge_image, a, s, weights)
+             for s in scales for a in angles]
+    model._align_tmpl_cache = {"key": cache_key, "templates": tmpls}
+    print(f"[PatMax Align] precomputed {len(tmpls)} oriented templates "
+          f"(angles={len(angles)} × scales={len(scales)})")
+    return tmpls
+
+
+def _refine_perspective(gray_img: np.ndarray,
+                        model_patch: np.ndarray,
+                        result: PatMaxResult,
+                        max_iter: int = 6) -> PatMaxResult:
+    """
+    Perspective PatMax — refine 4 góc bằng local search homography.
+    Mỗi corner thử ±3px; chọn config tăng NCC nhất. Lặp tối đa max_iter.
+    Trả PatMaxResult với corners cập nhật (origin giữ nguyên).
+    """
+    if not result.corners or len(result.corners) != 4:
+        return result
+    H, W = gray_img.shape[:2]
+    th, tw = model_patch.shape[:2]
+    src = np.float32([[0, 0], [tw, 0], [tw, th], [0, th]])
+    corners = [list(c) for c in result.corners]
+
+    def _score(corners_xy):
+        dst = np.float32(corners_xy)
+        try:
+            Hm = cv2.getPerspectiveTransform(src, dst)
+        except cv2.error:
+            return -1.0
+        warped = cv2.warpPerspective(model_patch, Hm, (W, H),
+                                     borderMode=cv2.BORDER_REPLICATE)
+        # NCC trong bbox của corners
+        xs = [int(p[0]) for p in corners_xy]
+        ys = [int(p[1]) for p in corners_xy]
+        x0 = max(0, min(xs)); x1 = min(W, max(xs))
+        y0 = max(0, min(ys)); y1 = min(H, max(ys))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return -1.0
+        a = gray_img[y0:y1, x0:x1].astype(np.float32)
+        b = warped[y0:y1, x0:x1].astype(np.float32)
+        a = (a - a.mean()) / (a.std() + 1e-6)
+        b = (b - b.mean()) / (b.std() + 1e-6)
+        return float((a * b).mean())
+
+    best = _score(corners)
+    if best < 0:
+        return result
+    step = 3
+    for _ in range(max_iter):
+        improved = False
+        for i in range(4):
+            for dx, dy in [(-step, 0), (step, 0), (0, -step), (0, step)]:
+                trial = [list(c) for c in corners]
+                trial[i][0] += dx; trial[i][1] += dy
+                s = _score(trial)
+                if s > best + 1e-3:
+                    best = s
+                    corners = trial
+                    improved = True
+        if not improved:
+            step = max(1, step // 2)
+            if step == 1:
+                # one more pass at finest step
+                for i in range(4):
+                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        trial = [list(c) for c in corners]
+                        trial[i][0] += dx; trial[i][1] += dy
+                        s = _score(trial)
+                        if s > best + 1e-4:
+                            best = s
+                            corners = trial
+                break
+    result.corners = [(float(c[0]), float(c[1])) for c in corners]
+    # Cập nhật score (kết hợp với rigid score)
+    result.score = max(result.score, float((result.score + best) / 2.0))
+    return result
+
+
+def _refine_patflex(gray_img: np.ndarray,
+                    model: PatMaxModel,
+                    result: PatMaxResult,
+                    cells: int = 2) -> PatMaxResult:
+    """
+    PatFlex — chia template thành cells × cells ô và cho phép mỗi ô shift
+    ±max_shift px tìm vị trí khớp tốt nhất; score = avg cell NCC.
+    Xấp xỉ non-rigid matching. Chỉ áp dụng khi rigid result đã tốt.
+    """
+    patch = model.patch_gray
+    if patch is None or result.score <= 0:
+        return result
+    th, tw = patch.shape[:2]
+    H, W = gray_img.shape[:2]
+    # Dựng patch transformed (xoay/scale theo result)
+    rad = math.radians(-result.angle)
+    s = result.scale or 1.0
+    # Để đơn giản: làm việc với patch gốc (không xoay), giả định góc nhỏ
+    cell_w = max(8, tw // cells)
+    cell_h = max(8, th // cells)
+    cx = result.x; cy = result.y
+    # Top-left của bbox patch (chưa xoay)
+    base_x = cx - tw / 2.0
+    base_y = cy - th / 2.0
+    max_shift = max(2, int(round(min(tw, th) * 0.08)))
+    ncc_sum = 0.0; cnt = 0
+    for cy_idx in range(cells):
+        for cx_idx in range(cells):
+            cx0 = int(cx_idx * cell_w); cy0 = int(cy_idx * cell_h)
+            cw = min(cell_w, tw - cx0); ch = min(cell_h, th - cy0)
+            if cw < 6 or ch < 6:
+                continue
+            tmpl = patch[cy0:cy0 + ch, cx0:cx0 + cw]
+            # Vùng tìm trong ảnh quanh vị trí dự kiến
+            sx0 = int(base_x + cx0 - max_shift)
+            sy0 = int(base_y + cy0 - max_shift)
+            sx1 = sx0 + cw + 2 * max_shift
+            sy1 = sy0 + ch + 2 * max_shift
+            sx0 = max(0, sx0); sy0 = max(0, sy0)
+            sx1 = min(W, sx1); sy1 = min(H, sy1)
+            if sx1 - sx0 <= cw or sy1 - sy0 <= ch:
+                continue
+            search = gray_img[sy0:sy1, sx0:sx1]
+            try:
+                r = cv2.matchTemplate(search, tmpl, cv2.TM_CCOEFF_NORMED)
+                ncc_sum += float(r.max()); cnt += 1
+            except cv2.error:
+                continue
+    if cnt > 0:
+        flex_score = ncc_sum / cnt
+        # Blend với rigid score (giữ rigid làm baseline)
+        result.score = float(0.5 * result.score + 0.5 * max(result.score, flex_score))
+    return result
+
+
+def run_patmax_align(image: np.ndarray,
+                     model: PatMaxModel,
+                     *,
+                     algorithm: str = "PatMax & PatQuick",
+                     train_mode_align: str = "Image",
+                     accept_threshold: float = 0.5,
+                     angle_low: float = 0.0, angle_high: float = 0.0,
+                     angle_step: float = 5.0,
+                     scale_low: float = 1.0, scale_high: float = 1.0,
+                     scale_step: float = 0.1,
+                     num_results: int = 1,
+                     overlap_threshold: float = 0.5,
+                     ) -> Tuple[List[PatMaxResult], np.ndarray]:
+    """Dispatcher cho 6 algorithm × 3 train mode của PatMax Align Tool."""
+    if not model.is_valid():
+        return [], _empty_vis(image)
+
+    weights = ALGO_WEIGHTS.get(algorithm, ALGO_WEIGHTS["PatMax"])
+    a_fac, s_fac, peak_fac = ALGO_GRID.get(algorithm, ALGO_GRID["PatMax"])
+    ang_step_eff = max(0.5, angle_step * a_fac)
+    sc_step_eff  = max(0.01, scale_step * s_fac)
+
+    # Train Mode → chọn cặp (patch, edge) phù hợp
+    patch_gray, edge_image = _shape_model_pair(model, train_mode_align)
+    if patch_gray is None or edge_image is None:
+        return [], _empty_vis(image)
+
+    bgr      = image if len(image.shape) == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    gray_img = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    H, W     = gray_img.shape
+    img_edges = cv2.Canny(gray_img, model.canny_low, model.canny_high)
+
+    # ─── Build templates: precompute nếu Shape Models with Transform ───
+    if train_mode_align == "Shape Models with Transform":
+        templates = _ensure_precomputed(
+            model, weights, patch_gray, edge_image,
+            angle_low, angle_high, ang_step_eff,
+            scale_low, scale_high, sc_step_eff)
+    else:
+        angles, scales = _build_search_grid(angle_low, angle_high, ang_step_eff,
+                                            scale_low, scale_high, sc_step_eff)
+        templates = [_build_template(patch_gray, edge_image, a, s, weights)
+                     for s in scales for a in angles]
+
+    print(f"[PatMax Align] algorithm={algorithm}  train_mode={train_mode_align}  "
+          f"weights={weights}  templates={len(templates)}  "
+          f"step(ang={ang_step_eff:.2f}, sc={sc_step_eff:.3f})")
+
+    # ─── Special path: PatMax & PatQuick — 2-pass coarse→fine ───
+    if algorithm == "PatMax & PatQuick":
+        # Pass 1: PatQuick (NCC-heavy, coarse)
+        wq = ALGO_WEIGHTS["PatQuick"]
+        ang_step_coarse = max(1.0, ang_step_eff * 2.0)
+        sc_step_coarse  = max(0.05, sc_step_eff * 2.0)
+        ang_q, sc_q = _build_search_grid(angle_low, angle_high, ang_step_coarse,
+                                         scale_low, scale_high, sc_step_coarse)
+        tmpls_q = [_build_template(patch_gray, edge_image, a, s, wq)
+                   for s in sc_q for a in ang_q]
+        cands_q: List[Dict] = []
+        for t in tmpls_q:
+            cands_q.extend(_match_template(gray_img, img_edges, t,
+                                           max(num_results * 2, 4)))
+        cands_q.sort(key=lambda d: -d["score"])
+        # Pick TOP-K seeds (loose threshold)
+        seeds = []
+        loose = max(0.1, accept_threshold * 0.6)
+        for c in cands_q:
+            if c["score"] < loose:
+                break
+            ok = True
+            for s_seed in seeds:
+                d = math.hypot(c["cx"] - s_seed["cx"], c["cy"] - s_seed["cy"])
+                if d < min(c["nW"], c["nH"]) * 0.5:
+                    ok = False; break
+            if ok:
+                seeds.append(c)
+            if len(seeds) >= max(num_results * 3, 6):
+                break
+        print(f"[PatMax Align] PatQuick pass: {len(cands_q)} cands, "
+              f"{len(seeds)} seeds")
+        # Pass 2: PatMax fine — chỉ quanh seed angles ±2*ang_step_eff
+        candidates: List[Dict] = []
+        score_map = np.zeros((H, W), dtype=np.float32)
+        best_any = 0.0
+        for seed in seeds:
+            seed_a = seed["angle"]; seed_s = seed["scale"]
+            a_lo = seed_a - ang_step_coarse
+            a_hi = seed_a + ang_step_coarse
+            s_lo = max(scale_low, seed_s - sc_step_coarse)
+            s_hi = min(scale_high, seed_s + sc_step_coarse)
+            ang_f, sc_f = _build_search_grid(a_lo, a_hi, ang_step_eff,
+                                             s_lo, s_hi, sc_step_eff)
+            for sc in sc_f:
+                for ang in ang_f:
+                    t = _build_template(patch_gray, edge_image, ang, sc, weights)
+                    res_t = _match_template(gray_img, img_edges, t,
+                                            max(2, int(num_results * peak_fac) + 1))
+                    for r in res_t:
+                        # Chỉ giữ peaks gần seed center (giảm drift)
+                        dpx = math.hypot(r["cx"] - seed["cx"], r["cy"] - seed["cy"])
+                        if dpx > min(r["nW"], r["nH"]) * 0.6:
+                            continue
+                        best_any = max(best_any, r["score"])
+                        cy_i = min(int(r["cy"]), H - 1)
+                        cx_i = min(int(r["cx"]), W - 1)
+                        if score_map[cy_i, cx_i] < r["s_ncc"]:
+                            score_map[cy_i, cx_i] = r["s_ncc"]
+                        if r["score"] >= accept_threshold:
+                            candidates.append(r)
+        print(f"[PatMax Align] PatMax fine pass: best={best_any:.4f}  "
+              f"cands={len(candidates)}")
+    else:
+        # ─── Generic 1-pass path (PatMax / PatQuick / HiSens / PatFlex / Perspective) ───
+        candidates: List[Dict] = []
+        score_map = np.zeros((H, W), dtype=np.float32)
+        best_any = 0.0
+        peaks_per_template = max(int(num_results * 4 * peak_fac), 8)
+        for t in templates:
+            results_t = _match_template(gray_img, img_edges, t, peaks_per_template)
+            for r in results_t:
+                best_any = max(best_any, r["score"])
+                if (0 <= r["ty"] < H - r["nH"]) and (0 <= r["tx"] < W - r["nW"]):
+                    cy_i = min(int(r["cy"]), H - 1)
+                    cx_i = min(int(r["cx"]), W - 1)
+                    if score_map[cy_i, cx_i] < r["s_ncc"]:
+                        score_map[cy_i, cx_i] = r["s_ncc"]
+                if r["score"] >= accept_threshold:
+                    candidates.append(r)
+        print(f"[PatMax Align] best={best_any:.4f}  "
+              f"cands_above_th={len(candidates)}")
+
+    # ─── NMS ───
+    candidates.sort(key=lambda d: -d["score"])
+    kept: List[Dict] = []
+    for cand in candidates:
+        overlap = False
+        for k in kept:
+            dist = math.hypot(cand["cx"] - k["cx"], cand["cy"] - k["cy"])
+            min_dim = min(cand["nW"], cand["nH"], k["nW"], k["nH"])
+            if dist < min_dim * overlap_threshold:
+                overlap = True; break
+        if not overlap:
+            kept.append(cand)
+        if len(kept) >= num_results:
+            break
+
+    # Build PatMaxResult list (origin-aware như run_patmax)
+    pdx = float(model.origin_x) - float(model.pattern_w) / 2.0
+    pdy = float(model.origin_y) - float(model.pattern_h) / 2.0
+    results: List[PatMaxResult] = []
+    for d in kept:
+        corners = _rotated_corners(d["cx"], d["cy"], d["nW"], d["nH"], d["angle"])
+        rad_o = math.radians(-d["angle"])
+        ca = math.cos(rad_o); sa = math.sin(rad_o)
+        s = d["scale"] if d["scale"] else 1.0
+        ox_t = float(d["cx"]) + s * (pdx * ca - pdy * sa)
+        oy_t = float(d["cy"]) + s * (pdx * sa + pdy * ca)
+        results.append(PatMaxResult(
+            found=True, score=d["score"],
+            x=d["cx"], y=d["cy"],
+            angle=d["angle"], scale=d["scale"],
+            width=float(d["nW"]), height=float(d["nH"]),
+            corners=corners,
+            origin_x=ox_t, origin_y=oy_t,
+        ))
+
+    # ─── Algorithm-specific refinement ───
+    if results and algorithm == "Perspective PatMax":
+        for i, r in enumerate(results):
+            results[i] = _refine_perspective(gray_img, model.patch_gray, r)
+    elif results and algorithm == "PatFlex":
+        for i, r in enumerate(results):
+            results[i] = _refine_patflex(gray_img, model, r)
+
+    sm_blurred = cv2.GaussianBlur(score_map, (15, 15), 0)
+    sm_vis = _score_map_vis(bgr, sm_blurred)
+    return results, sm_vis

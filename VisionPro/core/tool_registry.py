@@ -251,17 +251,80 @@ def _is_gray_image(img) -> bool:
 
 def proc_patmax_align(inputs, params):
     """
-    PatMax Align Tool — validate input phải là ảnh gray rồi delegate
-    cho proc_patmax (Algorithm + Train Mode chỉ là metadata được lưu
-    trong node.params). Khi không gray, trả ảnh nguyên bản, found=False
-    (không vẽ overlay đỏ) — UI dialog sẽ hiện popup khi user ấn Train.
+    PatMax Align Tool — dispatch theo Algorithm + Train Mode (Cognex-style
+    behavioral approximation). Validate input gray; nếu không gray trả ảnh
+    gốc + found=False (UI dialog popup cảnh báo khi user ấn Train).
     """
+    from core.patmax_engine import (PatMaxModel, run_patmax_align,
+                                     draw_patmax_results, _empty_vis)
     img = inputs.get("image")
-    if img is not None and not _is_gray_image(img):
+    if img is None:
+        return {"image": None, "found": False, "score": 0.0,
+                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+                "num_found": 0, "objects": []}
+    if not _is_gray_image(img):
         return {"image": _bgr(img), "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
-    return proc_patmax(inputs, params)
+
+    model: PatMaxModel = params.get("_patmax_model") or PatMaxModel()
+    if not model.is_valid():
+        vis = _empty_vis(_bgr(img))
+        return {"image": vis, "found": False, "score": 0.0,
+                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+                "num_found": 0, "objects": []}
+
+    algorithm        = str(params.get("algorithm", "PatMax & PatQuick"))
+    train_mode_align = str(params.get("train_mode", "Image"))
+
+    ang_low  = model.angle_low
+    ang_high = model.angle_high
+    ang_step = max(0.5, model.angle_step)
+    sc_low   = model.scale_low
+    sc_high  = model.scale_high
+    sc_step  = max(0.01, getattr(model, "scale_step", 0.1) or 0.1)
+    nr = max(1, int(model.num_results or 0)) or int(params.get("num_results", 1))
+    ot = float(getattr(model, "overlap_threshold", 0.5) or 0.5)
+    at = float(model.accept_threshold or params.get("accept_threshold", 0.5))
+
+    results, _ = run_patmax_align(
+        _bgr(img), model,
+        algorithm=algorithm,
+        train_mode_align=train_mode_align,
+        accept_threshold=at,
+        angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
+        scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
+        num_results=nr,
+        overlap_threshold=ot,
+    )
+    vis = draw_patmax_results(_bgr(img), results, model)
+    objects = [
+        {"x": r.origin_x, "y": r.origin_y, "score": r.score,
+         "angle": r.angle, "scale": r.scale,
+         "center_x": r.x, "center_y": r.y,
+         "origin_x": r.origin_x, "origin_y": r.origin_y}
+        for r in results
+    ]
+    if results:
+        r = results[0]
+        out = {"image": vis, "found": True, "score": r.score,
+               "x": r.origin_x, "y": r.origin_y,
+               "angle": r.angle, "scale": r.scale,
+               "num_found": len(results), "objects": objects}
+    else:
+        out = {"image": vis, "found": False, "score": 0.0,
+               "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+               "num_found": 0, "objects": []}
+    for term in (params.get("_extra_terminals") or []):
+        try:
+            obj_idx = int(term.get("object", 0))
+            field = str(term.get("field", "x"))
+            name = term.get("name") or f"{field}_{obj_idx}"
+            out[name] = (objects[obj_idx].get(field, 0.0)
+                          if 0 <= obj_idx < len(objects) else 0.0)
+        except Exception:
+            continue
+    return out
 
 
 def proc_patfind(inputs, params):

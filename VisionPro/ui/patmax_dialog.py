@@ -1369,6 +1369,31 @@ class PatMaxDialog(QDialog):
 
             # Show edge model
             self._set_view("edges")
+
+            # PatMax Align Tool + Shape Models with Transform → auto-precompute
+            # oriented templates ngay khi train xong (search sẽ rất nhanh).
+            if (self._node.tool.tool_id == "patmax_align"
+                    and self._train_mode_align_combo.currentText()
+                        == "Shape Models with Transform"):
+                try:
+                    from core.patmax_engine import (_ensure_precomputed,
+                                                     _shape_model_pair,
+                                                     ALGO_WEIGHTS)
+                    algo = self._algorithm_combo.currentText()
+                    weights = ALGO_WEIGHTS.get(algo, ALGO_WEIGHTS["PatMax"])
+                    pg, pe = _shape_model_pair(self._model,
+                                                "Shape Models with Transform")
+                    if pg is not None and pe is not None:
+                        n = len(_ensure_precomputed(
+                            self._model, weights, pg, pe,
+                            ang_low_t, ang_high_t, self._sp_ang_step.value(),
+                            sc_low_t, sc_high_t, self._sp_sc_step.value()))
+                        self._train_status.setText(
+                            self._train_status.text()
+                            + f"  |  precomputed {n} shape templates")
+                except Exception as e:
+                    print(f"[PatMax Align] precompute on train failed: {e}")
+
             self.model_trained.emit()
 
         except Exception as e:
@@ -1402,6 +1427,7 @@ class PatMaxDialog(QDialog):
 
             self._search_progress.setValue(50)
 
+            is_align = (self._node.tool.tool_id == "patmax_align")
             if self._roi_mode == "multi_pattern" and self._models:
                 results, score_map_vis = run_patmax_multi(
                     img, self._models,
@@ -1411,6 +1437,20 @@ class PatMaxDialog(QDialog):
                     scale_low=sc_low, scale_high=sc_high,
                     scale_step=self._sp_sc_step.value(),
                     num_results_per_model=self._sp_num_results.value(),
+                    overlap_threshold=self._sp_overlap.value(),
+                )
+            elif is_align:
+                from core.patmax_engine import run_patmax_align
+                results, score_map_vis = run_patmax_align(
+                    img, self._model,
+                    algorithm=self._algorithm_combo.currentText(),
+                    train_mode_align=self._train_mode_align_combo.currentText(),
+                    accept_threshold=self._sp_threshold.value(),
+                    angle_low=ang_low, angle_high=ang_high,
+                    angle_step=self._sp_ang_step.value(),
+                    scale_low=sc_low, scale_high=sc_high,
+                    scale_step=self._sp_sc_step.value(),
+                    num_results=self._sp_num_results.value(),
                     overlap_threshold=self._sp_overlap.value(),
                 )
             else:
