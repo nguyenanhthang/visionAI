@@ -703,11 +703,6 @@ class InteractiveImageLabel(QLabel):
             if eps is not None:
                 (cx, cy), x_end, y_end = eps
                 rot = self._rot_handle_pos()
-                # Background plate đậm phía sau tâm — gợi style trong ảnh #2
-                plate_col = QColor(15, 23, 42, 220)
-                p.setPen(QPen(QColor(0, 212, 255, 180), 1))
-                p.setBrush(QBrush(plate_col))
-                p.drawRoundedRect(cx - 16, cy - 16, 32, 32, 4, 4)
                 # X axis — đỏ
                 col_x = QColor(255, 70, 70)
                 p.setPen(QPen(col_x, 2, Qt.SolidLine, Qt.RoundCap))

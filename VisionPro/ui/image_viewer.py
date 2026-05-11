@@ -370,9 +370,29 @@ class ImageViewerPanel(QWidget):
         self.refresh_current()
 
     def _get_source_image(self, node):
-        """Tìm ảnh input của node — lấy output 'image' của upstream gần nhất."""
+        """Tìm ảnh gốc (raw) của pipeline — traverse ngược về node category
+        'Acquire Image' đầu chuỗi. Cho phép Show Result OFF hiện ảnh thô,
+        không phải output đã annotate của upstream gần nhất."""
         if not self._graph:
             return None
+        visited = set()
+        cur = node
+        # Walk upstream qua port "image" để tìm root source
+        for _ in range(64):    # an toàn: pipeline khó dài hơn 64 node
+            if cur is None or cur.node_id in visited:
+                break
+            visited.add(cur.node_id)
+            cat = getattr(cur.tool, "category", "")
+            if cat == "Acquire Image" and "image" in cur.outputs:
+                return cur.outputs["image"]
+            # Tìm upstream nối vào port "image"
+            upstream = None
+            for c in self._graph.connections:
+                if c.dst_id == cur.node_id and c.dst_port == "image":
+                    upstream = self._graph.nodes.get(c.src_id)
+                    break
+            cur = upstream
+        # Fallback: upstream gần nhất nếu không tìm thấy Acquire root
         for c in self._graph.connections:
             if c.dst_id == node.node_id and c.dst_port == "image":
                 src = self._graph.nodes.get(c.src_id)

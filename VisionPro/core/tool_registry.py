@@ -274,7 +274,7 @@ def proc_patmax_align(inputs, params):
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
 
-    algorithm        = str(params.get("algorithm", "PatMax & PatQuick"))
+    algorithm        = str(params.get("algorithm", "PatQuick"))
     train_mode_align = str(params.get("train_mode", "Image"))
 
     ang_low  = model.angle_low
@@ -1448,7 +1448,7 @@ TOOL_REGISTRY: List[ToolDef] = [
      PortDef("x","number"),PortDef("y","number"),PortDef("angle","number"),
      PortDef("scale","number"),PortDef("num_found","number"),
      PortDef("objects","list")],
-    [P("algorithm","Algorithm","enum","PatMax & PatQuick",
+    [P("algorithm","Algorithm","enum","PatQuick",
        choices=["PatMax","PatQuick","PatMax & PatQuick","PatFlex",
                 "PatMax - High Sensitivity","Perspective PatMax"],
        tooltip="Thuật toán matching pattern"),
