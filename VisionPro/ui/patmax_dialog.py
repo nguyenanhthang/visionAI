@@ -191,7 +191,7 @@ class PatMaxDialog(QDialog):
         itl.addWidget(self._view_info)
         rl.addWidget(img_tb)
 
-        # Interactive image
+        # Interactive image — wrap trong QScrollArea để zoom > 1 hiện scrollbars X/Y
         self._img_label = InteractiveImageLabel(mode="roi")
         self._img_label.roi_changed.connect(self._on_roi_drawn)
         self._img_label.origin_changed.connect(self._on_origin_dragged)
@@ -201,7 +201,21 @@ class PatMaxDialog(QDialog):
         # Bật multi-shape ngay nếu mode đã là multi_*
         if self._roi_mode in ("multi_region", "multi_pattern"):
             self._img_label.set_multi_shape(True)
-        rl.addWidget(self._img_label, 1)
+        self._img_scroll = QScrollArea()
+        self._img_scroll.setWidgetResizable(False)
+        self._img_scroll.setAlignment(Qt.AlignCenter)
+        self._img_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._img_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._img_scroll.setStyleSheet(
+            "QScrollArea{border:none;background:#050810;}"
+            "QScrollBar:vertical{background:#0a0e1a;width:12px;}"
+            "QScrollBar:horizontal{background:#0a0e1a;height:12px;}"
+            "QScrollBar::handle{background:#1e2d45;border-radius:5px;}"
+            "QScrollBar::handle:hover{background:#00d4ff;}")
+        self._img_scroll.setWidget(self._img_label)
+        # Tell label about its scroll area để biết viewport size khi zoom
+        self._img_label.set_scroll_area(self._img_scroll)
+        rl.addWidget(self._img_scroll, 1)
         self._current_shape: str = "rect"
         self._current_shape_data: Optional[dict] = None
 

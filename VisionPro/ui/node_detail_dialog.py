@@ -86,6 +86,9 @@ class InteractiveImageLabel(QLabel):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Optional QScrollArea parent — biết viewport size khi zoom > 1.
+        self._scroll_area = None
+        self._base_min_size = (400, 300)
         self.setStyleSheet(
             "background:#050810; border:1px solid #1e2d45; border-radius:6px;")
 
@@ -95,6 +98,11 @@ class InteractiveImageLabel(QLabel):
             "readonly": Qt.ArrowCursor,
         }
         self.setCursor(QCursor(cur_map.get(mode, Qt.ArrowCursor)))
+
+    def set_scroll_area(self, area):
+        """Liên kết label với QScrollArea cha → zoom > 1 hiện scrollbars."""
+        self._scroll_area = area
+        self._base_min_size = (400, 300)
 
     # ── Image ──────────────────────────────────────────────────────
     def set_image(self, arr: Optional[np.ndarray]):
@@ -417,7 +425,6 @@ class InteractiveImageLabel(QLabel):
         new_zoom = max(0.2, min(20.0, self._user_zoom * factor))
         if abs(new_zoom - self._user_zoom) < 1e-4:
             return
-        # Pixel ảnh dưới con trỏ trước khi zoom
         try:
             mp = event.position()
             mx = float(mp.x()); my = float(mp.y())
@@ -426,20 +433,37 @@ class InteractiveImageLabel(QLabel):
         scale_old = self._scale
         if scale_old <= 0:
             return
+        # Pixel ảnh dưới con trỏ trước khi zoom (toạ độ ảnh)
         ix = (mx - self._off_x) / scale_old
         iy = (my - self._off_y) / scale_old
-        # Tính pan mới sao cho (ix, iy) vẫn nằm dưới (mx, my)
-        h, w = self._arr.shape[:2]
-        new_scale = self._fit_scale * new_zoom
-        new_dw = int(w * new_scale); new_dh = int(h * new_scale)
-        base_off_x = (self.width()  - new_dw) // 2
-        base_off_y = (self.height() - new_dh) // 2
-        target_off_x = mx - ix * new_scale
-        target_off_y = my - iy * new_scale
         self._user_zoom = new_zoom
-        self._pan_dx = int(round(target_off_x - base_off_x))
-        self._pan_dy = int(round(target_off_y - base_off_y))
-        self._render()
+
+        if self._scroll_area is not None:
+            # Render lại để label resize theo zoom mới
+            self._render()
+            # Sau render: tính vị trí pixel cũ trên label mới, scroll để đặt
+            # nó dưới con trỏ (mx, my là toạ độ trên label cũ — vẫn ổn vì
+            # con trỏ đang ở vị trí widget-space của label).
+            new_scale = self._scale
+            new_px = ix * new_scale + self._off_x
+            new_py = iy * new_scale + self._off_y
+            # Lệch so với mouse → cuộn theo
+            hbar = self._scroll_area.horizontalScrollBar()
+            vbar = self._scroll_area.verticalScrollBar()
+            hbar.setValue(hbar.value() + int(new_px - mx))
+            vbar.setValue(vbar.value() + int(new_py - my))
+        else:
+            # Pan-offset mode (không scroll area) — giữ pixel dưới chuột
+            h, w = self._arr.shape[:2]
+            new_scale = self._fit_scale * new_zoom
+            new_dw = int(w * new_scale); new_dh = int(h * new_scale)
+            base_off_x = (self.width()  - new_dw) // 2
+            base_off_y = (self.height() - new_dh) // 2
+            target_off_x = mx - ix * new_scale
+            target_off_y = my - iy * new_scale
+            self._pan_dx = int(round(target_off_x - base_off_x))
+            self._pan_dy = int(round(target_off_y - base_off_y))
+            self._render()
         event.accept()
 
     def reset_zoom(self):
@@ -565,14 +589,39 @@ class InteractiveImageLabel(QLabel):
         qimg = QImage(arr.data.tobytes(), w, h, ch * w, QImage.Format_RGB888)
         pix  = QPixmap.fromImage(qimg)
 
-        pw = max(1, self.width() - 4)
-        ph = max(1, self.height() - 4)
+        # Khi có scroll area: dùng viewport size làm tham chiếu fit, không phải
+        # self.width()/height() (chính label có thể đã grow theo zoom).
+        if self._scroll_area is not None:
+            vp = self._scroll_area.viewport()
+            pw = max(1, vp.width() - 4)
+            ph = max(1, vp.height() - 4)
+        else:
+            pw = max(1, self.width() - 4)
+            ph = max(1, self.height() - 4)
         sx = pw / w; sy = ph / h
         self._fit_scale = min(sx, sy)
         self._scale = self._fit_scale * self._user_zoom
         dw = int(w * self._scale); dh = int(h * self._scale)
-        self._off_x = (self.width() - dw) // 2 + self._pan_dx
-        self._off_y = (self.height() - dh) // 2 + self._pan_dy
+
+        if self._scroll_area is not None and self._user_zoom > 1.0:
+            # Zoom > 1 → label rộng hơn viewport → QScrollArea hiện scrollbars.
+            need_w = max(self._base_min_size[0], dw + 8)
+            need_h = max(self._base_min_size[1], dh + 8)
+            if self.width() != need_w or self.height() != need_h:
+                self.setMinimumSize(need_w, need_h)
+                self.resize(need_w, need_h)
+            self._off_x = (self.width() - dw) // 2
+            self._off_y = (self.height() - dh) // 2
+        else:
+            # Fit-to-viewport: kéo label về kích thước viewport, center image.
+            if self._scroll_area is not None:
+                vp = self._scroll_area.viewport()
+                if self.width() != vp.width() or self.height() != vp.height():
+                    self.setMinimumSize(self._base_min_size[0],
+                                        self._base_min_size[1])
+                    self.resize(vp.width(), vp.height())
+            self._off_x = (self.width() - dw) // 2 + self._pan_dx
+            self._off_y = (self.height() - dh) // 2 + self._pan_dy
 
         canvas = QPixmap(self.width(), self.height())
         canvas.fill(QColor(5, 8, 16))

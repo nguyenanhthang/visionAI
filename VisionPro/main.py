@@ -174,15 +174,16 @@ def main():
     app.setFont(font)
     apply_dark_theme(app)
 
-    # Disable mouse wheel cho QComboBox / QSpinBox / QDoubleSpinBox khi
-    # KHÔNG focused → tránh user scroll page mà combo/spin bị đổi giá trị.
+    # Disable mouse wheel cho QComboBox / QSpinBox / QDoubleSpinBox.
+    # Block KỂ CẢ KHI focused — user phải click vào button/arrow hoặc dùng
+    # keyboard để đổi giá trị, không vô tình scroll đổi.
     from PySide6.QtWidgets import (QComboBox, QAbstractSpinBox)
     from PySide6.QtCore import QObject, QEvent
 
     class _NoWheelFilter(QObject):
         def eventFilter(self, obj, event):
             if event.type() == QEvent.Wheel and isinstance(
-                    obj, (QComboBox, QAbstractSpinBox)) and not obj.hasFocus():
+                    obj, (QComboBox, QAbstractSpinBox)):
                 event.ignore()
                 return True
             return False

@@ -261,26 +261,51 @@ class ImageViewerPanel(QWidget):
         for b in (btn_out, btn_in, btn_1to1, btn_fit):
             tl.addWidget(b)
 
-        # Show Result toggle — switch giữa "Result" (output đã annotate) và
-        # "Source" (ảnh gốc input của node, không overlay).
-        self._show_result = True
-        self._btn_show_result = QPushButton("👁 Result")
-        self._btn_show_result.setCheckable(True)
-        self._btn_show_result.setChecked(True)
-        self._btn_show_result.setFixedHeight(28)
-        self._btn_show_result.setToolTip(
-            "Toggle Result/Source — Result: output đã vẽ marker; "
-            "Source: ảnh gốc input của node.")
-        self._btn_show_result.setStyleSheet("""
-            QPushButton{background:#111827;border:1px solid #1e2d45;
+        # Results dropdown — Cognex VisionPro style:
+        #   ☑ Show Composite Graphics — overlay của node hiện tại
+        #   ☐ Show Shared Graphics    — overlay cộng dồn từ các node upstream
+        from PySide6.QtWidgets import QToolButton, QMenu, QWidgetAction, QCheckBox
+        self._show_composite = True
+        self._show_shared    = False
+        self._btn_results = QToolButton()
+        self._btn_results.setText("📊 Results ▾")
+        self._btn_results.setPopupMode(QToolButton.InstantPopup)
+        self._btn_results.setFixedHeight(28)
+        self._btn_results.setToolTip(
+            "Results overlays — tương đương \"Show Composite/Shared Graphics\" trong "
+            "Cognex VisionPro.")
+        self._btn_results.setStyleSheet("""
+            QToolButton{background:#111827;border:1px solid #1e2d45;
                         border-radius:4px;color:#94a3b8;font-size:11px;
                         padding:0 10px;font-weight:600;}
-            QPushButton:hover{background:#1a2236;color:#00d4ff;}
-            QPushButton:checked{background:#0d2a1a;border-color:#39ff14;
-                                color:#39ff14;}
+            QToolButton:hover{background:#1a2236;color:#00d4ff;}
+            QToolButton::menu-indicator{image:none;}
         """)
-        self._btn_show_result.toggled.connect(self._on_show_result_toggled)
-        tl.addWidget(self._btn_show_result)
+
+        menu = QMenu(self._btn_results)
+        menu.setStyleSheet(
+            "QMenu{background:#0d1220;border:1px solid #1e2d45;"
+            "padding:4px;color:#e2e8f0;}"
+            "QMenu::item{padding:6px 28px 6px 8px;}"
+            "QMenu::item:selected{background:#1a2236;}")
+
+        def _mk_check(label: str, checked: bool, slot) -> QWidgetAction:
+            wa = QWidgetAction(menu)
+            cb = QCheckBox(label)
+            cb.setChecked(checked)
+            cb.setStyleSheet(
+                "QCheckBox{color:#e2e8f0;font-size:11px;padding:4px 8px;}"
+                "QCheckBox::indicator{width:14px;height:14px;}")
+            cb.toggled.connect(slot)
+            wa.setDefaultWidget(cb)
+            return wa
+
+        menu.addAction(_mk_check("Show Composite Graphics", True,
+                                  self._on_composite_toggled))
+        menu.addAction(_mk_check("Show Shared Graphics", False,
+                                  self._on_shared_toggled))
+        self._btn_results.setMenu(menu)
+        tl.addWidget(self._btn_results)
 
         lay.addWidget(tb)
 
@@ -364,10 +389,45 @@ class ImageViewerPanel(QWidget):
             self._lbl_status.setText("IDLE")
             self._current_node_id = None
 
-    def _on_show_result_toggled(self, on: bool):
-        self._show_result = on
-        self._btn_show_result.setText("👁 Result" if on else "🖼 Source")
+    def _on_composite_toggled(self, on: bool):
+        self._show_composite = on
         self.refresh_current()
+
+    def _on_shared_toggled(self, on: bool):
+        self._show_shared = on
+        self.refresh_current()
+
+    def _overlay_diff(self, base: np.ndarray, before: np.ndarray,
+                      after: np.ndarray) -> np.ndarray:
+        """Compose pixel khác biệt (before→after) lên base. Dùng cho Shared
+        Graphics: lấy annotation upstream-tool đã vẽ rồi áp lên ảnh hiển thị."""
+        if (before is None or after is None
+                or before.shape != after.shape
+                or before.shape[:2] != base.shape[:2]):
+            return base
+        import cv2
+        b = before if before.ndim == 3 else cv2.cvtColor(before, cv2.COLOR_GRAY2BGR)
+        a = after  if after.ndim  == 3 else cv2.cvtColor(after,  cv2.COLOR_GRAY2BGR)
+        diff = cv2.absdiff(a, b)
+        gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        # Pixel coi như annotation nếu lệch ≥ 20 (loại noise nhỏ)
+        mask = (gray > 20)
+        if not mask.any():
+            return base
+        out = base.copy()
+        out[mask] = a[mask]
+        return out
+
+    def _node_input_image(self, node):
+        """Output 'image' của upstream gần nhất của node (input của node)."""
+        if not self._graph:
+            return None
+        for c in self._graph.connections:
+            if c.dst_id == node.node_id and c.dst_port == "image":
+                src = self._graph.nodes.get(c.src_id)
+                if src and "image" in src.outputs:
+                    return src.outputs["image"]
+        return None
 
     def _get_source_image(self, node):
         """Tìm ảnh gốc (raw) của pipeline — traverse ngược về node category
@@ -406,13 +466,43 @@ class ImageViewerPanel(QWidget):
         self._current_node_id = node_id
         node = self._graph.nodes[node_id]
 
-        if self._show_result:
+        # Base image:
+        #   - Composite ON  : annotated output của node (overlay tool này được vẽ)
+        #   - Composite OFF : ảnh gốc raw từ Acquire Image (không annotation)
+        if self._show_composite:
             img = node.outputs.get("image")
         else:
             img = self._get_source_image(node)
             if img is None:
-                # Node nguồn (Acquire Image): output chính là source → hiển thị output
                 img = node.outputs.get("image")
+
+        # Shared Graphics ON: cộng dồn annotation từ các upstream tool lên base.
+        # Cách làm: với mỗi upstream node, lấy diff giữa input và output rồi
+        # apply lên base. Hoạt động tốt với tool annotation kiểu PatMax / Caliper.
+        if (self._show_shared and img is not None
+                and isinstance(img, np.ndarray) and img.ndim >= 2):
+            base = img.copy()
+            if base.ndim == 2:
+                import cv2
+                base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+            # BFS upstream qua port 'image' (loại trừ chính node hiện tại)
+            visited = {node.node_id}
+            queue = [node]
+            steps = 0
+            while queue and steps < 32:
+                cur = queue.pop(0); steps += 1
+                for c in self._graph.connections:
+                    if c.dst_id == cur.node_id and c.dst_port == "image":
+                        src = self._graph.nodes.get(c.src_id)
+                        if src is None or src.node_id in visited:
+                            continue
+                        visited.add(src.node_id)
+                        queue.append(src)
+                        before = self._node_input_image(src)
+                        after  = src.outputs.get("image")
+                        if before is not None and after is not None:
+                            base = self._overlay_diff(base, before, after)
+            img = base
 
         if img is not None and isinstance(img, np.ndarray):
             h, w = img.shape[:2]
