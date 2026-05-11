@@ -261,6 +261,27 @@ class ImageViewerPanel(QWidget):
         for b in (btn_out, btn_in, btn_1to1, btn_fit):
             tl.addWidget(b)
 
+        # Show Result toggle — switch giữa "Result" (output đã annotate) và
+        # "Source" (ảnh gốc input của node, không overlay).
+        self._show_result = True
+        self._btn_show_result = QPushButton("👁 Result")
+        self._btn_show_result.setCheckable(True)
+        self._btn_show_result.setChecked(True)
+        self._btn_show_result.setFixedHeight(28)
+        self._btn_show_result.setToolTip(
+            "Toggle Result/Source — Result: output đã vẽ marker; "
+            "Source: ảnh gốc input của node.")
+        self._btn_show_result.setStyleSheet("""
+            QPushButton{background:#111827;border:1px solid #1e2d45;
+                        border-radius:4px;color:#94a3b8;font-size:11px;
+                        padding:0 10px;font-weight:600;}
+            QPushButton:hover{background:#1a2236;color:#00d4ff;}
+            QPushButton:checked{background:#0d2a1a;border-color:#39ff14;
+                                color:#39ff14;}
+        """)
+        self._btn_show_result.toggled.connect(self._on_show_result_toggled)
+        tl.addWidget(self._btn_show_result)
+
         lay.addWidget(tb)
 
         # ── Image view ─────────────────────────────────────────────
@@ -343,13 +364,36 @@ class ImageViewerPanel(QWidget):
             self._lbl_status.setText("IDLE")
             self._current_node_id = None
 
+    def _on_show_result_toggled(self, on: bool):
+        self._show_result = on
+        self._btn_show_result.setText("👁 Result" if on else "🖼 Source")
+        self.refresh_current()
+
+    def _get_source_image(self, node):
+        """Tìm ảnh input của node — lấy output 'image' của upstream gần nhất."""
+        if not self._graph:
+            return None
+        for c in self._graph.connections:
+            if c.dst_id == node.node_id and c.dst_port == "image":
+                src = self._graph.nodes.get(c.src_id)
+                if src and "image" in src.outputs:
+                    return src.outputs["image"]
+        return None
+
     def _display_node(self, node_id: str):
         if not self._graph or node_id not in self._graph.nodes:
             return
         self._current_node_id = node_id
         node = self._graph.nodes[node_id]
 
-        img = node.outputs.get("image")
+        if self._show_result:
+            img = node.outputs.get("image")
+        else:
+            img = self._get_source_image(node)
+            if img is None:
+                # Node nguồn (Acquire Image): output chính là source → hiển thị output
+                img = node.outputs.get("image")
+
         if img is not None and isinstance(img, np.ndarray):
             h, w = img.shape[:2]
             ch = img.shape[2] if len(img.shape) == 3 else 1

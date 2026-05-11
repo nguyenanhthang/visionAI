@@ -1016,9 +1016,10 @@ def proc_gaussian_blur(inputs, params):
 def proc_crop(inputs, params):
     """
     Crop ROI logic:
-    - Nếu port x/y/w/h CÓ giá trị (được kết nối từ upstream) → dùng giá trị đó
-    - Nếu port KHÔNG có giá trị → dùng vùng vẽ thủ công (_drawn_roi trong params)
-      hoặc fallback về x/y/crop_w/crop_h trong params
+    - Mỗi port x/y/w/h: nếu CÓ giá trị từ upstream → ưu tiên dùng;
+      port nào KHÔNG kết nối thì fall back về params / _drawn_roi.
+    - Cho phép half-connect: ví dụ PatMax chỉ cung cấp x/y (không w/h) →
+      x/y track theo PatMax, w/h lấy từ Width/Height params.
     """
     img = inputs.get("image")
     if img is None:
@@ -1026,38 +1027,41 @@ def proc_crop(inputs, params):
 
     ih, iw = img.shape[:2]
 
-    # Kiểm tra xem port x/y/w/h có được kết nối (giá trị không phải None)
-    port_x = inputs.get("x")   # None nếu không kết nối
+    port_x = inputs.get("x")
     port_y = inputs.get("y")
     port_w = inputs.get("w")
     port_h = inputs.get("h")
 
-    ports_connected = (port_x is not None and port_y is not None
-                       and port_w is not None and port_h is not None)
-
-    if ports_connected:
-        # MODE 1: Dùng giá trị từ port (tracking từ PatMax hoặc tool khác)
-        x  = int(float(port_x))
-        y  = int(float(port_y))
-        cw = int(float(port_w))
-        ch = int(float(port_h))
-        mode_label = "TRACKED"
-        border_color = (0, 255, 180)   # xanh lá = tracking
+    # Default từ _drawn_roi (vẽ tay) hoặc params spinbox
+    drawn = params.get("_drawn_roi")
+    if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
+        dx, dy, dw, dh = [int(v) for v in drawn]
+        manual_src = "MANUAL ROI"
     else:
-        # MODE 2: Dùng vùng vẽ thủ công (_drawn_roi) hoặc params thủ công
-        drawn = params.get("_drawn_roi")  # (x,y,w,h) được lưu từ InteractiveImageLabel
-        if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
-            x, y, cw, ch = [int(v) for v in drawn]
-            mode_label = "MANUAL ROI"
-            border_color = (0, 212, 255)   # cyan = vẽ tay
-        else:
-            # Fallback: dùng params spinbox
-            x  = int(params.get("x", 0))
-            y  = int(params.get("y", 0))
-            cw = int(params.get("crop_w", 320))
-            ch = int(params.get("crop_h", 240))
-            mode_label = "PARAMS"
-            border_color = (150, 150, 255)  # tím nhạt = params
+        dx = int(params.get("x", 0))
+        dy = int(params.get("y", 0))
+        dw = int(params.get("crop_w", 320))
+        dh = int(params.get("crop_h", 240))
+        manual_src = "PARAMS"
+
+    # Per-port override
+    x  = int(float(port_x)) if port_x is not None else dx
+    y  = int(float(port_y)) if port_y is not None else dy
+    cw = int(float(port_w)) if port_w is not None else dw
+    ch = int(float(port_h)) if port_h is not None else dh
+
+    tracked_ports = [n for n, v in [("x", port_x), ("y", port_y),
+                                     ("w", port_w), ("h", port_h)]
+                     if v is not None]
+    if not tracked_ports:
+        mode_label = manual_src
+        border_color = (0, 212, 255) if manual_src == "MANUAL ROI" else (150, 150, 255)
+    elif len(tracked_ports) == 4:
+        mode_label = "TRACKED"
+        border_color = (0, 255, 180)
+    else:
+        mode_label = "TRACKED " + "".join(tracked_ports)
+        border_color = (0, 255, 180)
 
     # Clamp
     x  = max(0, min(x,  iw - 1))

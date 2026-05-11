@@ -39,7 +39,8 @@ class InteractiveImageLabel(QLabel):
     roi_changed    = Signal(int, int, int, int)
     pixel_picked   = Signal(int, int)
     template_drawn = Signal(int, int, int, int)
-    origin_changed = Signal(float, float)   # image coords (float)
+    origin_changed       = Signal(float, float)   # image coords (float)
+    origin_angle_changed = Signal(float)          # degrees
     shape_drawn    = Signal(str, dict)      # shape_type, data (image coords)
     shapes_changed = Signal(list)           # multi-mode: list of {"type", **data}
 
@@ -63,6 +64,9 @@ class InteractiveImageLabel(QLabel):
         self._origin_xy: Optional[Tuple[float, float]] = None
         self._show_origin: bool = False
         self._dragging_origin: bool = False
+        # Hệ trục XY tại origin — xoay được quanh tâm
+        self._origin_angle: float = 0.0   # độ, 0 = X→phải, Y↓
+        self._dragging_origin_rot: bool = False
         # Shape ROI ("rect" | "circle" | "ellipse" | "polygon")
         self._shape: str = "rect"
         self._shape_data: dict = {}                                # toạ độ ảnh
@@ -333,18 +337,66 @@ class InteractiveImageLabel(QLabel):
             self._show_origin = True
         self._render()
 
+    def set_origin_angle(self, angle: float):
+        """Đặt góc xoay trục XY tại origin (độ)."""
+        self._origin_angle = float(angle) % 360.0
+        self._render()
+
+    # ── Origin helpers (toạ độ widget của tâm + 2 đầu trục) ──────
+    AXIS_LEN  = 32
+    ROT_HANDLE_OFFSET = 8        # bán kính vòng tròn xoay sau X-arrow tip
+    CENTER_HIT_RADIUS = 8
+
     def _origin_widget_pos(self) -> Optional[Tuple[int, int]]:
         if not self._show_origin or self._origin_xy is None:
             return None
         ox, oy = self._origin_xy
         return self._img_to_widget(ox, oy)
 
-    def _hit_origin_handle(self, wx: int, wy: int, radius: int = 12) -> bool:
-        pos = self._origin_widget_pos()
-        if pos is None:
+    def _origin_axis_endpoints(self) -> Optional[Tuple[Tuple[int,int],
+                                                        Tuple[int,int],
+                                                        Tuple[int,int]]]:
+        """Trả (center, x_end, y_end) widget coords; None nếu không hiển thị."""
+        c = self._origin_widget_pos()
+        if c is None:
+            return None
+        import math as _m
+        a = _m.radians(self._origin_angle)
+        cx, cy = c
+        L = self.AXIS_LEN
+        # X-axis: pointing along angle (image-space: y-axis downwards)
+        x_end = (int(cx + _m.cos(a) * L), int(cy + _m.sin(a) * L))
+        # Y-axis: 90° clockwise (theo chuẩn image: Y xuống)
+        y_end = (int(cx - _m.sin(a) * L), int(cy + _m.cos(a) * L))
+        return (cx, cy), x_end, y_end
+
+    def _rot_handle_pos(self) -> Optional[Tuple[int, int]]:
+        eps = self._origin_axis_endpoints()
+        if eps is None:
+            return None
+        import math as _m
+        a = _m.radians(self._origin_angle)
+        cx, cy = eps[0]
+        d = self.AXIS_LEN + self.ROT_HANDLE_OFFSET
+        return (int(cx + _m.cos(a) * d), int(cy + _m.sin(a) * d))
+
+    def _hit_origin_center(self, wx: int, wy: int) -> bool:
+        c = self._origin_widget_pos()
+        if c is None:
             return False
-        dx = wx - pos[0]; dy = wy - pos[1]
-        return (dx * dx + dy * dy) <= radius * radius
+        dx = wx - c[0]; dy = wy - c[1]
+        return (dx * dx + dy * dy) <= self.CENTER_HIT_RADIUS ** 2
+
+    def _hit_origin_rot(self, wx: int, wy: int, radius: int = 10) -> bool:
+        r = self._rot_handle_pos()
+        if r is None:
+            return False
+        dx = wx - r[0]; dy = wy - r[1]
+        return (dx * dx + dy * dy) <= radius ** 2
+
+    def _hit_origin_handle(self, wx: int, wy: int, radius: int = 12) -> bool:
+        # Backwards-compat: gộp center + rotate handle.
+        return self._hit_origin_center(wx, wy) or self._hit_origin_rot(wx, wy)
 
     def _img_to_widget(self, ix, iy):
         return int(ix * self._scale + self._off_x), int(iy * self._scale + self._off_y)
@@ -645,22 +697,67 @@ class InteractiveImageLabel(QLabel):
                 p.drawText(pts_w[0][0] + 8, pts_w[0][1] - 6,
                            f"Polygon: {len(pts_w)} pt — double-click để đóng")
 
-        # Origin marker (điểm tham chiếu PatMax) — màu vàng
+        # Origin marker — hệ trục XY xoay được quanh tâm
         if self._show_origin and self._origin_xy is not None:
-            ox_w, oy_w = self._img_to_widget(*self._origin_xy)
-            col_o = QColor(255, 215, 0)
-            p.setPen(QPen(col_o, 2))
-            p.setBrush(QBrush(QColor(255, 215, 0, 40)))
-            p.drawEllipse(ox_w - 9, oy_w - 9, 18, 18)
-            p.setPen(QPen(col_o, 2))
-            p.drawLine(ox_w - 12, oy_w, ox_w + 12, oy_w)
-            p.drawLine(ox_w, oy_w - 12, ox_w, oy_w + 12)
-            p.setPen(QPen(QColor(0, 0, 0), 1))
-            p.setBrush(QBrush(col_o))
-            p.drawEllipse(ox_w - 3, oy_w - 3, 6, 6)
-            p.setPen(QPen(col_o)); p.setFont(QFont("Courier New", 9, QFont.Bold))
-            p.drawText(ox_w + 14, oy_w - 8,
-                       f"O ({self._origin_xy[0]:.1f},{self._origin_xy[1]:.1f})")
+            eps = self._origin_axis_endpoints()
+            if eps is not None:
+                (cx, cy), x_end, y_end = eps
+                rot = self._rot_handle_pos()
+                # Background plate đậm phía sau tâm — gợi style trong ảnh #2
+                plate_col = QColor(15, 23, 42, 220)
+                p.setPen(QPen(QColor(0, 212, 255, 180), 1))
+                p.setBrush(QBrush(plate_col))
+                p.drawRoundedRect(cx - 16, cy - 16, 32, 32, 4, 4)
+                # X axis — đỏ
+                col_x = QColor(255, 70, 70)
+                p.setPen(QPen(col_x, 2, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(cx, cy, x_end[0], x_end[1])
+                # Mũi tên X
+                import math as _m
+                a = _m.radians(self._origin_angle)
+                ah = 6.0
+                ax1 = (int(x_end[0] - ah * _m.cos(a - _m.radians(25))),
+                        int(x_end[1] - ah * _m.sin(a - _m.radians(25))))
+                ax2 = (int(x_end[0] - ah * _m.cos(a + _m.radians(25))),
+                        int(x_end[1] - ah * _m.sin(a + _m.radians(25))))
+                p.drawLine(x_end[0], x_end[1], ax1[0], ax1[1])
+                p.drawLine(x_end[0], x_end[1], ax2[0], ax2[1])
+                p.setPen(QPen(col_x))
+                p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+                p.drawText(x_end[0] + 4, x_end[1] + 4, "X")
+                # Y axis — xanh lá
+                col_y = QColor(80, 220, 100)
+                p.setPen(QPen(col_y, 2, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(cx, cy, y_end[0], y_end[1])
+                b = a + _m.radians(90)  # góc Y
+                ay1 = (int(y_end[0] - ah * _m.cos(b - _m.radians(25))),
+                        int(y_end[1] - ah * _m.sin(b - _m.radians(25))))
+                ay2 = (int(y_end[0] - ah * _m.cos(b + _m.radians(25))),
+                        int(y_end[1] - ah * _m.sin(b + _m.radians(25))))
+                p.drawLine(y_end[0], y_end[1], ay1[0], ay1[1])
+                p.drawLine(y_end[0], y_end[1], ay2[0], ay2[1])
+                p.setPen(QPen(col_y))
+                p.drawText(y_end[0] + 4, y_end[1] + 4, "Y")
+                # Tâm
+                p.setPen(QPen(QColor(0, 212, 255), 1))
+                p.setBrush(QBrush(QColor(0, 212, 255)))
+                p.drawEllipse(cx - 3, cy - 3, 6, 6)
+                # Rotate handle
+                if rot is not None:
+                    rh_col = QColor(255, 215, 0)
+                    p.setPen(QPen(rh_col, 2))
+                    p.setBrush(QBrush(QColor(255, 215, 0, 80)))
+                    p.drawEllipse(rot[0] - 5, rot[1] - 5, 10, 10)
+                    # Vòng cung gợi ý xoay
+                    p.setPen(QPen(rh_col, 1, Qt.DotLine))
+                    p.setBrush(Qt.NoBrush)
+                    p.drawArc(rot[0] - 8, rot[1] - 8, 16, 16, 0, 270 * 16)
+                # Label toạ độ + góc
+                p.setPen(QPen(QColor(0, 212, 255)))
+                p.setFont(QFont("Courier New", 9, QFont.Bold))
+                p.drawText(cx + 18, cy - 12,
+                           f"O ({self._origin_xy[0]:.1f},{self._origin_xy[1]:.1f})  "
+                           f"{self._origin_angle:+.1f}deg")
 
         # Pixel pick marker
         if self._pick_pos and self.mode == "pick":
@@ -687,8 +784,12 @@ class InteractiveImageLabel(QLabel):
                 self._render()
                 self.pixel_picked.emit(ix, iy)
         elif self.mode in ("roi", "template"):
-            # Ưu tiên kéo origin marker nếu click trúng handle
-            if self._show_origin and self._hit_origin_handle(pos.x(), pos.y()):
+            # Ưu tiên: rotate handle → center handle → kéo bình thường
+            if self._show_origin and self._hit_origin_rot(pos.x(), pos.y()):
+                self._dragging_origin_rot = True
+                self._update_origin_angle_from_widget(pos.x(), pos.y())
+                return
+            if self._show_origin and self._hit_origin_center(pos.x(), pos.y()):
                 self._dragging_origin = True
                 self._update_origin_from_widget(pos.x(), pos.y())
                 return
@@ -774,6 +875,9 @@ class InteractiveImageLabel(QLabel):
 
     def mouseMoveEvent(self, event: QMouseEvent):
         pos = event.position().toPoint()
+        if self._dragging_origin_rot:
+            self._update_origin_angle_from_widget(pos.x(), pos.y())
+            return
         if self._dragging_origin:
             self._update_origin_from_widget(pos.x(), pos.y())
             return
@@ -792,6 +896,9 @@ class InteractiveImageLabel(QLabel):
         self._render()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._dragging_origin_rot:
+            self._dragging_origin_rot = False
+            return
         if self._dragging_origin:
             self._dragging_origin = False
             return
@@ -871,6 +978,20 @@ class InteractiveImageLabel(QLabel):
         self._show_origin = True
         self._render()
         self.origin_changed.emit(ix_f, iy_f)
+
+    def _update_origin_angle_from_widget(self, wx: int, wy: int):
+        """Tính góc xoay axes theo vị trí con trỏ so với tâm origin."""
+        c = self._origin_widget_pos()
+        if c is None:
+            return
+        import math as _m
+        dx = wx - c[0]; dy = wy - c[1]
+        if dx == 0 and dy == 0:
+            return
+        angle = _m.degrees(_m.atan2(dy, dx))
+        self._origin_angle = angle % 360.0
+        self._render()
+        self.origin_angle_changed.emit(self._origin_angle)
 
     def keyPressEvent(self, event):
         if self._multi and event.key() in (Qt.Key_Delete, Qt.Key_Backspace) \
