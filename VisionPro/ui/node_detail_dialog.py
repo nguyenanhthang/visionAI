@@ -39,7 +39,8 @@ class InteractiveImageLabel(QLabel):
     roi_changed    = Signal(int, int, int, int)
     pixel_picked   = Signal(int, int)
     template_drawn = Signal(int, int, int, int)
-    origin_changed = Signal(float, float)   # image coords (float)
+    origin_changed       = Signal(float, float)   # image coords (float)
+    origin_angle_changed = Signal(float)          # degrees
     shape_drawn    = Signal(str, dict)      # shape_type, data (image coords)
     shapes_changed = Signal(list)           # multi-mode: list of {"type", **data}
 
@@ -63,6 +64,9 @@ class InteractiveImageLabel(QLabel):
         self._origin_xy: Optional[Tuple[float, float]] = None
         self._show_origin: bool = False
         self._dragging_origin: bool = False
+        # Hệ trục XY tại origin — xoay được quanh tâm
+        self._origin_angle: float = 0.0   # độ, 0 = X→phải, Y↓
+        self._dragging_origin_rot: bool = False
         # Shape ROI ("rect" | "circle" | "ellipse" | "polygon")
         self._shape: str = "rect"
         self._shape_data: dict = {}                                # toạ độ ảnh
@@ -82,6 +86,9 @@ class InteractiveImageLabel(QLabel):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Optional QScrollArea parent — biết viewport size khi zoom > 1.
+        self._scroll_area = None
+        self._base_min_size = (400, 300)
         self.setStyleSheet(
             "background:#050810; border:1px solid #1e2d45; border-radius:6px;")
 
@@ -91,6 +98,11 @@ class InteractiveImageLabel(QLabel):
             "readonly": Qt.ArrowCursor,
         }
         self.setCursor(QCursor(cur_map.get(mode, Qt.ArrowCursor)))
+
+    def set_scroll_area(self, area):
+        """Liên kết label với QScrollArea cha → zoom > 1 hiện scrollbars."""
+        self._scroll_area = area
+        self._base_min_size = (400, 300)
 
     # ── Image ──────────────────────────────────────────────────────
     def set_image(self, arr: Optional[np.ndarray]):
@@ -333,18 +345,66 @@ class InteractiveImageLabel(QLabel):
             self._show_origin = True
         self._render()
 
+    def set_origin_angle(self, angle: float):
+        """Đặt góc xoay trục XY tại origin (độ)."""
+        self._origin_angle = float(angle) % 360.0
+        self._render()
+
+    # ── Origin helpers (toạ độ widget của tâm + 2 đầu trục) ──────
+    AXIS_LEN  = 32
+    ROT_HANDLE_OFFSET = 8        # bán kính vòng tròn xoay sau X-arrow tip
+    CENTER_HIT_RADIUS = 8
+
     def _origin_widget_pos(self) -> Optional[Tuple[int, int]]:
         if not self._show_origin or self._origin_xy is None:
             return None
         ox, oy = self._origin_xy
         return self._img_to_widget(ox, oy)
 
-    def _hit_origin_handle(self, wx: int, wy: int, radius: int = 12) -> bool:
-        pos = self._origin_widget_pos()
-        if pos is None:
+    def _origin_axis_endpoints(self) -> Optional[Tuple[Tuple[int,int],
+                                                        Tuple[int,int],
+                                                        Tuple[int,int]]]:
+        """Trả (center, x_end, y_end) widget coords; None nếu không hiển thị."""
+        c = self._origin_widget_pos()
+        if c is None:
+            return None
+        import math as _m
+        a = _m.radians(self._origin_angle)
+        cx, cy = c
+        L = self.AXIS_LEN
+        # X-axis: pointing along angle (image-space: y-axis downwards)
+        x_end = (int(cx + _m.cos(a) * L), int(cy + _m.sin(a) * L))
+        # Y-axis: 90° clockwise (theo chuẩn image: Y xuống)
+        y_end = (int(cx - _m.sin(a) * L), int(cy + _m.cos(a) * L))
+        return (cx, cy), x_end, y_end
+
+    def _rot_handle_pos(self) -> Optional[Tuple[int, int]]:
+        eps = self._origin_axis_endpoints()
+        if eps is None:
+            return None
+        import math as _m
+        a = _m.radians(self._origin_angle)
+        cx, cy = eps[0]
+        d = self.AXIS_LEN + self.ROT_HANDLE_OFFSET
+        return (int(cx + _m.cos(a) * d), int(cy + _m.sin(a) * d))
+
+    def _hit_origin_center(self, wx: int, wy: int) -> bool:
+        c = self._origin_widget_pos()
+        if c is None:
             return False
-        dx = wx - pos[0]; dy = wy - pos[1]
-        return (dx * dx + dy * dy) <= radius * radius
+        dx = wx - c[0]; dy = wy - c[1]
+        return (dx * dx + dy * dy) <= self.CENTER_HIT_RADIUS ** 2
+
+    def _hit_origin_rot(self, wx: int, wy: int, radius: int = 10) -> bool:
+        r = self._rot_handle_pos()
+        if r is None:
+            return False
+        dx = wx - r[0]; dy = wy - r[1]
+        return (dx * dx + dy * dy) <= radius ** 2
+
+    def _hit_origin_handle(self, wx: int, wy: int, radius: int = 12) -> bool:
+        # Backwards-compat: gộp center + rotate handle.
+        return self._hit_origin_center(wx, wy) or self._hit_origin_rot(wx, wy)
 
     def _img_to_widget(self, ix, iy):
         return int(ix * self._scale + self._off_x), int(iy * self._scale + self._off_y)
@@ -365,7 +425,6 @@ class InteractiveImageLabel(QLabel):
         new_zoom = max(0.2, min(20.0, self._user_zoom * factor))
         if abs(new_zoom - self._user_zoom) < 1e-4:
             return
-        # Pixel ảnh dưới con trỏ trước khi zoom
         try:
             mp = event.position()
             mx = float(mp.x()); my = float(mp.y())
@@ -374,20 +433,37 @@ class InteractiveImageLabel(QLabel):
         scale_old = self._scale
         if scale_old <= 0:
             return
+        # Pixel ảnh dưới con trỏ trước khi zoom (toạ độ ảnh)
         ix = (mx - self._off_x) / scale_old
         iy = (my - self._off_y) / scale_old
-        # Tính pan mới sao cho (ix, iy) vẫn nằm dưới (mx, my)
-        h, w = self._arr.shape[:2]
-        new_scale = self._fit_scale * new_zoom
-        new_dw = int(w * new_scale); new_dh = int(h * new_scale)
-        base_off_x = (self.width()  - new_dw) // 2
-        base_off_y = (self.height() - new_dh) // 2
-        target_off_x = mx - ix * new_scale
-        target_off_y = my - iy * new_scale
         self._user_zoom = new_zoom
-        self._pan_dx = int(round(target_off_x - base_off_x))
-        self._pan_dy = int(round(target_off_y - base_off_y))
-        self._render()
+
+        if self._scroll_area is not None:
+            # Render lại để label resize theo zoom mới
+            self._render()
+            # Sau render: tính vị trí pixel cũ trên label mới, scroll để đặt
+            # nó dưới con trỏ (mx, my là toạ độ trên label cũ — vẫn ổn vì
+            # con trỏ đang ở vị trí widget-space của label).
+            new_scale = self._scale
+            new_px = ix * new_scale + self._off_x
+            new_py = iy * new_scale + self._off_y
+            # Lệch so với mouse → cuộn theo
+            hbar = self._scroll_area.horizontalScrollBar()
+            vbar = self._scroll_area.verticalScrollBar()
+            hbar.setValue(hbar.value() + int(new_px - mx))
+            vbar.setValue(vbar.value() + int(new_py - my))
+        else:
+            # Pan-offset mode (không scroll area) — giữ pixel dưới chuột
+            h, w = self._arr.shape[:2]
+            new_scale = self._fit_scale * new_zoom
+            new_dw = int(w * new_scale); new_dh = int(h * new_scale)
+            base_off_x = (self.width()  - new_dw) // 2
+            base_off_y = (self.height() - new_dh) // 2
+            target_off_x = mx - ix * new_scale
+            target_off_y = my - iy * new_scale
+            self._pan_dx = int(round(target_off_x - base_off_x))
+            self._pan_dy = int(round(target_off_y - base_off_y))
+            self._render()
         event.accept()
 
     def reset_zoom(self):
@@ -513,14 +589,39 @@ class InteractiveImageLabel(QLabel):
         qimg = QImage(arr.data.tobytes(), w, h, ch * w, QImage.Format_RGB888)
         pix  = QPixmap.fromImage(qimg)
 
-        pw = max(1, self.width() - 4)
-        ph = max(1, self.height() - 4)
+        # Khi có scroll area: dùng viewport size làm tham chiếu fit, không phải
+        # self.width()/height() (chính label có thể đã grow theo zoom).
+        if self._scroll_area is not None:
+            vp = self._scroll_area.viewport()
+            pw = max(1, vp.width() - 4)
+            ph = max(1, vp.height() - 4)
+        else:
+            pw = max(1, self.width() - 4)
+            ph = max(1, self.height() - 4)
         sx = pw / w; sy = ph / h
         self._fit_scale = min(sx, sy)
         self._scale = self._fit_scale * self._user_zoom
         dw = int(w * self._scale); dh = int(h * self._scale)
-        self._off_x = (self.width() - dw) // 2 + self._pan_dx
-        self._off_y = (self.height() - dh) // 2 + self._pan_dy
+
+        if self._scroll_area is not None and self._user_zoom > 1.0:
+            # Zoom > 1 → label rộng hơn viewport → QScrollArea hiện scrollbars.
+            need_w = max(self._base_min_size[0], dw + 8)
+            need_h = max(self._base_min_size[1], dh + 8)
+            if self.width() != need_w or self.height() != need_h:
+                self.setMinimumSize(need_w, need_h)
+                self.resize(need_w, need_h)
+            self._off_x = (self.width() - dw) // 2
+            self._off_y = (self.height() - dh) // 2
+        else:
+            # Fit-to-viewport: kéo label về kích thước viewport, center image.
+            if self._scroll_area is not None:
+                vp = self._scroll_area.viewport()
+                if self.width() != vp.width() or self.height() != vp.height():
+                    self.setMinimumSize(self._base_min_size[0],
+                                        self._base_min_size[1])
+                    self.resize(vp.width(), vp.height())
+            self._off_x = (self.width() - dw) // 2 + self._pan_dx
+            self._off_y = (self.height() - dh) // 2 + self._pan_dy
 
         canvas = QPixmap(self.width(), self.height())
         canvas.fill(QColor(5, 8, 16))
@@ -645,22 +746,62 @@ class InteractiveImageLabel(QLabel):
                 p.drawText(pts_w[0][0] + 8, pts_w[0][1] - 6,
                            f"Polygon: {len(pts_w)} pt — double-click để đóng")
 
-        # Origin marker (điểm tham chiếu PatMax) — màu vàng
+        # Origin marker — hệ trục XY xoay được quanh tâm
         if self._show_origin and self._origin_xy is not None:
-            ox_w, oy_w = self._img_to_widget(*self._origin_xy)
-            col_o = QColor(255, 215, 0)
-            p.setPen(QPen(col_o, 2))
-            p.setBrush(QBrush(QColor(255, 215, 0, 40)))
-            p.drawEllipse(ox_w - 9, oy_w - 9, 18, 18)
-            p.setPen(QPen(col_o, 2))
-            p.drawLine(ox_w - 12, oy_w, ox_w + 12, oy_w)
-            p.drawLine(ox_w, oy_w - 12, ox_w, oy_w + 12)
-            p.setPen(QPen(QColor(0, 0, 0), 1))
-            p.setBrush(QBrush(col_o))
-            p.drawEllipse(ox_w - 3, oy_w - 3, 6, 6)
-            p.setPen(QPen(col_o)); p.setFont(QFont("Courier New", 9, QFont.Bold))
-            p.drawText(ox_w + 14, oy_w - 8,
-                       f"O ({self._origin_xy[0]:.1f},{self._origin_xy[1]:.1f})")
+            eps = self._origin_axis_endpoints()
+            if eps is not None:
+                (cx, cy), x_end, y_end = eps
+                rot = self._rot_handle_pos()
+                # X axis — đỏ
+                col_x = QColor(255, 70, 70)
+                p.setPen(QPen(col_x, 2, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(cx, cy, x_end[0], x_end[1])
+                # Mũi tên X
+                import math as _m
+                a = _m.radians(self._origin_angle)
+                ah = 6.0
+                ax1 = (int(x_end[0] - ah * _m.cos(a - _m.radians(25))),
+                        int(x_end[1] - ah * _m.sin(a - _m.radians(25))))
+                ax2 = (int(x_end[0] - ah * _m.cos(a + _m.radians(25))),
+                        int(x_end[1] - ah * _m.sin(a + _m.radians(25))))
+                p.drawLine(x_end[0], x_end[1], ax1[0], ax1[1])
+                p.drawLine(x_end[0], x_end[1], ax2[0], ax2[1])
+                p.setPen(QPen(col_x))
+                p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+                p.drawText(x_end[0] + 4, x_end[1] + 4, "X")
+                # Y axis — xanh lá
+                col_y = QColor(80, 220, 100)
+                p.setPen(QPen(col_y, 2, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(cx, cy, y_end[0], y_end[1])
+                b = a + _m.radians(90)  # góc Y
+                ay1 = (int(y_end[0] - ah * _m.cos(b - _m.radians(25))),
+                        int(y_end[1] - ah * _m.sin(b - _m.radians(25))))
+                ay2 = (int(y_end[0] - ah * _m.cos(b + _m.radians(25))),
+                        int(y_end[1] - ah * _m.sin(b + _m.radians(25))))
+                p.drawLine(y_end[0], y_end[1], ay1[0], ay1[1])
+                p.drawLine(y_end[0], y_end[1], ay2[0], ay2[1])
+                p.setPen(QPen(col_y))
+                p.drawText(y_end[0] + 4, y_end[1] + 4, "Y")
+                # Tâm
+                p.setPen(QPen(QColor(0, 212, 255), 1))
+                p.setBrush(QBrush(QColor(0, 212, 255)))
+                p.drawEllipse(cx - 3, cy - 3, 6, 6)
+                # Rotate handle
+                if rot is not None:
+                    rh_col = QColor(255, 215, 0)
+                    p.setPen(QPen(rh_col, 2))
+                    p.setBrush(QBrush(QColor(255, 215, 0, 80)))
+                    p.drawEllipse(rot[0] - 5, rot[1] - 5, 10, 10)
+                    # Vòng cung gợi ý xoay
+                    p.setPen(QPen(rh_col, 1, Qt.DotLine))
+                    p.setBrush(Qt.NoBrush)
+                    p.drawArc(rot[0] - 8, rot[1] - 8, 16, 16, 0, 270 * 16)
+                # Label toạ độ + góc
+                p.setPen(QPen(QColor(0, 212, 255)))
+                p.setFont(QFont("Courier New", 9, QFont.Bold))
+                p.drawText(cx + 18, cy - 12,
+                           f"O ({self._origin_xy[0]:.1f},{self._origin_xy[1]:.1f})  "
+                           f"{self._origin_angle:+.1f}deg")
 
         # Pixel pick marker
         if self._pick_pos and self.mode == "pick":
@@ -687,8 +828,12 @@ class InteractiveImageLabel(QLabel):
                 self._render()
                 self.pixel_picked.emit(ix, iy)
         elif self.mode in ("roi", "template"):
-            # Ưu tiên kéo origin marker nếu click trúng handle
-            if self._show_origin and self._hit_origin_handle(pos.x(), pos.y()):
+            # Ưu tiên: rotate handle → center handle → kéo bình thường
+            if self._show_origin and self._hit_origin_rot(pos.x(), pos.y()):
+                self._dragging_origin_rot = True
+                self._update_origin_angle_from_widget(pos.x(), pos.y())
+                return
+            if self._show_origin and self._hit_origin_center(pos.x(), pos.y()):
                 self._dragging_origin = True
                 self._update_origin_from_widget(pos.x(), pos.y())
                 return
@@ -774,6 +919,9 @@ class InteractiveImageLabel(QLabel):
 
     def mouseMoveEvent(self, event: QMouseEvent):
         pos = event.position().toPoint()
+        if self._dragging_origin_rot:
+            self._update_origin_angle_from_widget(pos.x(), pos.y())
+            return
         if self._dragging_origin:
             self._update_origin_from_widget(pos.x(), pos.y())
             return
@@ -792,6 +940,9 @@ class InteractiveImageLabel(QLabel):
         self._render()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._dragging_origin_rot:
+            self._dragging_origin_rot = False
+            return
         if self._dragging_origin:
             self._dragging_origin = False
             return
@@ -871,6 +1022,20 @@ class InteractiveImageLabel(QLabel):
         self._show_origin = True
         self._render()
         self.origin_changed.emit(ix_f, iy_f)
+
+    def _update_origin_angle_from_widget(self, wx: int, wy: int):
+        """Tính góc xoay axes theo vị trí con trỏ so với tâm origin."""
+        c = self._origin_widget_pos()
+        if c is None:
+            return
+        import math as _m
+        dx = wx - c[0]; dy = wy - c[1]
+        if dx == 0 and dy == 0:
+            return
+        angle = _m.degrees(_m.atan2(dy, dx))
+        self._origin_angle = angle % 360.0
+        self._render()
+        self.origin_angle_changed.emit(self._origin_angle)
 
     def keyPressEvent(self, event):
         if self._multi and event.key() in (Qt.Key_Delete, Qt.Key_Backspace) \
@@ -999,6 +1164,18 @@ class NodeDetailDialog(QDialog):
         img_lbl.setStyleSheet(
             "color:#00d4ff; font-size:10px; font-weight:700; letter-spacing:2px;")
         img_hdr.addWidget(img_lbl); img_hdr.addStretch()
+
+        # Reset Image button — chỉ hiện cho Crop ROI: xoá drawn_roi + đưa
+        # x/y/w/h về full ảnh nguồn để vẽ lại từ đầu.
+        if tool.tool_id == "crop_roi":
+            btn_reset = QPushButton("🔄  Reset Image")
+            btn_reset.setFixedHeight(26)
+            btn_reset.setStyleSheet(
+                "QPushButton{background:#1e2d45;border:1px solid #3a4b6a;"
+                "color:#94a3b8;font-size:11px;padding:0 12px;border-radius:4px;}"
+                "QPushButton:hover{background:#2c3e60;color:#00d4ff;}")
+            btn_reset.clicked.connect(self._on_reset_crop_image)
+            img_hdr.addWidget(btn_reset)
 
         # ── Chọn mode interactive theo tool ──────────────────────
         self._roi_port_connected = False
@@ -1210,11 +1387,15 @@ class NodeDetailDialog(QDialog):
     def _on_roi_changed(self, x, y, w, h):
         """
         Kéo chuột vẽ ROI thủ công → lưu vào _drawn_roi.
-        Không ghi đè x/y/crop_w/crop_h (đó là params spinbox).
-        proc_crop sẽ đọc _drawn_roi khi không có port kết nối.
+        Sync luôn x/y/crop_w/crop_h vào params + spinbox để hiển thị
+        đúng vùng đang được cắt.
         """
         node = self._node
         node.params["_drawn_roi"] = (x, y, w, h)
+        node.params["x"]      = int(x)
+        node.params["y"]      = int(y)
+        node.params["crop_w"] = int(w)
+        node.params["crop_h"] = int(h)
 
         # Cập nhật spinbox params để hiển thị (nhưng _drawn_roi là nguồn truth)
         for name, val in [("x", x), ("y", y), ("crop_w", w), ("crop_h", h)]:
@@ -1223,6 +1404,43 @@ class NodeDetailDialog(QDialog):
                 ed = pr._editor
                 if hasattr(ed, "setValue"):
                     ed.blockSignals(True); ed.setValue(val); ed.blockSignals(False)
+
+    def _on_reset_crop_image(self):
+        """Reset Crop ROI về full ảnh nguồn — xoá _drawn_roi + set
+        x=y=0, w/h = kích thước input image."""
+        node = self._node
+        # Tìm input image: ưu tiên upstream output, fallback node.outputs
+        src_img = None
+        if self._graph:
+            for c in self._graph.connections:
+                if c.dst_id == node.node_id and c.dst_port == "image":
+                    s = self._graph.nodes.get(c.src_id)
+                    if s and "image" in s.outputs:
+                        src_img = s.outputs["image"]; break
+        if src_img is None:
+            src_img = node.outputs.get("image")
+        if src_img is None:
+            QMessageBox.information(self, "Reset Image",
+                "Chưa có ảnh nguồn — chạy pipeline trước rồi reset.")
+            return
+        h, w = src_img.shape[:2]
+        node.params.pop("_drawn_roi", None)
+        node.params["x"]      = 0
+        node.params["y"]      = 0
+        node.params["crop_w"] = int(w)
+        node.params["crop_h"] = int(h)
+        node.params["_crop_initialized"] = True
+        # Sync spinbox
+        for name, val in [("x", 0), ("y", 0), ("crop_w", w), ("crop_h", h)]:
+            pr = getattr(self, "_param_rows", {}).get(name)
+            if pr:
+                ed = pr._editor
+                if hasattr(ed, "setValue"):
+                    ed.blockSignals(True); ed.setValue(val); ed.blockSignals(False)
+        # Clear vẽ trên ảnh
+        if hasattr(self, "_img_label"):
+            self._img_label.set_rect_from_params(0, 0, w, h)
+        self._img_info.setText(f"🔄 Reset → full image ({w}x{h})")
 
         # Cập nhật info label
         self._img_info.setText(

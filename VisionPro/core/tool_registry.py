@@ -274,7 +274,7 @@ def proc_patmax_align(inputs, params):
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
 
-    algorithm        = str(params.get("algorithm", "PatMax & PatQuick"))
+    algorithm        = str(params.get("algorithm", "PatQuick"))
     train_mode_align = str(params.get("train_mode", "Image"))
 
     ang_low  = model.angle_low
@@ -1016,9 +1016,10 @@ def proc_gaussian_blur(inputs, params):
 def proc_crop(inputs, params):
     """
     Crop ROI logic:
-    - Nếu port x/y/w/h CÓ giá trị (được kết nối từ upstream) → dùng giá trị đó
-    - Nếu port KHÔNG có giá trị → dùng vùng vẽ thủ công (_drawn_roi trong params)
-      hoặc fallback về x/y/crop_w/crop_h trong params
+    - Mỗi port x/y/w/h: nếu CÓ giá trị từ upstream → ưu tiên dùng;
+      port nào KHÔNG kết nối thì fall back về params / _drawn_roi.
+    - Cho phép half-connect: ví dụ PatMax chỉ cung cấp x/y (không w/h) →
+      x/y track theo PatMax, w/h lấy từ Width/Height params.
     """
     img = inputs.get("image")
     if img is None:
@@ -1026,38 +1027,49 @@ def proc_crop(inputs, params):
 
     ih, iw = img.shape[:2]
 
-    # Kiểm tra xem port x/y/w/h có được kết nối (giá trị không phải None)
-    port_x = inputs.get("x")   # None nếu không kết nối
+    port_x = inputs.get("x")
     port_y = inputs.get("y")
     port_w = inputs.get("w")
     port_h = inputs.get("h")
 
-    ports_connected = (port_x is not None and port_y is not None
-                       and port_w is not None and port_h is not None)
-
-    if ports_connected:
-        # MODE 1: Dùng giá trị từ port (tracking từ PatMax hoặc tool khác)
-        x  = int(float(port_x))
-        y  = int(float(port_y))
-        cw = int(float(port_w))
-        ch = int(float(port_h))
-        mode_label = "TRACKED"
-        border_color = (0, 255, 180)   # xanh lá = tracking
+    # Default từ _drawn_roi (vẽ tay) hoặc params spinbox
+    drawn = params.get("_drawn_roi")
+    if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
+        dx, dy, dw, dh = [int(v) for v in drawn]
+        manual_src = "MANUAL ROI"
     else:
-        # MODE 2: Dùng vùng vẽ thủ công (_drawn_roi) hoặc params thủ công
-        drawn = params.get("_drawn_roi")  # (x,y,w,h) được lưu từ InteractiveImageLabel
-        if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
-            x, y, cw, ch = [int(v) for v in drawn]
-            mode_label = "MANUAL ROI"
-            border_color = (0, 212, 255)   # cyan = vẽ tay
-        else:
-            # Fallback: dùng params spinbox
-            x  = int(params.get("x", 0))
-            y  = int(params.get("y", 0))
-            cw = int(params.get("crop_w", 320))
-            ch = int(params.get("crop_h", 240))
-            mode_label = "PARAMS"
-            border_color = (150, 150, 255)  # tím nhạt = params
+        # First-run init: chưa từng drawn, chưa từng có port → default w/h
+        # = kích thước ảnh nguồn (full image), không phải 320x240 cứng.
+        if not params.get("_crop_initialized"):
+            params["x"] = 0
+            params["y"] = 0
+            params["crop_w"] = iw
+            params["crop_h"] = ih
+            params["_crop_initialized"] = True
+        dx = int(params.get("x", 0))
+        dy = int(params.get("y", 0))
+        dw = int(params.get("crop_w", iw))
+        dh = int(params.get("crop_h", ih))
+        manual_src = "PARAMS"
+
+    # Per-port override
+    x  = int(float(port_x)) if port_x is not None else dx
+    y  = int(float(port_y)) if port_y is not None else dy
+    cw = int(float(port_w)) if port_w is not None else dw
+    ch = int(float(port_h)) if port_h is not None else dh
+
+    tracked_ports = [n for n, v in [("x", port_x), ("y", port_y),
+                                     ("w", port_w), ("h", port_h)]
+                     if v is not None]
+    if not tracked_ports:
+        mode_label = manual_src
+        border_color = (0, 212, 255) if manual_src == "MANUAL ROI" else (150, 150, 255)
+    elif len(tracked_ports) == 4:
+        mode_label = "TRACKED"
+        border_color = (0, 255, 180)
+    else:
+        mode_label = "TRACKED " + "".join(tracked_ports)
+        border_color = (0, 255, 180)
 
     # Clamp
     x  = max(0, min(x,  iw - 1))
@@ -1065,22 +1077,30 @@ def proc_crop(inputs, params):
     cw = max(1, min(cw, iw - x))
     ch = max(1, min(ch, ih - y))
 
-    roi = img[y:y + ch, x:x + cw]
+    # Persist giá trị thực tế (đã clamp) ngược vào params nếu nguồn là
+    # MANUAL ROI / PARAMS — để spinbox hiển thị đúng vùng đang cắt sau khi
+    # user vẽ ROI rồi Run. Không ghi đè khi đang TRACKED qua port.
+    if not tracked_ports:
+        params["x"] = x
+        params["y"] = y
+        params["crop_w"] = cw
+        params["crop_h"] = ch
 
-    # Vẽ overlay trên ảnh gốc — không modify ảnh gốc
-    vis = _bgr(img.copy())
-    cv2.rectangle(vis, (x, y), (x + cw, y + ch), border_color, 2)
-    # Label góc trên trái
-    lbl_y = max(16, y - 6)
-    cv2.putText(vis, f"[{mode_label}] ({x},{y}) {cw}×{ch}",
-                (x + 2, lbl_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, border_color, 1)
-    # Góc bo nhẹ
-    cv2.rectangle(vis, (x, y), (x + 8, y + 8), border_color, -1)
-    cv2.rectangle(vis, (x + cw - 8, y), (x + cw, y + 8), border_color, -1)
-    cv2.rectangle(vis, (x, y + ch - 8), (x + 8, y + ch), border_color, -1)
-    cv2.rectangle(vis, (x + cw - 8, y + ch - 8), (x + cw, y + ch), border_color, -1)
+    roi = img[y:y + ch, x:x + cw].copy()
 
-    return {"image": vis, "roi_image": roi, "x": x, "y": y, "w": cw, "h": ch}
+    # Output port "image" = vùng đã cắt (crop result), không phải ảnh gốc
+    # với rectangle overlay → downstream tool thấy đúng vùng ROI để xử lý.
+    # Vẽ nhãn nhỏ ở góc trái trên ROI để biết source x,y,w,h và mode.
+    vis_roi = _bgr(roi.copy())
+    label = f"[{mode_label}] ({x},{y}) {cw}x{ch}"  # 'x' ASCII (cv2.putText
+    # không hỗ trợ unicode ×). Outline đen + chữ màu border_color cho dễ đọc.
+    cv2.putText(vis_roi, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.putText(vis_roi, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                border_color, 1, cv2.LINE_AA)
+
+    return {"image": vis_roi, "roi_image": roi,
+            "x": x, "y": y, "w": cw, "h": ch}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1444,7 +1464,7 @@ TOOL_REGISTRY: List[ToolDef] = [
      PortDef("x","number"),PortDef("y","number"),PortDef("angle","number"),
      PortDef("scale","number"),PortDef("num_found","number"),
      PortDef("objects","list")],
-    [P("algorithm","Algorithm","enum","PatMax & PatQuick",
+    [P("algorithm","Algorithm","enum","PatQuick",
        choices=["PatMax","PatQuick","PatMax & PatQuick","PatFlex",
                 "PatMax - High Sensitivity","Perspective PatMax"],
        tooltip="Thuật toán matching pattern"),

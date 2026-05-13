@@ -34,7 +34,7 @@ TRAIN_MODE_CHOICES = [
     "Shape Models with Image",
     "Shape Models with Transform",
 ]
-ALGORITHM_DEFAULT  = "PatMax & PatQuick"
+ALGORITHM_DEFAULT  = "PatQuick"
 TRAIN_MODE_DEFAULT = "Image"
 
 _COMBO_QSS = (
