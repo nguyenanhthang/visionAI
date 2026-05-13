@@ -261,6 +261,36 @@ class ImageViewerPanel(QWidget):
         for b in (btn_out, btn_in, btn_1to1, btn_fit):
             tl.addWidget(b)
 
+        # Results dropdown — chọn tool nào để overlay annotation lên ảnh gốc.
+        # Menu rebuilt động khi mở: list tất cả node có image output, mỗi
+        # node 1 checkbox. Ít nhất 1 cái tick → composite mode, base = ảnh gốc
+        # (Acquire Image), overlay = diff(input, output) của các node ticked.
+        from PySide6.QtWidgets import QToolButton, QMenu, QWidgetAction, QCheckBox
+        self._selected_overlays: Dict[str, bool] = {}   # node_id → bật/tắt
+        self._btn_results = QToolButton()
+        self._btn_results.setText("📊 Results ▾")
+        self._btn_results.setPopupMode(QToolButton.InstantPopup)
+        self._btn_results.setFixedHeight(28)
+        self._btn_results.setToolTip(
+            "Composite Results — pick tools để overlay annotation lên ảnh gốc. "
+            "Khi không tick gì → chỉ hiện output của node đang chọn.")
+        self._btn_results.setStyleSheet("""
+            QToolButton{background:#111827;border:1px solid #1e2d45;
+                        border-radius:4px;color:#94a3b8;font-size:11px;
+                        padding:0 10px;font-weight:600;}
+            QToolButton:hover{background:#1a2236;color:#00d4ff;}
+            QToolButton::menu-indicator{image:none;}
+        """)
+
+        self._results_menu = QMenu(self._btn_results)
+        self._results_menu.setStyleSheet(
+            "QMenu{background:#0d1220;border:1px solid #1e2d45;"
+            "padding:4px;color:#e2e8f0;}"
+            "QMenu::separator{height:1px;background:#1e2d45;margin:4px 6px;}")
+        self._results_menu.aboutToShow.connect(self._rebuild_results_menu)
+        self._btn_results.setMenu(self._results_menu)
+        tl.addWidget(self._btn_results)
+
         lay.addWidget(tb)
 
         # ── Image view ─────────────────────────────────────────────
@@ -343,17 +373,198 @@ class ImageViewerPanel(QWidget):
             self._lbl_status.setText("IDLE")
             self._current_node_id = None
 
+    def _rebuild_results_menu(self):
+        """Rebuild menu mỗi khi mở → reflect graph hiện tại."""
+        from PySide6.QtWidgets import QWidgetAction, QCheckBox, QLabel
+        menu = self._results_menu
+        menu.clear()
+        if not self._graph:
+            wa = QWidgetAction(menu)
+            lbl = QLabel("  (No pipeline)  ")
+            lbl.setStyleSheet("color:#64748b; padding:8px;")
+            wa.setDefaultWidget(lbl)
+            menu.addAction(wa)
+            return
+
+        # Header — base image
+        wa_hdr = QWidgetAction(menu)
+        hdr = QLabel("  Base: ảnh gốc (Acquire Image)  ")
+        hdr.setStyleSheet(
+            "color:#00d4ff; font-size:10px; font-weight:700; "
+            "letter-spacing:1px; padding:6px 8px;")
+        wa_hdr.setDefaultWidget(hdr)
+        menu.addAction(wa_hdr)
+        menu.addSeparator()
+
+        # List tất cả node có image output (loại Acquire — đó là base)
+        nodes = [(nid, n) for nid, n in self._graph.nodes.items()
+                 if "image" in n.outputs
+                 and getattr(n.tool, "category", "") != "Acquire Image"]
+        # Sắp theo thứ tự topo (đơn giản: theo node_id để stable)
+        nodes.sort(key=lambda x: x[0])
+
+        if not nodes:
+            wa = QWidgetAction(menu)
+            lbl = QLabel("  (Chưa có tool nào trong pipeline)  ")
+            lbl.setStyleSheet("color:#64748b; padding:8px;")
+            wa.setDefaultWidget(lbl)
+            menu.addAction(wa)
+        else:
+            for nid, node in nodes:
+                wa = QWidgetAction(menu)
+                cb = QCheckBox(f"  {node.tool.icon}  {node.tool.name}  "
+                                f"({node.tool.tool_id})")
+                cb.setChecked(self._selected_overlays.get(nid, False))
+                cb.setStyleSheet(
+                    "QCheckBox{color:#e2e8f0; font-size:11px; padding:4px 8px;}"
+                    "QCheckBox::indicator{width:14px; height:14px;}")
+                cb.toggled.connect(
+                    lambda on, _nid=nid: self._on_overlay_toggled(_nid, on))
+                wa.setDefaultWidget(cb)
+                menu.addAction(wa)
+
+        menu.addSeparator()
+        # Quick actions
+        from PySide6.QtGui import QAction
+        act_all = QAction("✓  Select All", menu)
+        act_none = QAction("✗  Clear All", menu)
+        act_all.triggered.connect(lambda: self._set_all_overlays(True))
+        act_none.triggered.connect(lambda: self._set_all_overlays(False))
+        menu.addAction(act_all)
+        menu.addAction(act_none)
+
+    def _on_overlay_toggled(self, node_id: str, on: bool):
+        self._selected_overlays[node_id] = on
+        self._update_results_btn_text()
+        self.refresh_current()
+
+    def _set_all_overlays(self, on: bool):
+        if not self._graph:
+            return
+        for nid, n in self._graph.nodes.items():
+            if "image" in n.outputs \
+                    and getattr(n.tool, "category", "") != "Acquire Image":
+                self._selected_overlays[nid] = on
+        self._update_results_btn_text()
+        self.refresh_current()
+
+    def _update_results_btn_text(self):
+        n = sum(1 for v in self._selected_overlays.values() if v)
+        if n == 0:
+            self._btn_results.setText("📊 Results ▾")
+        else:
+            self._btn_results.setText(f"📊 Results ({n}) ▾")
+
+    def _find_acquire_root_image(self):
+        """Trả output 'image' của node đầu chuỗi (Acquire Image)."""
+        if not self._graph:
+            return None
+        for nid, n in self._graph.nodes.items():
+            if getattr(n.tool, "category", "") == "Acquire Image" \
+                    and "image" in n.outputs:
+                return n.outputs["image"]
+        return None
+
+    def _overlay_diff(self, base: np.ndarray, before: np.ndarray,
+                      after: np.ndarray) -> np.ndarray:
+        """Compose pixel khác biệt (before→after) lên base. Dùng cho Shared
+        Graphics: lấy annotation upstream-tool đã vẽ rồi áp lên ảnh hiển thị."""
+        if (before is None or after is None
+                or before.shape != after.shape
+                or before.shape[:2] != base.shape[:2]):
+            return base
+        import cv2
+        b = before if before.ndim == 3 else cv2.cvtColor(before, cv2.COLOR_GRAY2BGR)
+        a = after  if after.ndim  == 3 else cv2.cvtColor(after,  cv2.COLOR_GRAY2BGR)
+        diff = cv2.absdiff(a, b)
+        gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        # Pixel coi như annotation nếu lệch ≥ 20 (loại noise nhỏ)
+        mask = (gray > 20)
+        if not mask.any():
+            return base
+        out = base.copy()
+        out[mask] = a[mask]
+        return out
+
+    def _node_input_image(self, node):
+        """Output 'image' của upstream gần nhất của node (input của node)."""
+        if not self._graph:
+            return None
+        for c in self._graph.connections:
+            if c.dst_id == node.node_id and c.dst_port == "image":
+                src = self._graph.nodes.get(c.src_id)
+                if src and "image" in src.outputs:
+                    return src.outputs["image"]
+        return None
+
+    def _get_source_image(self, node):
+        """Tìm ảnh gốc (raw) của pipeline — traverse ngược về node category
+        'Acquire Image' đầu chuỗi. Cho phép Show Result OFF hiện ảnh thô,
+        không phải output đã annotate của upstream gần nhất."""
+        if not self._graph:
+            return None
+        visited = set()
+        cur = node
+        # Walk upstream qua port "image" để tìm root source
+        for _ in range(64):    # an toàn: pipeline khó dài hơn 64 node
+            if cur is None or cur.node_id in visited:
+                break
+            visited.add(cur.node_id)
+            cat = getattr(cur.tool, "category", "")
+            if cat == "Acquire Image" and "image" in cur.outputs:
+                return cur.outputs["image"]
+            # Tìm upstream nối vào port "image"
+            upstream = None
+            for c in self._graph.connections:
+                if c.dst_id == cur.node_id and c.dst_port == "image":
+                    upstream = self._graph.nodes.get(c.src_id)
+                    break
+            cur = upstream
+        # Fallback: upstream gần nhất nếu không tìm thấy Acquire root
+        for c in self._graph.connections:
+            if c.dst_id == node.node_id and c.dst_port == "image":
+                src = self._graph.nodes.get(c.src_id)
+                if src and "image" in src.outputs:
+                    return src.outputs["image"]
+        return None
+
     def _display_node(self, node_id: str):
         if not self._graph or node_id not in self._graph.nodes:
             return
         self._current_node_id = node_id
         node = self._graph.nodes[node_id]
 
-        img = node.outputs.get("image")
+        active_overlays = [nid for nid, on in self._selected_overlays.items()
+                            if on and nid in self._graph.nodes]
+
+        if active_overlays:
+            # Composite mode: base = ảnh gốc Acquire, overlay = các tool đã tick.
+            base = self._find_acquire_root_image()
+            if base is None:
+                img = node.outputs.get("image")
+            else:
+                import cv2
+                comp = base.copy()
+                if comp.ndim == 2:
+                    comp = cv2.cvtColor(comp, cv2.COLOR_GRAY2BGR)
+                for nid in active_overlays:
+                    n = self._graph.nodes[nid]
+                    before = self._node_input_image(n)
+                    after  = n.outputs.get("image")
+                    if before is not None and after is not None:
+                        comp = self._overlay_diff(comp, before, after)
+                img = comp
+        else:
+            # Mode bình thường: hiển thị output của node đang chọn.
+            img = node.outputs.get("image")
+
         if img is not None and isinstance(img, np.ndarray):
             h, w = img.shape[:2]
             ch = img.shape[2] if len(img.shape) == 3 else 1
-            self._lbl_size.setText(f"{w}×{h}  ch:{ch}  dtype:{img.dtype}")
+            tag = f"  •  Composite ({len(active_overlays)} overlays)" \
+                if active_overlays else ""
+            self._lbl_size.setText(
+                f"{w}×{h}  ch:{ch}  dtype:{img.dtype}{tag}")
             self._img_view.set_image(img)
         else:
             self._img_view.set_image(None)

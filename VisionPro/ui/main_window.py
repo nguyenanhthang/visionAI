@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
             self._open_yolo_studio(initial_img)
             return
 
-        if node.tool.tool_id in ("patmax", "patfind"):
+        if node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
             from ui.patmax_dialog import PatMaxDialog
             dlg = PatMaxDialog(node, self._graph, self)
             dlg.run_requested.connect(self._on_detail_run)
@@ -407,9 +407,9 @@ class MainWindow(QMainWindow):
         self._img_viewer.refresh_node_list()
         self._img_viewer.refresh_current()
 
-        # Refresh any open detail dialogs
+        # Refresh any open detail dialogs (PatMaxDialog không có refresh_outputs)
         for nid, dlg in self._detail_dialogs.items():
-            if dlg.isVisible():
+            if dlg.isVisible() and hasattr(dlg, "refresh_outputs"):
                 dlg.refresh_outputs()
 
         self._finalize_run()
