@@ -391,6 +391,53 @@ class PLCConfig:
     data_area: MemoryArea = MemoryArea.DM_WORD
     data_start_address: int = 110
 
+    # Float / int32 word order: 'ABCD' = high word first, 'CDAB' = low word first
+    # Omron NJ/NX với REAL kiểu IEEE thường dùng CDAB; Modbus/PLC khác đa số ABCD.
+    float_word_order: str = "ABCD"
+
+    # Mapping cụ thể từ output của node → địa chỉ PLC
+    data_mappings: list = field(default_factory=list)
+
+
+@dataclass
+class DataMapping:
+    """Một mapping: lấy output ``output_key`` của node ``node_id`` → ghi vào PLC.
+
+    data_type:
+        - 'int16'         : ghi 1 word, giá trị bị trunc về int và mask 0xFFFF (có dấu hỗ trợ qua 2's complement)
+        - 'int32'         : ghi 2 word
+        - 'float32'       : ghi 2 word IEEE-754
+        - 'scaled_int16'  : value × scale → round → ghi 1 word int16 (signed)
+        - 'scaled_int32'  : value × scale → round → ghi 2 word int32 (signed)
+    """
+    node_id: str = ""
+    output_key: str = ""
+    area: MemoryArea = MemoryArea.DM_WORD
+    address: int = 0
+    data_type: str = "float32"
+    scale: float = 1.0
+
+    def to_dict(self) -> dict:
+        return {
+            "node_id": self.node_id,
+            "output_key": self.output_key,
+            "area": self.area.value,
+            "address": self.address,
+            "data_type": self.data_type,
+            "scale": self.scale,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DataMapping":
+        return cls(
+            node_id=d.get("node_id", ""),
+            output_key=d.get("output_key", ""),
+            area=MemoryArea(d.get("area", MemoryArea.DM_WORD.value)),
+            address=int(d.get("address", 0)),
+            data_type=d.get("data_type", "float32"),
+            scale=float(d.get("scale", 1.0)),
+        )
+
 
 class PLCManager:
     """Quản lý driver + thread polling trigger.
@@ -504,19 +551,80 @@ class PLCManager:
             self._stop.wait(max(0.01, cfg.poll_interval_ms / 1000.0))
 
     # ── Write back ──
-    def write_result(self, passed: bool, values: Optional[list] = None) -> None:
-        """Ghi PASS/FAIL + (optional) các giá trị số liệu về PLC."""
+    def write_result(self, passed: bool) -> None:
+        """Ghi mã PASS/FAIL về địa chỉ result."""
         if not self.is_connected:
             raise RuntimeError("PLC not connected")
         cfg = self.config
         code = cfg.result_pass_value if passed else cfg.result_fail_value
         self.driver.write_word(cfg.result_area, cfg.result_address, code)
-        if values:
-            for i, v in enumerate(values):
-                try:
-                    iv = int(round(float(v)))
-                except (TypeError, ValueError):
-                    continue
-                self.driver.write_word(cfg.data_area,
-                                       cfg.data_start_address + i,
-                                       iv)
+
+    @staticmethod
+    def _to_signed_word(v: int) -> int:
+        v = int(v)
+        if v < 0:
+            v = (1 << 16) + v
+        return v & 0xFFFF
+
+    def write_value(self, area: MemoryArea, address: int, value: float,
+                    data_type: str = "float32", scale: float = 1.0) -> None:
+        """Ghi 1 giá trị numeric theo data_type được chỉ định."""
+        if not self.is_connected:
+            raise RuntimeError("PLC not connected")
+        v = float(value)
+        word_order = self.config.float_word_order
+
+        if data_type == "int16":
+            self.driver.write_word(area, address, self._to_signed_word(v))
+
+        elif data_type == "scaled_int16":
+            iv = int(round(v * scale))
+            self.driver.write_word(area, address, self._to_signed_word(iv))
+
+        elif data_type in ("int32", "scaled_int32"):
+            iv = int(round(v * scale)) if data_type == "scaled_int32" else int(v)
+            if iv < 0:
+                iv = (1 << 32) + iv
+            iv &= 0xFFFFFFFF
+            hi = (iv >> 16) & 0xFFFF
+            lo = iv & 0xFFFF
+            w0, w1 = (hi, lo) if word_order == "ABCD" else (lo, hi)
+            self.driver.write_word(area, address,     w0)
+            self.driver.write_word(area, address + 1, w1)
+
+        elif data_type == "float32":
+            raw = struct.pack('>f', v)               # ABCD big-endian
+            w_high = int.from_bytes(raw[0:2], 'big')
+            w_low  = int.from_bytes(raw[2:4], 'big')
+            w0, w1 = (w_high, w_low) if word_order == "ABCD" else (w_low, w_high)
+            self.driver.write_word(area, address,     w0)
+            self.driver.write_word(area, address + 1, w1)
+
+        else:
+            raise ValueError(f"Unknown data_type: {data_type}")
+
+    def write_data_mappings(self, results: dict) -> list:
+        """Ghi tất cả mappings dựa trên dict ``results`` = {node_id: outputs_dict}.
+
+        Trả về list mô tả từng mapping đã ghi (cho UI log). Mapping nào lỗi sẽ
+        gắn ``error`` thay vì raise — để không cản các mapping kế tiếp.
+        """
+        report = []
+        for m in self.config.data_mappings:
+            entry = {"node_id": m.node_id, "output_key": m.output_key,
+                     "address": m.address, "data_type": m.data_type}
+            out = results.get(m.node_id)
+            if not isinstance(out, dict) or m.output_key not in out:
+                entry["error"] = "output not found"
+                report.append(entry); continue
+            v = out[m.output_key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                entry["error"] = f"value not numeric ({type(v).__name__})"
+                report.append(entry); continue
+            try:
+                self.write_value(m.area, m.address, v, m.data_type, m.scale)
+                entry["value"] = v
+            except Exception as e:
+                entry["error"] = str(e)
+            report.append(entry)
+        return report

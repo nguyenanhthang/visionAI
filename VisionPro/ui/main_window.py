@@ -601,10 +601,11 @@ class MainWindow(QMainWindow):
     def _open_plc_dialog(self):
         from ui.plc_dialog import PLCDialog
         if self._plc_dialog and self._plc_dialog.isVisible():
+            self._plc_dialog.set_graph(self._graph)
             self._plc_dialog.raise_()
             self._plc_dialog.activateWindow()
             return
-        self._plc_dialog = PLCDialog(self._plc_manager, self)
+        self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
         self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
         self._plc_dialog.show()
 
@@ -616,28 +617,29 @@ class MainWindow(QMainWindow):
         self._start_run()
 
     def _send_result_to_plc(self, results: dict):
-        """Gửi PASS/FAIL + giá trị số về PLC sau khi pipeline xong."""
+        """Gửi PASS/FAIL + dữ liệu mapping (length, area...) về PLC."""
         if not self._plc_manager.is_connected:
             return
-        # PASS nếu toàn bộ node có status không phải 'fail'/'error'
         passed = all(n.status not in ("fail", "error")
                      for n in self._graph.nodes.values())
-        # Thu thập số liệu từ outputs (int/float scalar)
-        values = []
-        for nid, out in results.items():
-            if not isinstance(out, dict):
-                continue
-            for v in out.values():
-                if isinstance(v, bool):
-                    continue
-                if isinstance(v, (int, float)):
-                    values.append(v)
         try:
-            self._plc_manager.write_result(passed=passed, values=values[:16])
-            self.statusBar().showMessage(
-                f"→ PLC: {'PASS' if passed else 'FAIL'}  ({len(values)} values)", 3000)
+            self._plc_manager.write_result(passed=passed)
         except Exception as e:
-            self.statusBar().showMessage(f"PLC write error: {e}", 5000)
+            self.statusBar().showMessage(f"PLC write PASS/FAIL error: {e}", 5000)
+            return
+
+        mappings = self._plc_manager.config.data_mappings
+        if not mappings:
+            self.statusBar().showMessage(
+                f"→ PLC: {'PASS' if passed else 'FAIL'}", 3000)
+            return
+
+        report = self._plc_manager.write_data_mappings(results)
+        ok = sum(1 for r in report if "error" not in r)
+        err = len(report) - ok
+        self.statusBar().showMessage(
+            f"→ PLC: {'PASS' if passed else 'FAIL'}  "
+            f"({ok} values{', '+str(err)+' errors' if err else ''})", 4000)
 
     def _about(self):
         QMessageBox.about(self, "AOI Vision Pro",
