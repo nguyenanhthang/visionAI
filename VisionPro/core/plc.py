@@ -51,6 +51,53 @@ _FINS_MEMORY_AREA_READ  = b'\x01\x01'
 _FINS_MEMORY_AREA_WRITE = b'\x01\x02'
 
 
+class FinsError(IOError):
+    """FINS end_code khác 00 00 → PLC trả lỗi."""
+
+    # MRES/SRES codes phổ biến nhất; xem Omron W342 spec để đầy đủ.
+    _MESSAGES = {
+        0x0000: "Normal completion",
+        0x0101: "Local node not in network",
+        0x0102: "Token timeout",
+        0x0103: "Retries failed",
+        0x0104: "Too many send frames",
+        0x0105: "Node address range error",
+        0x0106: "Node address duplication",
+        0x0201: "Destination node not in network",
+        0x0202: "No node",
+        0x0203: "Communications controller error",
+        0x0204: "Controller error",
+        0x0205: "Response timeout",
+        0x1001: "Command too long",
+        0x1002: "Command too short",
+        0x1003: "Elements/data don't match",
+        0x1004: "Command format error",
+        0x1101: "Area class error",
+        0x1103: "Start address out of range",
+        0x1104: "End address out of range",
+        0x110B: "Response too long",
+        0x110C: "Parameter error",
+        0x2002: "Read-only area",
+        0x2003: "FROM/PLC setup not finished",
+        0x2102: "Cannot write in run mode",
+        0x2502: "Setting error",
+    }
+
+    def __init__(self, end_code: int):
+        self.end_code = end_code
+        msg = self._MESSAGES.get(end_code, f"FINS end_code 0x{end_code:04X}")
+        super().__init__(f"FINS error 0x{end_code:04X}: {msg}")
+
+
+def _check_fins_end_code(frame: bytes) -> None:
+    """Frame ở đây là FINS response frame (không có FINS/TCP header)."""
+    if len(frame) < 14:
+        raise IOError(f"FINS response too short: {len(frame)} bytes")
+    end_code = int.from_bytes(frame[12:14], 'big')
+    if end_code != 0:
+        raise FinsError(end_code)
+
+
 # ── Base driver ───────────────────────────────────────────────────
 class PLCDriver(ABC):
     """Giao diện chung cho mọi driver PLC."""
@@ -179,9 +226,8 @@ class OmronCP2E(PLCDriver):
         code = _FINS_AREA_CODES[self._word_area_for(area)]
         body = code + address.to_bytes(2, 'big') + b'\x00' + (1).to_bytes(2, 'big')
         resp = self._send_fins(_FINS_MEMORY_AREA_READ, body)
-        # resp = FINS header (10) + cmd code (2) + endcode (2) + data (2)
-        data = resp[14:16]
-        return int.from_bytes(data, 'big')
+        _check_fins_end_code(resp)
+        return int.from_bytes(resp[14:16], 'big')
 
     def write_word(self, area: MemoryArea, address: int, value: int) -> None:
         if not self.connected:
@@ -190,7 +236,8 @@ class OmronCP2E(PLCDriver):
         body = (code + address.to_bytes(2, 'big') + b'\x00'
                 + (1).to_bytes(2, 'big')
                 + (value & 0xFFFF).to_bytes(2, 'big'))
-        self._send_fins(_FINS_MEMORY_AREA_WRITE, body)
+        resp = self._send_fins(_FINS_MEMORY_AREA_WRITE, body)
+        _check_fins_end_code(resp)
 
 
 # ── Omron NX1P2 — FINS over UDP ───────────────────────────────────
@@ -248,7 +295,7 @@ class OmronNX1P2(PLCDriver):
         code = _FINS_AREA_CODES[self._word_area_for(area)]
         body = code + address.to_bytes(2, 'big') + b'\x00' + (1).to_bytes(2, 'big')
         resp = self._send_fins(_FINS_MEMORY_AREA_READ, body)
-        # resp: FINS header (10) + cmd code (2) + endcode (2) + data (2)
+        _check_fins_end_code(resp)
         return int.from_bytes(resp[14:16], 'big')
 
     def write_word(self, area: MemoryArea, address: int, value: int) -> None:
@@ -258,7 +305,8 @@ class OmronNX1P2(PLCDriver):
         body = (code + address.to_bytes(2, 'big') + b'\x00'
                 + (1).to_bytes(2, 'big')
                 + (value & 0xFFFF).to_bytes(2, 'big'))
-        self._send_fins(_FINS_MEMORY_AREA_WRITE, body)
+        resp = self._send_fins(_FINS_MEMORY_AREA_WRITE, body)
+        _check_fins_end_code(resp)
 
 
 # ── Inovance H3U / H5U — Modbus TCP ───────────────────────────────
@@ -340,21 +388,22 @@ class InovanceH3UH5U(PLCDriver):
         self._request(0x06, payload)
 
     def read_bit(self, area: MemoryArea, address: int, bit: int = 0) -> bool:
-        if area in (MemoryArea.CIO_BIT, MemoryArea.DM_BIT):
-            # FC 01 — Read coils
-            coil = address * 16 + bit if area == MemoryArea.DM_BIT else address
-            payload = coil.to_bytes(2, 'big') + (1).to_bytes(2, 'big')
+        if area == MemoryArea.CIO_BIT:
+            # FC 01 — Read M coil
+            payload = address.to_bytes(2, 'big') + (1).to_bytes(2, 'big')
             data = self._request(0x01, payload)
             return bool(data[1] & 0x01)
+        # DM_BIT và mọi area khác: đọc word rồi mask (H3U không có Modbus
+        # mapping cho từng bit của D register).
         return super().read_bit(area, address, bit)
 
     def write_bit(self, area: MemoryArea, address: int, bit: int, value: bool) -> None:
-        if area in (MemoryArea.CIO_BIT, MemoryArea.DM_BIT):
-            # FC 05 — Write single coil
-            coil = address * 16 + bit if area == MemoryArea.DM_BIT else address
-            payload = coil.to_bytes(2, 'big') + (b'\xFF\x00' if value else b'\x00\x00')
+        if area == MemoryArea.CIO_BIT:
+            # FC 05 — Write single M coil
+            payload = address.to_bytes(2, 'big') + (b'\xFF\x00' if value else b'\x00\x00')
             self._request(0x05, payload)
             return
+        # DM_BIT: read-modify-write trên D word
         super().write_bit(area, address, bit, value)
 
 
@@ -373,6 +422,12 @@ class PLCConfig:
     ip: str = "192.168.250.1"
     port: int = 9600
     poll_interval_ms: int = 100
+
+    # FINS node addresses — chỉ áp dụng cho Omron NX1P2 (UDP).
+    # Mặc định dest_node = octet cuối của IP, src_node có thể bất kỳ
+    # nhưng phải khớp cấu hình FINS settings của PLC.
+    fins_dest_node: int = 1
+    fins_src_node: int = 25
 
     # Trigger (signal AOI bắt đầu chạy)
     trigger_area: MemoryArea = MemoryArea.DM_WORD
@@ -473,7 +528,12 @@ class PLCManager:
         if cls is None:
             raise ValueError(f"Unknown PLC model: {self.config.model}")
         self.disconnect()
-        self.driver = cls(self.config.ip, self.config.port)
+        if cls is OmronNX1P2:
+            self.driver = cls(self.config.ip, self.config.port,
+                              dest_node=self.config.fins_dest_node,
+                              src_node=self.config.fins_src_node)
+        else:
+            self.driver = cls(self.config.ip, self.config.port)
         self.driver.connect()
 
     def disconnect(self) -> None:

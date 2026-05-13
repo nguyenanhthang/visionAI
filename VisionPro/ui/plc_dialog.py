@@ -93,13 +93,21 @@ class PLCDialog(QDialog):
         g.addWidget(QLabel("Port:"),     1, 2); g.addWidget(self.sp_port,  1, 3)
         g.addWidget(QLabel("Poll:"),     2, 0); g.addWidget(self.sp_poll,  2, 1)
 
+        # FINS node addresses (chỉ ý nghĩa với NX1P2 — sẽ ẩn cho các model khác)
+        self.sp_dest_node = QSpinBox(); self.sp_dest_node.setRange(0, 255); self.sp_dest_node.setValue(1)
+        self.sp_src_node  = QSpinBox(); self.sp_src_node.setRange(0, 255); self.sp_src_node.setValue(25)
+        self.lbl_dest_node = QLabel("FINS dest node:")
+        self.lbl_src_node  = QLabel("FINS src node:")
+        g.addWidget(self.lbl_dest_node, 2, 2); g.addWidget(self.sp_dest_node, 2, 3)
+        g.addWidget(self.lbl_src_node,  3, 2); g.addWidget(self.sp_src_node,  3, 3)
+
         self.btn_connect = QPushButton("🔌  Connect")
         self.btn_disconnect = QPushButton("✖  Disconnect")
         self.btn_disconnect.setEnabled(False)
         self.btn_connect.clicked.connect(self._on_connect)
         self.btn_disconnect.clicked.connect(self._on_disconnect)
-        g.addWidget(self.btn_connect,    3, 0, 1, 2)
-        g.addWidget(self.btn_disconnect, 3, 2, 1, 2)
+        g.addWidget(self.btn_connect,    4, 0, 1, 2)
+        g.addWidget(self.btn_disconnect, 4, 2, 1, 2)
         root.addWidget(gb_conn)
 
         # — Trigger group —
@@ -344,6 +352,9 @@ class PLCDialog(QDialog):
 
     # ── Helpers ───────────────────────────────────────────────────
     def _on_model_changed(self, model: str):
+        is_nx = "NX1P2" in model
+        for w in (self.lbl_dest_node, self.sp_dest_node, self.lbl_src_node, self.sp_src_node):
+            w.setVisible(is_nx)
         if "NX1P2" in model:
             self.sp_port.setValue(9600)
         elif "CP2E" in model:
@@ -370,6 +381,8 @@ class PLCDialog(QDialog):
             data_start_address=self.sp_data_addr.value(),
             float_word_order="ABCD" if self.cb_word_order.currentIndex() == 0 else "CDAB",
             data_mappings=self._read_mappings(),
+            fins_dest_node=self.sp_dest_node.value(),
+            fins_src_node=self.sp_src_node.value(),
         )
 
     def _apply_config_to_ui(self, cfg: PLCConfig):
@@ -390,6 +403,9 @@ class PLCDialog(QDialog):
         self.cb_data_area.setCurrentText(_AREA_NAME_BY_ENUM[cfg.data_area])
         self.sp_data_addr.setValue(cfg.data_start_address)
         self.cb_word_order.setCurrentIndex(0 if cfg.float_word_order == "ABCD" else 1)
+        self.sp_dest_node.setValue(cfg.fins_dest_node)
+        self.sp_src_node.setValue(cfg.fins_src_node)
+        self._on_model_changed(cfg.model)
         self.tbl_map.setRowCount(0)
         for m in cfg.data_mappings:
             self._add_mapping_row(m)
@@ -492,6 +508,8 @@ class PLCDialog(QDialog):
         s.setValue("data_addr", cfg.data_start_address)
         s.setValue("word_order", cfg.float_word_order)
         s.setValue("mappings", json.dumps([m.to_dict() for m in cfg.data_mappings]))
+        s.setValue("fins_dest", cfg.fins_dest_node)
+        s.setValue("fins_src",  cfg.fins_src_node)
         s.endGroup()
 
     def _load_settings(self):
@@ -519,6 +537,8 @@ class PLCDialog(QDialog):
                     DataMapping.from_dict(d)
                     for d in json.loads(s.value("mappings", "[]") or "[]")
                 ],
+                fins_dest_node=int(s.value("fins_dest", 1)),
+                fins_src_node=int(s.value("fins_src", 25)),
             )
             self._apply_config_to_ui(cfg)
         except Exception:
