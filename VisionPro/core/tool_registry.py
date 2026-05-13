@@ -1069,22 +1069,21 @@ def proc_crop(inputs, params):
     cw = max(1, min(cw, iw - x))
     ch = max(1, min(ch, ih - y))
 
-    roi = img[y:y + ch, x:x + cw]
+    roi = img[y:y + ch, x:x + cw].copy()
 
-    # Vẽ overlay trên ảnh gốc — không modify ảnh gốc
-    vis = _bgr(img.copy())
-    cv2.rectangle(vis, (x, y), (x + cw, y + ch), border_color, 2)
-    # Label góc trên trái
-    lbl_y = max(16, y - 6)
-    cv2.putText(vis, f"[{mode_label}] ({x},{y}) {cw}×{ch}",
-                (x + 2, lbl_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, border_color, 1)
-    # Góc bo nhẹ
-    cv2.rectangle(vis, (x, y), (x + 8, y + 8), border_color, -1)
-    cv2.rectangle(vis, (x + cw - 8, y), (x + cw, y + 8), border_color, -1)
-    cv2.rectangle(vis, (x, y + ch - 8), (x + 8, y + ch), border_color, -1)
-    cv2.rectangle(vis, (x + cw - 8, y + ch - 8), (x + cw, y + ch), border_color, -1)
+    # Output port "image" = vùng đã cắt (crop result), không phải ảnh gốc
+    # với rectangle overlay → downstream tool thấy đúng vùng ROI để xử lý.
+    # Vẽ nhãn nhỏ ở góc trái trên ROI để biết source x,y,w,h và mode.
+    vis_roi = _bgr(roi.copy())
+    label = f"[{mode_label}] ({x},{y}) {cw}x{ch}"  # 'x' ASCII (cv2.putText
+    # không hỗ trợ unicode ×). Outline đen + chữ màu border_color cho dễ đọc.
+    cv2.putText(vis_roi, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.putText(vis_roi, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                border_color, 1, cv2.LINE_AA)
 
-    return {"image": vis, "roi_image": roi, "x": x, "y": y, "w": cw, "h": ch}
+    return {"image": vis_roi, "roi_image": roi,
+            "x": x, "y": y, "w": cw, "h": ch}
 
 
 # ═══════════════════════════════════════════════════════════════════
