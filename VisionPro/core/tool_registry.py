@@ -1038,10 +1038,18 @@ def proc_crop(inputs, params):
         dx, dy, dw, dh = [int(v) for v in drawn]
         manual_src = "MANUAL ROI"
     else:
+        # First-run init: chưa từng drawn, chưa từng có port → default w/h
+        # = kích thước ảnh nguồn (full image), không phải 320x240 cứng.
+        if not params.get("_crop_initialized"):
+            params["x"] = 0
+            params["y"] = 0
+            params["crop_w"] = iw
+            params["crop_h"] = ih
+            params["_crop_initialized"] = True
         dx = int(params.get("x", 0))
         dy = int(params.get("y", 0))
-        dw = int(params.get("crop_w", 320))
-        dh = int(params.get("crop_h", 240))
+        dw = int(params.get("crop_w", iw))
+        dh = int(params.get("crop_h", ih))
         manual_src = "PARAMS"
 
     # Per-port override
@@ -1068,6 +1076,15 @@ def proc_crop(inputs, params):
     y  = max(0, min(y,  ih - 1))
     cw = max(1, min(cw, iw - x))
     ch = max(1, min(ch, ih - y))
+
+    # Persist giá trị thực tế (đã clamp) ngược vào params nếu nguồn là
+    # MANUAL ROI / PARAMS — để spinbox hiển thị đúng vùng đang cắt sau khi
+    # user vẽ ROI rồi Run. Không ghi đè khi đang TRACKED qua port.
+    if not tracked_ports:
+        params["x"] = x
+        params["y"] = y
+        params["crop_w"] = cw
+        params["crop_h"] = ch
 
     roi = img[y:y + ch, x:x + cw].copy()
 

@@ -1165,6 +1165,18 @@ class NodeDetailDialog(QDialog):
             "color:#00d4ff; font-size:10px; font-weight:700; letter-spacing:2px;")
         img_hdr.addWidget(img_lbl); img_hdr.addStretch()
 
+        # Reset Image button — chỉ hiện cho Crop ROI: xoá drawn_roi + đưa
+        # x/y/w/h về full ảnh nguồn để vẽ lại từ đầu.
+        if tool.tool_id == "crop_roi":
+            btn_reset = QPushButton("🔄  Reset Image")
+            btn_reset.setFixedHeight(26)
+            btn_reset.setStyleSheet(
+                "QPushButton{background:#1e2d45;border:1px solid #3a4b6a;"
+                "color:#94a3b8;font-size:11px;padding:0 12px;border-radius:4px;}"
+                "QPushButton:hover{background:#2c3e60;color:#00d4ff;}")
+            btn_reset.clicked.connect(self._on_reset_crop_image)
+            img_hdr.addWidget(btn_reset)
+
         # ── Chọn mode interactive theo tool ──────────────────────
         self._roi_port_connected = False
 
@@ -1375,11 +1387,15 @@ class NodeDetailDialog(QDialog):
     def _on_roi_changed(self, x, y, w, h):
         """
         Kéo chuột vẽ ROI thủ công → lưu vào _drawn_roi.
-        Không ghi đè x/y/crop_w/crop_h (đó là params spinbox).
-        proc_crop sẽ đọc _drawn_roi khi không có port kết nối.
+        Sync luôn x/y/crop_w/crop_h vào params + spinbox để hiển thị
+        đúng vùng đang được cắt.
         """
         node = self._node
         node.params["_drawn_roi"] = (x, y, w, h)
+        node.params["x"]      = int(x)
+        node.params["y"]      = int(y)
+        node.params["crop_w"] = int(w)
+        node.params["crop_h"] = int(h)
 
         # Cập nhật spinbox params để hiển thị (nhưng _drawn_roi là nguồn truth)
         for name, val in [("x", x), ("y", y), ("crop_w", w), ("crop_h", h)]:
@@ -1388,6 +1404,43 @@ class NodeDetailDialog(QDialog):
                 ed = pr._editor
                 if hasattr(ed, "setValue"):
                     ed.blockSignals(True); ed.setValue(val); ed.blockSignals(False)
+
+    def _on_reset_crop_image(self):
+        """Reset Crop ROI về full ảnh nguồn — xoá _drawn_roi + set
+        x=y=0, w/h = kích thước input image."""
+        node = self._node
+        # Tìm input image: ưu tiên upstream output, fallback node.outputs
+        src_img = None
+        if self._graph:
+            for c in self._graph.connections:
+                if c.dst_id == node.node_id and c.dst_port == "image":
+                    s = self._graph.nodes.get(c.src_id)
+                    if s and "image" in s.outputs:
+                        src_img = s.outputs["image"]; break
+        if src_img is None:
+            src_img = node.outputs.get("image")
+        if src_img is None:
+            QMessageBox.information(self, "Reset Image",
+                "Chưa có ảnh nguồn — chạy pipeline trước rồi reset.")
+            return
+        h, w = src_img.shape[:2]
+        node.params.pop("_drawn_roi", None)
+        node.params["x"]      = 0
+        node.params["y"]      = 0
+        node.params["crop_w"] = int(w)
+        node.params["crop_h"] = int(h)
+        node.params["_crop_initialized"] = True
+        # Sync spinbox
+        for name, val in [("x", 0), ("y", 0), ("crop_w", w), ("crop_h", h)]:
+            pr = getattr(self, "_param_rows", {}).get(name)
+            if pr:
+                ed = pr._editor
+                if hasattr(ed, "setValue"):
+                    ed.blockSignals(True); ed.setValue(val); ed.blockSignals(False)
+        # Clear vẽ trên ảnh
+        if hasattr(self, "_img_label"):
+            self._img_label.set_rect_from_params(0, 0, w, h)
+        self._img_info.setText(f"🔄 Reset → full image ({w}x{h})")
 
         # Cập nhật info label
         self._img_info.setText(
