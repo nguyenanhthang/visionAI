@@ -281,6 +281,9 @@ class MainWindow(QMainWindow):
         act_plc = tools_m.addAction("🔌  PLC Connection…")
         act_plc.setShortcut("Ctrl+P")
         act_plc.triggered.connect(self._open_plc_dialog)
+        act_cam = tools_m.addAction("📷  Camera Setup…")
+        act_cam.setShortcut("Ctrl+Shift+C")
+        act_cam.triggered.connect(self._open_camera_dialog)
 
         help_m = mb.addMenu("Help")
         help_m.addAction("About").triggered.connect(self._about)
@@ -608,6 +611,13 @@ class MainWindow(QMainWindow):
         self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
         self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
         self._plc_dialog.show()
+
+    def _open_camera_dialog(self):
+        from ui.camera_dialog import CameraSetupDialog
+        if getattr(self, "_cam_dialog", None) and self._cam_dialog.isVisible():
+            self._cam_dialog.raise_(); self._cam_dialog.activateWindow(); return
+        self._cam_dialog = CameraSetupDialog(self)
+        self._cam_dialog.show()
 
     def _on_plc_trigger(self):
         """PLC kích hoạt → chạy pipeline (chỉ khi đang idle)."""

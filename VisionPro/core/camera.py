@@ -284,6 +284,151 @@ class MVSCamera(CameraDriver):
 
             return self._convert_to_ndarray(frame_info, pix, hdr)
 
+    # ── Camera parameter access ──
+    def _ensure_open(self):
+        if not self.is_open or self._cam is None:
+            raise CameraError("Camera not open")
+
+    def get_int(self, key: str) -> Dict[str, int]:
+        """Trả về dict: {current, min, max, inc} cho int parameter."""
+        self._ensure_open()
+        _, _, hdr, _ = self._mvs
+        v = hdr.MVCC_INTVALUE_EX()
+        ret = self._cam.MV_CC_GetIntValueEx(key, v)
+        if ret != 0:
+            raise CameraError(f"GetIntValueEx({key}) failed 0x{ret:x}")
+        return {"current": int(v.nCurValue), "min": int(v.nMin),
+                "max": int(v.nMax), "inc": int(v.nInc)}
+
+    def set_int(self, key: str, value: int) -> None:
+        self._ensure_open()
+        ret = self._cam.MV_CC_SetIntValueEx(key, int(value))
+        if ret != 0:
+            raise CameraError(f"SetIntValueEx({key}, {value}) failed 0x{ret:x}")
+
+    def get_float(self, key: str) -> Dict[str, float]:
+        self._ensure_open()
+        _, _, hdr, _ = self._mvs
+        v = hdr.MVCC_FLOATVALUE()
+        ret = self._cam.MV_CC_GetFloatValue(key, v)
+        if ret != 0:
+            raise CameraError(f"GetFloatValue({key}) failed 0x{ret:x}")
+        return {"current": float(v.fCurValue),
+                "min": float(v.fMin), "max": float(v.fMax)}
+
+    def set_float(self, key: str, value: float) -> None:
+        self._ensure_open()
+        ret = self._cam.MV_CC_SetFloatValue(key, float(value))
+        if ret != 0:
+            raise CameraError(f"SetFloatValue({key}, {value}) failed 0x{ret:x}")
+
+    def get_enum(self, key: str) -> Dict[str, Any]:
+        self._ensure_open()
+        _, _, hdr, _ = self._mvs
+        v = hdr.MVCC_ENUMVALUE()
+        ret = self._cam.MV_CC_GetEnumValue(key, v)
+        if ret != 0:
+            raise CameraError(f"GetEnumValue({key}) failed 0x{ret:x}")
+        return {"current": int(v.nCurValue),
+                "supported": [int(v.nSupportValue[i]) for i in range(int(v.nSupportedNum))]}
+
+    def set_enum(self, key: str, value: int) -> None:
+        self._ensure_open()
+        ret = self._cam.MV_CC_SetEnumValue(key, int(value))
+        if ret != 0:
+            raise CameraError(f"SetEnumValue({key}, {value}) failed 0x{ret:x}")
+
+    def set_enum_str(self, key: str, value: str) -> None:
+        self._ensure_open()
+        ret = self._cam.MV_CC_SetEnumValueByString(key, value)
+        if ret != 0:
+            raise CameraError(f"SetEnumValueByString({key}, {value}) failed 0x{ret:x}")
+
+    def get_bool(self, key: str) -> bool:
+        from ctypes import c_bool
+        self._ensure_open()
+        v = c_bool(False)
+        ret = self._cam.MV_CC_GetBoolValue(key, v)
+        if ret != 0:
+            raise CameraError(f"GetBoolValue({key}) failed 0x{ret:x}")
+        return bool(v.value)
+
+    def set_bool(self, key: str, value: bool) -> None:
+        self._ensure_open()
+        ret = self._cam.MV_CC_SetBoolValue(key, bool(value))
+        if ret != 0:
+            raise CameraError(f"SetBoolValue({key}, {value}) failed 0x{ret:x}")
+
+    def execute_command(self, key: str) -> None:
+        """Trigger 1 command param như TriggerSoftware, UserSetLoad…"""
+        self._ensure_open()
+        ret = self._cam.MV_CC_SetCommandValue(key)
+        if ret != 0:
+            raise CameraError(f"SetCommandValue({key}) failed 0x{ret:x}")
+
+    def save_features(self, file_path: str) -> None:
+        """Xuất toàn bộ feature ra file .mfs (đọc được trong MVS Studio)."""
+        self._ensure_open()
+        ret = self._cam.MV_CC_FeatureSave(file_path.encode('ascii'))
+        if ret != 0:
+            raise CameraError(f"FeatureSave failed 0x{ret:x}")
+
+    def load_features(self, file_path: str) -> None:
+        """Nạp feature từ file .mfs."""
+        self._ensure_open()
+        ret = self._cam.MV_CC_FeatureLoad(file_path.encode('ascii'))
+        if ret != 0:
+            raise CameraError(f"FeatureLoad failed 0x{ret:x}")
+
+    # ── Convenience setters ──
+    def set_exposure(self, microseconds: float) -> None:
+        """Tắt auto exposure rồi set giá trị (μs)."""
+        try:
+            self.set_enum_str("ExposureAuto", "Off")
+        except CameraError:
+            pass
+        self.set_float("ExposureTime", microseconds)
+
+    def set_gain(self, db: float) -> None:
+        try:
+            self.set_enum_str("GainAuto", "Off")
+        except CameraError:
+            pass
+        self.set_float("Gain", db)
+
+    def set_frame_rate(self, fps: float) -> None:
+        try:
+            self.set_bool("AcquisitionFrameRateEnable", True)
+        except CameraError:
+            pass
+        self.set_float("AcquisitionFrameRate", fps)
+
+    def set_trigger_mode(self, on: bool) -> None:
+        self.set_enum_str("TriggerMode", "On" if on else "Off")
+
+    def set_pixel_format(self, format_name: str) -> None:
+        """Phải Stop grabbing trước khi đổi PixelFormat."""
+        was_grabbing = self.is_open
+        if was_grabbing:
+            try:
+                self._cam.MV_CC_StopGrabbing()
+            except Exception:
+                pass
+        try:
+            self.set_enum_str("PixelFormat", format_name)
+        finally:
+            if was_grabbing:
+                # Re-allocate buffer & restart
+                _, _, hdr, _ = self._mvs
+                payload = hdr.MVCC_INTVALUE_EX()
+                if self._cam.MV_CC_GetIntValueEx("PayloadSize", payload) == 0:
+                    new_size = int(payload.nCurValue)
+                    if new_size != self._payload_size:
+                        from ctypes import c_ubyte
+                        self._payload_size = new_size
+                        self._buf = (c_ubyte * new_size)()
+                self._cam.MV_CC_StartGrabbing()
+
     # ── pixel conversion (no msvcrt — works cross-version) ──
     def _convert_to_ndarray(self, frame_info, pix, hdr) -> np.ndarray:
         from ctypes import byref, cast, POINTER, c_ubyte, memset, sizeof
