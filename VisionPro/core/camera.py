@@ -509,30 +509,83 @@ class CameraRegistry:
         if backend == "opencv":
             key = f"opencv:{kwargs.get('index', 0)}"
         elif backend == "mvs":
-            if kwargs.get("serial"):
-                key = f"mvs:sn={kwargs['serial']}"
-            else:
-                key = f"mvs:idx={kwargs.get('device_index', 0)}"
+            # Canonical key bằng serial — bất kể caller dùng index hay serial,
+            # cùng 1 cam vật lý luôn map về cùng 1 key → tránh xung đột
+            # exclusive lock giữa CameraSetup dialog và Camera Acquire tool.
+            canonical = self._resolve_mvs_canonical(kwargs)
+            kwargs["serial"] = canonical  # ép driver mở bằng serial
+            key = f"mvs:{canonical}"
         else:
             raise CameraError(f"Unknown camera backend: {backend}")
 
         with self._lock:
             cam = self._cams.get(key)
-            if cam is None or not cam.is_open:
-                if backend == "opencv":
-                    cam = OpenCVCamera(
-                        index=int(kwargs.get("index", 0)),
-                        width=int(kwargs.get("width", 0)),
-                        height=int(kwargs.get("height", 0)))
-                else:
-                    cam = MVSCamera(
-                        device_index=int(kwargs.get("device_index", 0)),
-                        serial=kwargs.get("serial"),
-                        access_mode=kwargs.get("access_mode", "exclusive"),
-                        heartbeat_ms=int(kwargs.get("heartbeat_ms", 5000)))
-                cam.open()
-                self._cams[key] = cam
+            if cam is not None and cam.is_open:
+                return cam
+            # cleanup stale closed entry
+            if cam is not None:
+                try: cam.close()
+                except Exception: pass
+                self._cams.pop(key, None)
+
+            if backend == "opencv":
+                cam = OpenCVCamera(
+                    index=int(kwargs.get("index", 0)),
+                    width=int(kwargs.get("width", 0)),
+                    height=int(kwargs.get("height", 0)))
+            else:
+                cam = MVSCamera(
+                    device_index=int(kwargs.get("device_index", 0)),
+                    serial=kwargs.get("serial"),
+                    access_mode=kwargs.get("access_mode", "exclusive"),
+                    heartbeat_ms=int(kwargs.get("heartbeat_ms", 5000)))
+            cam.open()
+            self._cams[key] = cam
             return cam
+
+    def _resolve_mvs_canonical(self, kwargs: dict) -> str:
+        """Enumerate MVS devices và trả về serial canonical cho 1 cam.
+
+        Ưu tiên: serial trong kwargs → dùng nguyên.
+        Else: enumerate, lấy serial theo device_index.
+        Fallback: nếu serial trống/missing, dùng "model@ip" (GigE) hoặc "idxN".
+        """
+        sn = (kwargs.get("serial") or "").strip()
+        if sn:
+            return sn
+        try:
+            devs = MVSCamera.list_devices()
+        except Exception as e:
+            raise CameraError(f"MVS enumerate failed: {e}")
+        if not devs:
+            raise CameraError("No MVS camera found")
+        idx = int(kwargs.get("device_index", 0))
+        if idx >= len(devs):
+            raise CameraError(
+                f"MVS device index {idx} out of range ({len(devs)} devices)")
+        d = devs[idx]
+        return (d.get("serial") or "").strip() or (
+            f"{d.get('model','?')}@{d.get('ip')}" if d.get('ip')
+            else f"idx{idx}")
+
+    def close(self, backend: str, **kwargs) -> None:
+        """Đóng tường minh 1 camera theo key (cùng quy tắc với get_or_open)."""
+        backend = backend.lower()
+        if backend == "opencv":
+            key = f"opencv:{kwargs.get('index', 0)}"
+        elif backend == "mvs":
+            try:
+                canonical = self._resolve_mvs_canonical(kwargs)
+            except CameraError:
+                return
+            key = f"mvs:{canonical}"
+        else:
+            return
+        with self._lock:
+            cam = self._cams.pop(key, None)
+        if cam is not None:
+            try: cam.close()
+            except Exception: pass
 
     def close_all(self) -> None:
         with self._lock:

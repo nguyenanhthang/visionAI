@@ -292,11 +292,11 @@ class CameraSetupDialog(QDialog):
         if not data:
             QMessageBox.warning(self, "No device", "Chọn 1 device hợp lệ trước.")
             return
-        self._stop_preview()  # stop any previous preview
-        if self._cam is not None:
-            try: self._cam.close()
-            except Exception: pass
-            self._cam = None
+        self._stop_preview()
+        # Không đóng cam cũ thủ công — registry sẽ tái dùng nếu cùng device,
+        # hoặc cấp instance mới nếu khác. Cam cũ vẫn nằm trong registry để
+        # pipeline / Camera Acquire tool dùng chung.
+        self._cam = None
 
         reg = CameraRegistry.instance()
         try:
@@ -322,8 +322,18 @@ class CameraSetupDialog(QDialog):
     def _close_camera(self):
         self._stop_preview()
         if self._cam is not None:
+            # Đóng qua registry để pop entry → lần Open kế dùng instance mới
+            data = self.cb_device.currentData() or {}
+            reg = CameraRegistry.instance()
             try:
-                self._cam.close()
+                if data.get("backend") == "opencv":
+                    reg.close("opencv", index=data.get("index", 0))
+                elif data.get("backend") == "mvs":
+                    reg.close("mvs",
+                              device_index=data.get("device_index", 0),
+                              serial=data.get("serial"))
+                else:
+                    self._cam.close()
             except Exception:
                 pass
             self._cam = None
