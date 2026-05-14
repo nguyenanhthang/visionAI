@@ -124,17 +124,38 @@ def proc_acquire_image(inputs, params):
             "frame_number": 0, "file_name": "", "frame_count": 0}
 
 def proc_camera_acquire(inputs, params):
-    """CogAcqFifoTool (Camera) — Capture từ camera."""
-    cap = cv2.VideoCapture(params.get("camera_id",0))
-    if params.get("width",0)>0: cap.set(cv2.CAP_PROP_FRAME_WIDTH,params["width"])
-    if params.get("height",0)>0: cap.set(cv2.CAP_PROP_FRAME_HEIGHT,params["height"])
-    ret, frame = cap.read(); cap.release()
-    if not ret:
-        frame = np.zeros((480,640,3),dtype=np.uint8)
-        cv2.putText(frame,"Camera Error",(200,240),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,200),2)
-        return {"image":frame,"width":640,"height":480,"acquired":False,"frame_number":0}
-    h,w = frame.shape[:2]
-    return {"image":frame,"width":w,"height":h,"acquired":True,"frame_number":0}
+    """CogAcqFifoTool (Camera) — Capture từ OpenCV/USB hoặc HikRobot/Do3think MVS."""
+    backend = (params.get("backend") or "OpenCV").strip()
+    try:
+        from core.camera import CameraRegistry, CameraError
+        reg = CameraRegistry.instance()
+        if backend in ("HikRobot/Do3think", "HikRobot", "Do3think", "MVS"):
+            kwargs = {"device_index": int(params.get("device_index", 0))}
+            sn = (params.get("serial") or "").strip()
+            if sn:
+                kwargs["serial"] = sn
+            kwargs["access_mode"] = (params.get("access_mode") or "exclusive").lower()
+            kwargs["heartbeat_ms"] = int(params.get("heartbeat_ms", 5000))
+            cam = reg.get_or_open("mvs", **kwargs)
+        else:
+            cam = reg.get_or_open(
+                "opencv",
+                index=int(params.get("camera_id", 0)),
+                width=int(params.get("width", 0)),
+                height=int(params.get("height", 0)))
+        frame = cam.grab(timeout_ms=int(params.get("timeout_ms", 1000)))
+    except Exception as e:
+        msg = str(e)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(frame, f"Cam err: {msg[:40]}", (10, 240),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 200), 2)
+        return {"image": frame, "width": 640, "height": 480,
+                "acquired": False, "frame_number": 0}
+    if frame.ndim == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    h, w = frame.shape[:2]
+    return {"image": frame, "width": w, "height": h,
+            "acquired": True, "frame_number": 0}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1431,12 +1452,31 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_acquire_image, "CogAcqFifoTool"),
 
   ToolDef("camera_acquire","Camera Acquire","Acquire Image",
-    "Capture từ camera — CogAcqFifoTool","#0f3460","📷",
+    "Capture từ camera (OpenCV / HikRobot / Do3think) — CogAcqFifoTool","#0f3460","📷",
     [],[PortDef("image","image"),PortDef("width","number"),PortDef("height","number"),
         PortDef("acquired","bool")],
-    [P("camera_id","Camera ID","int",0,0,16),
-     P("width","Width","int",0,0,8192,tooltip="0=auto"),
-     P("height","Height","int",0,0,8192,tooltip="0=auto")],
+    [P("backend","Backend","enum","OpenCV",
+        choices=["OpenCV","HikRobot/Do3think"],
+        tooltip="OpenCV cho USB UVC; HikRobot/Do3think dùng MVS SDK (Windows only)"),
+     P("camera_id","OpenCV index","int",0,0,16,
+        visible_if={"backend":"OpenCV"}),
+     P("width","Width","int",0,0,8192,tooltip="0=auto",
+        visible_if={"backend":"OpenCV"}),
+     P("height","Height","int",0,0,8192,tooltip="0=auto",
+        visible_if={"backend":"OpenCV"}),
+     P("device_index","MVS device index","int",0,0,16,
+        tooltip="0-based theo enumeration order",
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("serial","MVS serial number","str","",
+        tooltip="Để trống để dùng device_index. Khuyến nghị dùng serial khi có nhiều cam.",
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("access_mode","Access mode","enum","exclusive",
+        choices=["exclusive","monitor","control"],
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("heartbeat_ms","Heartbeat (ms)","int",5000,500,60000,
+        tooltip="GigE heartbeat timeout",
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("timeout_ms","Grab timeout (ms)","int",1000,10,30000)],
     proc_camera_acquire, "CogAcqFifoTool"),
 
   # ── PATTERN FIND ────────────────────────────────────────────────

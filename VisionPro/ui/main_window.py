@@ -681,4 +681,9 @@ class MainWindow(QMainWindow):
             self._plc_manager.disconnect()
         except Exception:
             pass
+        try:
+            from core.camera import CameraRegistry
+            CameraRegistry.instance().close_all()
+        except Exception:
+            pass
         super().closeEvent(event)
