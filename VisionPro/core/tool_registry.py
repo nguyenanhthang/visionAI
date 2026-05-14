@@ -61,11 +61,30 @@ def _bgr(img):
     if img is None: return None
     return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if len(img.shape)==2 else img
 
+# Kích thước tham chiếu (cạnh ngắn). Ảnh nhỏ hơn → scale = 1.0;
+# ảnh lớn hơn → scale tăng theo tỷ lệ để chữ & nét không bị tí hon.
+_DRAW_BASE_DIM = 720.0
+
+def _draw_scale(img):
+    if img is None:
+        return 1.0
+    h, w = img.shape[:2]
+    short = min(h, w)
+    return max(1.0, short / _DRAW_BASE_DIM)
+
+def _t(base, s):
+    """Scaled line/box thickness (>=1)."""
+    return max(1, int(round(base * s)))
+
+def _fs(base, s):
+    """Scaled font scale for cv2.putText."""
+    return float(base) * s
+
 def _draw_pass_fail(img, is_pass, text=""):
     vis = _bgr(img.copy())
-    col = (0,220,80) if is_pass else (0,60,255)
-    label = f"{'✔ PASS' if is_pass else '✖ FAIL'}{' '+text if text else ''}"
-    cv2.putText(vis, label, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, col, 2)
+    # Summary log only — không vẽ banner PASS/FAIL lên ảnh.
+    label = f"{'PASS' if is_pass else 'FAIL'}{' '+text if text else ''}"
+    print(f"[Pipeline] {label}")
     return vis
 
 
@@ -386,8 +405,7 @@ def proc_patfind(inputs, params):
     model: PatMaxModel = params.get("_patmax_model") or PatMaxModel()
     if not model.is_valid():
         vis = _empty_vis(_bgr(img))
-        cv2.putText(vis, "[PatFind] No model — double-click to train",
-                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,100,180), 1)
+        print("[PatFind] No model — double-click node to train")
         return {"image": vis, "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "num_found": 0}
 
@@ -435,12 +453,13 @@ def proc_fixture(inputs, params):
     warped = cv2.warpAffine(img, M, (w,h), borderMode=cv2.BORDER_CONSTANT, borderValue=(30,30,30))
 
     vis = warped.copy()
+    s = _draw_scale(vis)
     # Draw coordinate axes
     ax = int(w/2); ay = int(h/2)
-    cv2.arrowedLine(vis,(ax,ay),(ax+60,ay),(0,80,255),2,tipLength=0.2)
-    cv2.arrowedLine(vis,(ax,ay),(ax,ay-60),(0,220,80),2,tipLength=0.2)
-    cv2.putText(vis,f"Fixture: dx={dx:.1f} dy={dy:.1f} ang={angle:.1f}°",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.55,(0,212,255),2)
+    axis_len = int(60 * s)
+    cv2.arrowedLine(vis,(ax,ay),(ax+axis_len,ay),(0,80,255),_t(2,s),tipLength=0.2)
+    cv2.arrowedLine(vis,(ax,ay),(ax,ay-axis_len),(0,220,80),_t(2,s),tipLength=0.2)
+    print(f"[Fixture] dx={dx:.1f} dy={dy:.1f} angle={angle:.1f}deg")
 
     return {"image":vis,"transform_matrix":M.tolist(),
             "offset_x":float(dx),"offset_y":float(dy),"angle":float(angle)}
@@ -461,6 +480,7 @@ def proc_caliper(inputs, params):
                 "width":0.0,"pass":False,"edges_found":0}
 
     gray = _gray(img); vis = _bgr(img.copy())
+    s = _draw_scale(vis)
 
     # ROI line từ params
     x1 = params.get("x1", img.shape[1]//4)
@@ -512,7 +532,7 @@ def proc_caliper(inputs, params):
     edges.sort(key=lambda e: e[0])
 
     # Draw caliper
-    cv2.line(vis,(x1,y1),(x2,y2),(0,200,255),1)
+    cv2.line(vis,(x1,y1),(x2,y2),(0,200,255),_t(1,s))
     # Width band
     angle_rad = math.atan2(y2-y1, x2-x1)
     perp_x = int(-math.sin(angle_rad)*width_px//2)
@@ -529,10 +549,10 @@ def proc_caliper(inputs, params):
         ex = int(xs[min(pos, len(xs)-1)])
         ey = int(ys[min(pos, len(ys)-1)])
         col = (0,255,80) if idx==0 else (255,180,0)
-        cv2.circle(vis,(ex,ey),6,col,2)
-        cv2.line(vis,(ex+perp_x,ey+perp_y),(ex-perp_x,ey-perp_y),col,2)
-        cv2.putText(vis,f"E{idx+1}:{pos:.1f}",(ex+8,ey-8),
-                    cv2.FONT_HERSHEY_SIMPLEX,0.45,col,1)
+        cv2.circle(vis,(ex,ey),_t(6,s),col,_t(2,s))
+        cv2.line(vis,(ex+perp_x,ey+perp_y),(ex-perp_x,ey-perp_y),col,_t(2,s))
+        cv2.putText(vis,f"E{idx+1}:{pos:.1f}",(ex+int(8*s),ey-int(8*s)),
+                    cv2.FONT_HERSHEY_SIMPLEX,_fs(0.45,s),col,_t(1,s))
         edge_positions.append(float(pos))
 
     e1 = edge_positions[0] if len(edge_positions)>0 else 0.0
@@ -544,9 +564,7 @@ def proc_caliper(inputs, params):
     min_w = params.get("min_width", 0.0)
     max_w = params.get("max_width", 9999.0)
     is_pass = (len(edge_positions) >= max(1,num_edges)) and (min_w <= width_mm <= max_w)
-    col = (0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Width:{width_mm:.3f}mm Edges:{len(edges)} {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[Caliper] width={width_mm:.3f}mm edges={len(edges)} {'PASS' if is_pass else 'FAIL'}")
 
     return {"image":vis,"edge1_pos":e1,"edge2_pos":e2,
             "width":width_mm,"pass":is_pass,"edges_found":len(edges)}
@@ -557,6 +575,7 @@ def proc_caliper_multi(inputs, params):
     if img is None:
         return {"image":None,"edges":[],"count":0,"pass":False}
     gray = _gray(img); vis = _bgr(img.copy())
+    s = _draw_scale(vis)
     x1=params.get("x1",0); y1=params.get("y1",img.shape[0]//2)
     x2=params.get("x2",img.shape[1]); y2=params.get("y2",img.shape[0]//2)
     length=int(math.hypot(x2-x1,y2-y1))
@@ -573,14 +592,12 @@ def proc_caliper_multi(inputs, params):
             edges.append({"pos":float(i),"strength":float(abs(deriv[i])),
                           "polarity":"D→L" if deriv[i]>0 else "L→D",
                           "x":int(xs[i]),"y":int(ys[i])})
-    cv2.line(vis,(x1,y1),(x2,y2),(0,200,255),1)
+    cv2.line(vis,(x1,y1),(x2,y2),(0,200,255),_t(1,s))
     for e in edges:
-        cv2.circle(vis,(e["x"],e["y"]),5,(0,255,200),2)
+        cv2.circle(vis,(e["x"],e["y"]),_t(5,s),(0,255,200),_t(2,s))
     min_c=params.get("min_count",1); max_c=params.get("max_count",100)
     is_pass=min_c<=len(edges)<=max_c
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Edges:{len(edges)} {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[CaliperMulti] edges={len(edges)} {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"edges":edges,"count":len(edges),"pass":is_pass}
 
 
@@ -628,6 +645,7 @@ def proc_blob(inputs, params):
     max_elo  = params.get("max_elongation", 1000.0)
 
     vis = _bgr(img.copy())
+    s = _draw_scale(vis)
     blobs = []; centroids = []; total_area = 0.0
 
     for cnt in contours:
@@ -667,18 +685,16 @@ def proc_blob(inputs, params):
 
         # Draw
         box = cv2.boxPoints(rect).astype(np.int32)
-        cv2.drawContours(vis,[cnt],-1,(0,200,255),2)
-        cv2.drawContours(vis,[box],-1,(255,180,0),1)
-        cv2.circle(vis,(int(cx),int(cy)),4,(0,255,80),-1)
-        cv2.putText(vis,f"{area_mm:.1f}mm²",(int(cx)+6,int(cy)-6),
-                    cv2.FONT_HERSHEY_SIMPLEX,0.45,(0,200,255),1)
+        cv2.drawContours(vis,[cnt],-1,(0,200,255),_t(2,s))
+        cv2.drawContours(vis,[box],-1,(255,180,0),_t(1,s))
+        cv2.circle(vis,(int(cx),int(cy)),_t(4,s),(0,255,80),-1)
+        cv2.putText(vis,f"{area_mm:.1f}mm²",(int(cx)+int(6*s),int(cy)-int(6*s)),
+                    cv2.FONT_HERSHEY_SIMPLEX,_fs(0.45,s),(0,200,255),_t(1,s))
 
     min_cnt = params.get("min_count", 1)
     max_cnt = params.get("max_count", 1000)
     is_pass = min_cnt <= len(blobs) <= max_cnt
-    col = (0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Blobs:{len(blobs)} Area:{total_area:.2f}mm² {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² {'PASS' if is_pass else 'FAIL'}")
 
     return {"image":vis,"count":len(blobs),"pass":is_pass,
             "total_area":total_area,"blobs":blobs,"centroids":centroids}
@@ -695,6 +711,7 @@ def proc_find_line(inputs, params):
         return {"image":None,"found":False,"angle":0.0,"distance":0.0,
                 "point_x":0.0,"point_y":0.0,"pass":False}
     gray = _gray(img); vis = _bgr(img.copy())
+    s = _draw_scale(vis)
     h,w  = gray.shape
     t1   = params.get("canny_low",50); t2=params.get("canny_high",150)
     edges= cv2.Canny(gray,t1,t2)
@@ -717,18 +734,16 @@ def proc_find_line(inputs, params):
         t_range=max(w,h)*2
         pt1=(int(px-vx*t_range),int(py-vy*t_range))
         pt2=(int(px+vx*t_range),int(py+vy*t_range))
-        cv2.line(vis,pt1,pt2,(0,220,80),2)
-        cv2.circle(vis,(int(px),int(py)),6,(0,220,80),-1)
+        cv2.line(vis,pt1,pt2,(0,220,80),_t(2,s))
+        cv2.circle(vis,(int(px),int(py)),_t(6,s),(0,220,80),-1)
         # Distance from image center
         dist=float(math.hypot(px-w/2,py-h/2))*params.get("pixel_to_mm",1.0)
         found=True
 
-    cv2.rectangle(vis,(rx1,ry1),(rx2,ry2),(0,150,200),1)
+    cv2.rectangle(vis,(rx1,ry1),(rx2,ry2),(0,150,200),_t(1,s))
     ang_min=params.get("min_angle",-180.0); ang_max=params.get("max_angle",180.0)
     is_pass=found and (ang_min<=angle<=ang_max)
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Line: ang={angle:.2f}° {'PASS' if is_pass else 'NOT FOUND'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[FindLine] angle={angle:.2f}deg {'PASS' if is_pass else ('FAIL' if found else 'NOT FOUND')}")
     return {"image":vis,"found":found,"angle":angle,"distance":dist,
             "point_x":px,"point_y":py,"pass":is_pass}
 
@@ -739,6 +754,7 @@ def proc_find_circle(inputs, params):
         return {"image":None,"found":False,"cx":0.0,"cy":0.0,
                 "radius":0.0,"pass":False}
     gray=_gray(img); vis=_bgr(img.copy())
+    s = _draw_scale(vis)
     blurred=cv2.GaussianBlur(gray,(9,9),2)
     circles=cv2.HoughCircles(blurred,cv2.HOUGH_GRADIENT,
         params.get("dp",1.2),params.get("min_dist",30),
@@ -750,18 +766,16 @@ def proc_find_circle(inputs, params):
         c=circles[0][0]
         cx=float(c[0]); cy=float(c[1]); radius=float(c[2])
         found=True
-        cv2.circle(vis,(int(cx),int(cy)),int(radius),(0,220,80),2)
-        cv2.circle(vis,(int(cx),int(cy)),3,(0,220,80),-1)
-        cv2.line(vis,(int(cx),int(cy)),(int(cx+radius),int(cy)),(100,200,255),1)
-        s=params.get("pixel_to_mm",1.0)
-        cv2.putText(vis,f"R={radius*s:.3f}mm cx={cx:.1f} cy={cy:.1f}",
-                    (int(cx-radius),max(0,int(cy-radius)-8)),
-                    cv2.FONT_HERSHEY_SIMPLEX,0.55,(0,220,80),2)
+        cv2.circle(vis,(int(cx),int(cy)),int(radius),(0,220,80),_t(2,s))
+        cv2.circle(vis,(int(cx),int(cy)),_t(3,s),(0,220,80),-1)
+        cv2.line(vis,(int(cx),int(cy)),(int(cx+radius),int(cy)),(100,200,255),_t(1,s))
+        px2mm=params.get("pixel_to_mm",1.0)
+        cv2.putText(vis,f"R={radius*px2mm:.3f}mm cx={cx:.1f} cy={cy:.1f}",
+                    (int(cx-radius),max(0,int(cy-radius)-int(8*s))),
+                    cv2.FONT_HERSHEY_SIMPLEX,_fs(0.55,s),(0,220,80),_t(2,s))
     min_r=params.get("min_r_check",0.0); max_r=params.get("max_r_check",9999.0)
     is_pass=found and (min_r<=radius*params.get("pixel_to_mm",1.0)<=max_r)
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"{'PASS' if is_pass else 'FAIL' if found else 'NOT FOUND'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.75,col,2)
+    print(f"[FindCircle] {'PASS' if is_pass else ('FAIL' if found else 'NOT FOUND')} r={radius:.2f}px")
     return {"image":vis,"found":found,"cx":cx,"cy":cy,
             "radius":radius*params.get("pixel_to_mm",1.0),"pass":is_pass}
 
@@ -785,10 +799,12 @@ def proc_color_picker(inputs, params):
     color_hsv=[max(0,H-tol),max(0,S-tol),max(0,V-tol),
                min(180,H+tol),min(255,S+tol),min(255,V+tol)]
     vis=bgr.copy()
-    cv2.circle(vis,(x,y),10,(0,255,255),2)
-    cv2.rectangle(vis,(x+12,y-20),(x+42,y+10),(B,G,R),-1)
-    cv2.rectangle(vis,(x+12,y-20),(x+42,y+10),(255,255,255),1)
-    cv2.putText(vis,f"H{H} S{S} V{V}",(x+46,y),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,255),1)
+    s = _draw_scale(vis)
+    cv2.circle(vis,(x,y),_t(10,s),(0,255,255),_t(2,s))
+    sw_x1=x+int(12*s); sw_y1=y-int(20*s); sw_x2=x+int(42*s); sw_y2=y+int(10*s)
+    cv2.rectangle(vis,(sw_x1,sw_y1),(sw_x2,sw_y2),(B,G,R),-1)
+    cv2.rectangle(vis,(sw_x1,sw_y1),(sw_x2,sw_y2),(255,255,255),_t(1,s))
+    cv2.putText(vis,f"H{H} S{S} V{V}",(x+int(46*s),y),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,255,255),_t(1,s))
     return {"image":vis,"color_hsv":color_hsv,"h":H,"s":S,"v":V,"r":R,"g":G,"b":B}
 
 def proc_color_segment(inputs, params):
@@ -825,9 +841,7 @@ def proc_color_segment(inputs, params):
     is_pass=min_r<=ratio<=max_r
     vis=_bgr(img.copy()); overlay=vis.copy()
     overlay[mask>0]=[0,220,80]; cv2.addWeighted(vis,0.55,overlay,0.45,0,vis)
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"ColorSeg: {ratio:.3f} ({cnt}px) {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[ColorSeg] ratio={ratio:.3f} pixels={cnt} {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"mask":mask,"pass":is_pass,"pixel_ratio":ratio,"pixel_count":cnt}
 
 def proc_color_match(inputs, params):
@@ -850,13 +864,13 @@ def proc_color_match(inputs, params):
     max_de=params.get("max_delta_e",30.0)
     is_pass=delta_e<=max_de
     vis=bgr.copy()
-    cv2.rectangle(vis,(x,y),(x+w,y+h),(0,212,255),2)
+    s = _draw_scale(vis)
+    cv2.rectangle(vis,(x,y),(x+w,y+h),(0,212,255),_t(2,s))
     # Color swatches
-    cv2.rectangle(vis,(x,y+h+2),(x+20,y+h+22),(int(mean_b),int(mean_g),int(mean_r)),-1)
-    cv2.rectangle(vis,(x+24,y+h+2),(x+44,y+h+22),(ref_b,ref_g,ref_r),-1)
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"ΔE:{delta_e:.2f} {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    sw_h=int(20*s); sw_w=int(20*s); pad=int(2*s); gap=int(4*s)
+    cv2.rectangle(vis,(x,y+h+pad),(x+sw_w,y+h+pad+sw_h),(int(mean_b),int(mean_g),int(mean_r)),-1)
+    cv2.rectangle(vis,(x+sw_w+gap,y+h+pad),(x+2*sw_w+gap,y+h+pad+sw_h),(ref_b,ref_g,ref_r),-1)
+    print(f"[ColorMatch] dE={delta_e:.2f} {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"pass":is_pass,"delta_e":delta_e,
             "mean_r":int(mean_r),"mean_g":int(mean_g),"mean_b":int(mean_b)}
 
@@ -870,6 +884,7 @@ def proc_id_reader(inputs, params):
     img=inputs.get("image")
     if img is None: return {"image":None,"data":"","symbology":"","pass":False}
     gray=_gray(img); vis=_bgr(img.copy())
+    s = _draw_scale(vis)
     data=""; symbology=""
     try:
         from pyzbar.pyzbar import decode
@@ -880,7 +895,7 @@ def proc_id_reader(inputs, params):
             pts=obj.polygon
             if pts:
                 hull=cv2.convexHull(np.array([(p.x,p.y) for p in pts],dtype=np.int32))
-                cv2.polylines(vis,[hull],True,(0,220,80),2)
+                cv2.polylines(vis,[hull],True,(0,220,80),_t(2,s))
     except ImportError:
         try:
             det=cv2.QRCodeDetector()
@@ -888,14 +903,12 @@ def proc_id_reader(inputs, params):
             if qr_data: data=qr_data; symbology="QR"
             if pts is not None:
                 pts2=pts.astype(np.int32).reshape((-1,1,2))
-                cv2.polylines(vis,[pts2],True,(0,220,80),2)
+                cv2.polylines(vis,[pts2],True,(0,220,80),_t(2,s))
         except: pass
 
     expected=params.get("expected_data","")
     is_pass=bool(data) and (expected in data if expected else True)
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"{symbology}: {data[:40] if data else 'NOT FOUND'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.6,col,2)
+    print(f"[IDReader] {symbology or 'NONE'}: {data or 'NOT FOUND'} {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"data":data,"symbology":symbology,"pass":is_pass}
 
 def proc_ocr_max(inputs, params):
@@ -903,6 +916,7 @@ def proc_ocr_max(inputs, params):
     img=inputs.get("image")
     if img is None: return {"image":None,"text":"","pass":False,"confidence":0.0}
     gray=_gray(img); vis=_bgr(img.copy())
+    s = _draw_scale(vis)
     try:
         import pytesseract
         data=pytesseract.image_to_data(gray,lang=params.get("lang","eng"),
@@ -914,15 +928,13 @@ def proc_ocr_max(inputs, params):
             if c>0 and t.strip():
                 text+=t+" "; conf+=c; words+=1
                 x2,y2,w2,h2=data["left"][i],data["top"][i],data["width"][i],data["height"][i]
-                cv2.rectangle(vis,(x2,y2),(x2+w2,y2+h2),(0,200,255),1)
+                cv2.rectangle(vis,(x2,y2),(x2+w2,y2+h2),(0,200,255),_t(1,s))
         text=text.strip(); conf=conf/max(words,1)
     except: text="[pytesseract N/A]"; conf=0.0
     expected=params.get("expected_text","")
     min_conf=params.get("min_confidence",60.0)
     is_pass=(expected in text if expected else bool(text)) and conf>=min_conf
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"OCR:{text[:30]} conf:{conf:.0f}% {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.6,col,2)
+    print(f"[OCR] text='{text}' conf={conf:.1f}% {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"text":text,"pass":is_pass,"confidence":conf}
 
 
@@ -939,14 +951,14 @@ def proc_distance_point(inputs, params):
     y2=float(inputs.get("y2",params.get("y2",0)))
     dist=math.hypot(x2-x1,y2-y1)*params.get("pixel_to_mm",1.0)
     vis=_bgr(img.copy()) if img is not None else np.zeros((200,400,3),dtype=np.uint8)
-    cv2.line(vis,(int(x1),int(y1)),(int(x2),int(y2)),(0,220,255),2)
-    cv2.circle(vis,(int(x1),int(y1)),5,(0,200,255),-1)
-    cv2.circle(vis,(int(x2),int(y2)),5,(0,200,255),-1)
+    s = _draw_scale(vis)
+    cv2.line(vis,(int(x1),int(y1)),(int(x2),int(y2)),(0,220,255),_t(2,s))
+    cv2.circle(vis,(int(x1),int(y1)),_t(5,s),(0,200,255),-1)
+    cv2.circle(vis,(int(x2),int(y2)),_t(5,s),(0,200,255),-1)
     mx,my=int((x1+x2)/2),int((y1+y2)/2)
-    cv2.putText(vis,f"{dist:.3f}mm",(mx,my-10),cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,220,255),2)
+    cv2.putText(vis,f"{dist:.3f}mm",(mx,my-int(10*s)),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.6,s),(0,220,255),_t(2,s))
     is_pass=params.get("min_dist",0.0)<=dist<=params.get("max_dist",9999.0)
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Dist: {'PASS' if is_pass else 'FAIL'}",(10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[Distance] {dist:.3f}mm {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"distance":dist,"pass":is_pass}
 
 def proc_angle_lines(inputs, params):
@@ -957,16 +969,15 @@ def proc_angle_lines(inputs, params):
     diff=abs(a1-a2)%180
     if diff>90: diff=180-diff
     vis=_bgr(img.copy()) if img is not None else np.zeros((200,400,3),dtype=np.uint8)
+    s = _draw_scale(vis)
     h2,w2=vis.shape[:2]
     cx,cy=w2//2,h2//2
     for ang,col in [(a1,(0,220,255)),(a2,(255,140,0))]:
         rad=math.radians(ang); l=min(w2,h2)//3
         cv2.line(vis,(cx-int(math.cos(rad)*l),cy-int(math.sin(rad)*l)),
-                      (cx+int(math.cos(rad)*l),cy+int(math.sin(rad)*l)),col,2)
+                      (cx+int(math.cos(rad)*l),cy+int(math.sin(rad)*l)),col,_t(2,s))
     is_pass=params.get("min_angle",0.0)<=diff<=params.get("max_angle",90.0)
-    col2=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Angle:{diff:.2f}° {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col2,2)
+    print(f"[AngleLines] angle={diff:.2f}deg {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"angle":diff,"pass":is_pass}
 
 def proc_area(inputs, params):
@@ -974,6 +985,7 @@ def proc_area(inputs, params):
     img=inputs.get("image"); mask=inputs.get("mask"); contours=inputs.get("contours",[])
     if mask is None and img is not None: mask=_gray(img)
     vis=_bgr(img.copy() if img is not None else np.zeros((100,100,3),dtype=np.uint8))
+    s = _draw_scale(vis)
     scale=params.get("pixel_to_mm2",1.0); areas=[]
     if contours:
         for c in contours:
@@ -981,8 +993,8 @@ def proc_area(inputs, params):
             M2=cv2.moments(c)
             if M2["m00"]>0:
                 ccx=int(M2["m10"]/M2["m00"]); ccy=int(M2["m01"]/M2["m00"])
-                cv2.drawContours(vis,[c],-1,(0,200,255),2)
-                cv2.putText(vis,f"{a_mm:.2f}",(ccx,ccy),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,200,255),1)
+                cv2.drawContours(vis,[c],-1,(0,200,255),_t(2,s))
+                cv2.putText(vis,f"{a_mm:.2f}",(ccx,ccy),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,200,255),_t(1,s))
     elif mask is not None:
         cnts,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
         for c in cnts:
@@ -990,12 +1002,10 @@ def proc_area(inputs, params):
             M2=cv2.moments(c)
             if M2["m00"]>0:
                 ccx=int(M2["m10"]/M2["m00"]); ccy=int(M2["m01"]/M2["m00"])
-                cv2.putText(vis,f"{a_mm:.1f}",(ccx,ccy),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,200,255),1)
+                cv2.putText(vis,f"{a_mm:.1f}",(ccx,ccy),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,200,255),_t(1,s))
     total=sum(areas)
     is_pass=params.get("min_area",0.0)<=total<=params.get("max_area",1e9)
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Area:{total:.3f}mm² n={len(areas)} {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[Area] total={total:.3f}mm² count={len(areas)} {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"total_area":total,"count":len(areas),"pass":is_pass}
 
 
@@ -1108,13 +1118,10 @@ def proc_crop(inputs, params):
                      if v is not None]
     if not tracked_ports:
         mode_label = manual_src
-        border_color = (0, 212, 255) if manual_src == "MANUAL ROI" else (150, 150, 255)
     elif len(tracked_ports) == 4:
         mode_label = "TRACKED"
-        border_color = (0, 255, 180)
     else:
         mode_label = "TRACKED " + "".join(tracked_ports)
-        border_color = (0, 255, 180)
 
     # Clamp
     x  = max(0, min(x,  iw - 1))
@@ -1135,14 +1142,8 @@ def proc_crop(inputs, params):
 
     # Output port "image" = vùng đã cắt (crop result), không phải ảnh gốc
     # với rectangle overlay → downstream tool thấy đúng vùng ROI để xử lý.
-    # Vẽ nhãn nhỏ ở góc trái trên ROI để biết source x,y,w,h và mode.
     vis_roi = _bgr(roi.copy())
-    label = f"[{mode_label}] ({x},{y}) {cw}x{ch}"  # 'x' ASCII (cv2.putText
-    # không hỗ trợ unicode ×). Outline đen + chữ màu border_color cho dễ đọc.
-    cv2.putText(vis_roi, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                (0, 0, 0), 2, cv2.LINE_AA)
-    cv2.putText(vis_roi, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                border_color, 1, cv2.LINE_AA)
+    print(f"[Crop] {mode_label} ({x},{y}) {cw}x{ch}")
 
     return {"image": vis_roi, "roi_image": roi,
             "x": x, "y": y, "w": cw, "h": ch}
@@ -1175,13 +1176,13 @@ def proc_surface_defect(inputs, params):
     defect_area=int(sum(cv2.contourArea(c) for c in cnts))
     max_a=params.get("max_defect_area",1000); max_c=params.get("max_defect_count",0)
     is_pass=defect_area<=max_a and len(cnts)<=max(max_c,0 if max_c==0 else 999)
-    vis=bgr.copy(); cv2.drawContours(vis,cnts,-1,(0,60,255),2)
+    vis=bgr.copy()
+    s = _draw_scale(vis)
+    cv2.drawContours(vis,cnts,-1,(0,60,255),_t(2,s))
     for c in cnts:
         x2,y2,w2,h2=cv2.boundingRect(c)
-        cv2.rectangle(vis,(x2,y2),(x2+w2,y2+h2),(0,60,255),1)
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Defect:{defect_area}px² count:{len(cnts)} {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+        cv2.rectangle(vis,(x2,y2),(x2+w2,y2+h2),(0,60,255),_t(1,s))
+    print(f"[SurfaceDefect] area={defect_area}px² count={len(cnts)} {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"pass":is_pass,"defect_area":defect_area,"defect_count":len(cnts)}
 
 def proc_scratch_detect(inputs, params):
@@ -1189,6 +1190,7 @@ def proc_scratch_detect(inputs, params):
     img=inputs.get("image")
     if img is None: return {"image":None,"pass":False,"scratch_count":0,"total_length":0.0}
     gray=_gray(img); vis=_bgr(img.copy())
+    s = _draw_scale(vis)
     k=params.get("blur_k",3)
     if k>0: gray=cv2.GaussianBlur(gray,(k,k),0)
     edges=cv2.Canny(gray,params.get("canny_low",30),params.get("canny_high",100))
@@ -1203,12 +1205,10 @@ def proc_scratch_detect(inputs, params):
             if length>=min_len:
                 scratches.append((x1,y1,x2,y2,length))
                 total_len+=length
-                cv2.line(vis,(x1,y1),(x2,y2),(0,60,255),2)
+                cv2.line(vis,(x1,y1),(x2,y2),(0,60,255),_t(2,s))
     max_s=params.get("max_scratches",0)
     is_pass=len(scratches)<=max_s
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Scratches:{len(scratches)} len:{total_len:.0f}px {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[Scratch] count={len(scratches)} total_len={total_len:.0f}px {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"pass":is_pass,"scratch_count":len(scratches),"total_length":total_len}
 
 
@@ -1227,12 +1227,11 @@ def proc_find_contours(inputs, params):
     mn=params.get("min_area",10.0); mx=params.get("max_area",1e6)
     contours=[c for c in contours if mn<=cv2.contourArea(c)<=mx]
     vis=_bgr(img.copy() if img is not None else mask)
-    cv2.drawContours(vis,contours,-1,(0,255,100),2)
+    s = _draw_scale(vis)
+    cv2.drawContours(vis,contours,-1,(0,255,100),_t(2,s))
     min_c=params.get("min_count",1); max_c=params.get("max_count",1000)
     is_pass=min_c<=len(contours)<=max_c
-    col=(0,220,80) if is_pass else (0,60,255)
-    cv2.putText(vis,f"Contours:{len(contours)} {'PASS' if is_pass else 'FAIL'}",
-                (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,col,2)
+    print(f"[FindContours] count={len(contours)} {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"contours":contours,"count":len(contours),"pass":is_pass}
 
 
@@ -1258,10 +1257,9 @@ def proc_calibrate_grid(inputs, params):
             mm_per_square=params.get("square_size_mm",25.4)
             px_to_mm=mm_per_square/max(px_per_square,0.001)
         else: px_to_mm=1.0
-        cv2.putText(vis,f"Calibrated: {px_to_mm:.5f}mm/px",
-                    (10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,(0,220,80),2)
+        print(f"[Calibrate] {px_to_mm:.5f} mm/px")
         return {"image":vis,"calibrated":True,"pixel_to_mm":px_to_mm,"rms_error":0.0}
-    cv2.putText(vis,"Checkerboard NOT found",(10,30),cv2.FONT_HERSHEY_SIMPLEX,0.65,(0,60,255),2)
+    print("[Calibrate] Checkerboard NOT found")
     return {"image":vis,"calibrated":False,"pixel_to_mm":1.0,"rms_error":0.0}
 
 
@@ -1306,16 +1304,18 @@ def proc_display(inputs,params):
     img=inputs.get("image")
     if img is None: return {"image":None}
     vis=_bgr(img.copy())
+    s = _draw_scale(vis)
     text=params.get("label",""); show_pass=params.get("show_result",True)
     passed=inputs.get("pass",None)
     if text:
-        cv2.putText(vis,text,(params.get("tx",10),params.get("ty",30)),
-                    cv2.FONT_HERSHEY_SIMPLEX,params.get("font_scale",0.8),(0,212,255),2)
+        cv2.putText(vis,text,(params.get("tx",10),params.get("ty",int(30*s))),
+                    cv2.FONT_HERSHEY_SIMPLEX,_fs(params.get("font_scale",0.8),s),(0,212,255),_t(2,s))
     if show_pass and passed is not None:
         col=(0,220,80) if passed else (0,60,255)
-        label="✔ PASS" if passed else "✖ FAIL"
-        cv2.rectangle(vis,(5,5),(200,45),(0,0,0),-1)
-        cv2.putText(vis,label,(10,35),cv2.FONT_HERSHEY_SIMPLEX,1.0,col,2)
+        label="PASS" if passed else "FAIL"
+        box_w=int(200*s); box_h=int(45*s); pad=int(5*s)
+        cv2.rectangle(vis,(pad,pad),(pad+box_w,pad+box_h),(0,0,0),-1)
+        cv2.putText(vis,label,(int(10*s),int(35*s)),cv2.FONT_HERSHEY_SIMPLEX,_fs(1.0,s),col,_t(2,s))
     return {"image":vis}
 
 def proc_save_image(inputs,params):
@@ -1369,10 +1369,7 @@ def proc_yolo_detect(inputs, params):
     model_path = params.get("model_path", "")
     if not model_path or not os.path.exists(model_path):
         vis = _bgr(img.copy())
-        cv2.putText(vis, "[YOLO] No model — open YOLO Studio to train",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,150,255), 2)
-        cv2.putText(vis, "Right-click node → YOLO Studio",
-                    (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,100,180), 1)
+        print("[YOLO] No model — open YOLO Studio to train (right-click node)")
         return {"image": vis, "detections": [], "count": 0, "pass": False}
 
     try:
@@ -1391,6 +1388,7 @@ def proc_yolo_detect(inputs, params):
 
         results = model.predict(_bgr(img), **kw)
         vis = _bgr(img.copy())
+        s = _draw_scale(vis)
         detections = []
 
         for result in results:
@@ -1406,12 +1404,13 @@ def proc_yolo_detect(inputs, params):
                     colors = [(0,220,80),(0,150,255),(255,180,0),
                               (220,80,220),(0,220,220),(255,80,80)]
                     col = colors[int(cls_id) % len(colors)]
-                    cv2.polylines(vis, [pts], True, col, 2)
+                    cv2.polylines(vis, [pts], True, col, _t(2, s))
                     overlay = vis.copy()
                     cv2.fillPoly(overlay, [pts], col)
                     cv2.addWeighted(vis, 0.7, overlay, 0.3, 0, vis)
                     cv2.putText(vis, f"{cls_name} {float(conf_val):.2f}",
-                                (cx, cy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
+                                (cx, cy-int(10*s)), cv2.FONT_HERSHEY_SIMPLEX,
+                                _fs(0.6, s), col, _t(2, s))
                     detections.append({"class": cls_name, "cls_id": int(cls_id),
                                        "conf": float(conf_val), "cx": cx, "cy": cy})
             # Bounding boxes
@@ -1423,9 +1422,10 @@ def proc_yolo_detect(inputs, params):
                     colors = [(0,220,80),(0,150,255),(255,180,0),
                               (220,80,220),(0,220,220),(255,80,80)]
                     col = colors[int(cls_id) % len(colors)]
-                    cv2.rectangle(vis, (x1,y1), (x2,y2), col, 2)
+                    cv2.rectangle(vis, (x1,y1), (x2,y2), col, _t(2, s))
                     cv2.putText(vis, f"{cls_name} {float(conf_val):.2f}",
-                                (x1, y1-8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
+                                (x1, y1-int(8*s)), cv2.FONT_HERSHEY_SIMPLEX,
+                                _fs(0.6, s), col, _t(2, s))
                     cx = (x1+x2)//2; cy = (y1+y2)//2
                     detections.append({"class": cls_name, "cls_id": int(cls_id),
                                        "conf": float(conf_val), "cx": cx, "cy": cy,
@@ -1436,16 +1436,13 @@ def proc_yolo_detect(inputs, params):
         max_det_check = params.get("max_count", 9999)
         is_pass = min_det <= n <= max_det_check
 
-        col = (0,220,80) if is_pass else (0,60,255)
-        cv2.putText(vis, f"YOLO: {n} detected {'PASS' if is_pass else 'FAIL'}",
-                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, col, 2)
+        print(f"[YOLO] {n} detected {'PASS' if is_pass else 'FAIL'}")
         return {"image": vis, "detections": detections,
                 "count": n, "pass": is_pass}
 
     except Exception as e:
         vis = _bgr(img.copy())
-        cv2.putText(vis, f"YOLO Error: {str(e)[:60]}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,60,255), 2)
+        print(f"[YOLO] Error: {str(e)[:120]}")
         return {"image": vis, "detections": [], "count": 0, "pass": False}
 
 

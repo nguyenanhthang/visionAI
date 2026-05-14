@@ -1422,13 +1422,10 @@ class PatMaxDialog(QDialog):
                 edge_vis = cv2.cvtColor(self._model.edge_image, cv2.COLOR_GRAY2BGR)
                 # Colorize edges
                 edge_vis[self._model.edge_image > 0] = [0, 220, 80]
-                # Overlay model size info
-                cv2.putText(edge_vis,
-                    f"Pattern {self._model.pattern_w}×{self._model.pattern_h}  "
-                    f"Edges:{self._model.edge_count}",
-                    (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 212, 255), 1)
                 self._img_label.set_image(edge_vis)
-                self._view_info.setText("Edge model (green=boundaries used for matching)")
+                self._view_info.setText(
+                    f"Edge model — Pattern {self._model.pattern_w}×{self._model.pattern_h}, "
+                    f"Edges: {self._model.edge_count} (green=boundaries used for matching)")
             else:
                 self._img_label.set_image(None)
                 self._view_info.setText("Train model first")

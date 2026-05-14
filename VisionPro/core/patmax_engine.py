@@ -783,6 +783,29 @@ def _rotated_corners(cx, cy, w, h, angle_deg):
              cy + p[0]*sa + p[1]*ca) for p in pts]
 
 
+# ═══════════════════════════════════════════════════════════════
+#  DRAW SCALING — tỷ lệ vẽ theo độ phân giải ảnh
+# ═══════════════════════════════════════════════════════════════
+# Kích thước tham chiếu (cạnh ngắn). Ảnh nhỏ hơn → scale = 1.0;
+# ảnh lớn hơn → scale tăng theo tỷ lệ để bộ rộng nét & chữ không bị tí hon.
+_DRAW_BASE_DIM = 720.0
+
+def _draw_scale(image: np.ndarray) -> float:
+    if image is None:
+        return 1.0
+    h, w = image.shape[:2]
+    short = min(h, w)
+    return max(1.0, short / _DRAW_BASE_DIM)
+
+def _t(base: int, s: float) -> int:
+    """Scaled line/box thickness (>=1)."""
+    return max(1, int(round(base * s)))
+
+def _fs(base: float, s: float) -> float:
+    """Scaled font scale for cv2.putText."""
+    return float(base) * s
+
+
 def _score_map_vis(image: np.ndarray, score_map: np.ndarray) -> np.ndarray:
     vis = image.copy() if len(image.shape)==3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     if score_map.max() > 0.01:
@@ -794,10 +817,7 @@ def _score_map_vis(image: np.ndarray, score_map: np.ndarray) -> np.ndarray:
 
 def _empty_vis(image: np.ndarray) -> np.ndarray:
     vis = image.copy() if len(image.shape)==3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    cv2.putText(vis, "[PatMax] No model trained",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,150,255), 2)
-    cv2.putText(vis, "Double-click node -> Draw ROI -> Train",
-                (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,100,180), 1)
+    print("[PatMax] No model trained — double-click node, draw ROI then Train")
     return vis
 
 
@@ -805,6 +825,7 @@ def draw_patmax_results(image: np.ndarray,
                          results: List[PatMaxResult],
                          model: Optional[PatMaxModel] = None) -> np.ndarray:
     vis = image.copy() if len(image.shape)==3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    s = _draw_scale(vis)
 
     # Origin offset t\u1eeb t\u00e2m pattern (to\u1ea1 \u0111\u1ed9 pattern, c\u00f3 th\u1ec3 \u00e2m ho\u1eb7c >w/h)
     has_origin = False
@@ -823,28 +844,31 @@ def draw_patmax_results(image: np.ndarray,
         # Rotated bounding box
         if r.corners and len(r.corners) == 4:
             pts = np.array(r.corners, dtype=np.int32)
-            cv2.polylines(vis, [pts], True, col, 2)
+            cv2.polylines(vis, [pts], True, col, _t(2, s))
 
         # T\u00ednh origin (transformed) \u2014 \u0111\u00e2y l\u00e0 MARKER CH\u00cdNH (tham chi\u1ebfu)
         if has_origin:
             rad_o = math.radians(-r.angle)
             ca = math.cos(rad_o); sa = math.sin(rad_o)
-            s  = r.scale if r.scale else 1.0
-            ox = float(r.x) + s * (pdx * ca - pdy * sa)
-            oy = float(r.y) + s * (pdx * sa + pdy * ca)
+            sc = r.scale if r.scale else 1.0
+            ox = float(r.x) + sc * (pdx * ca - pdy * sa)
+            oy = float(r.y) + sc * (pdx * sa + pdy * ca)
         else:
             ox = float(r.x); oy = float(r.y)
         ox_i = int(round(ox)); oy_i = int(round(oy))
 
         # Marker tham chi\u1ebfu: v\u00f2ng xanh (theo score) + X v\u00e0ng \u0111\u00e8 l\u00ean \u2014 g\u1ed9p 1 v\u1ecb tr\u00ed
-        sz = max(14, int(min(r.width, r.height) * 0.18))
-        cv2.circle(vis, (ox_i, oy_i), 11, col, 2, cv2.LINE_AA)
-        cv2.circle(vis, (ox_i, oy_i), 3, col, -1, cv2.LINE_AA)
+        sz   = max(_t(14, s), int(min(r.width, r.height) * 0.18))
+        r_o  = _t(11, s)
+        r_d  = _t(3, s)
+        arm  = _t(9, s)
+        cv2.circle(vis, (ox_i, oy_i), r_o, col, _t(2, s), cv2.LINE_AA)
+        cv2.circle(vis, (ox_i, oy_i), r_d, col, -1, cv2.LINE_AA)
         o_col = (0, 215, 255)   # v\u00e0ng (BGR)
-        cv2.line(vis, (ox_i - 9, oy_i - 9), (ox_i + 9, oy_i + 9),
-                 o_col, 2, cv2.LINE_AA)
-        cv2.line(vis, (ox_i - 9, oy_i + 9), (ox_i + 9, oy_i - 9),
-                 o_col, 2, cv2.LINE_AA)
+        cv2.line(vis, (ox_i - arm, oy_i - arm), (ox_i + arm, oy_i + arm),
+                 o_col, _t(2, s), cv2.LINE_AA)
+        cv2.line(vis, (ox_i - arm, oy_i + arm), (ox_i + arm, oy_i - arm),
+                 o_col, _t(2, s), cv2.LINE_AA)
 
         # Angle arrow \u2014 ph\u00e1t t\u1eeb marker (origin)
         if abs(r.angle) > 0.5:
@@ -852,23 +876,21 @@ def draw_patmax_results(image: np.ndarray,
             ex  = int(ox_i + math.cos(rad) * sz * 2)
             ey  = int(oy_i + math.sin(rad) * sz * 2)
             cv2.arrowedLine(vis, (ox_i, oy_i), (ex, ey),
-                             (255, 210, 0), 2, tipLength=0.3)
+                             (255, 210, 0), _t(2, s), tipLength=0.3)
 
         # Label: score + to\u1ea1 \u0111\u1ed9 origin
         lx = max(0, int(r.x - r.width/2))
-        ly = max(16, int(r.y - r.height/2) - 8)
+        ly = max(int(16 * s), int(r.y - r.height/2) - int(8 * s))
         label = f"#{i+1} {r.score:.3f}"
         if abs(r.angle) > 0.5:
             label += f" {r.angle:+.1f}deg"   # cv2.putText kh\u00f4ng h\u1ed7 tr\u1ee3 Unicode \u00b0
-        cv2.putText(vis, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
+        cv2.putText(vis, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, _fs(0.55, s), col, _t(2, s))
         cv2.putText(vis, f"({ox:.0f},{oy:.0f})",
-                    (ox_i + 14, oy_i + 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, o_col, 1, cv2.LINE_AA)
+                    (ox_i + int(14 * s), oy_i + int(18 * s)),
+                    cv2.FONT_HERSHEY_SIMPLEX, _fs(0.45, s), o_col, _t(1, s), cv2.LINE_AA)
 
-    n = len(results)
-    st_col = (0,220,80) if n > 0 else (0,60,255)
-    cv2.putText(vis, f"PatMax: {n} found", (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, st_col, 2)
+    # Summary text \u0111\u01b0\u1ee3c log ra console; kh\u00f4ng v\u1ebd l\u00ean \u1ea3nh.
+    print(f"[PatMax] {len(results)} result(s)")
     return vis
 
 
