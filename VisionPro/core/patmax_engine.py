@@ -11,6 +11,7 @@ Debug: in score tối đa ra console để người dùng điều chỉnh thresh
 from __future__ import annotations
 import cv2
 import numpy as np
+import copy
 import json, os, math, hashlib
 from typing import Optional, List, Tuple, Dict
 from dataclasses import dataclass, field
@@ -1173,8 +1174,14 @@ def run_patmax_align(image: np.ndarray,
                      scale_step: float = 0.1,
                      num_results: int = 1,
                      overlap_threshold: float = 0.5,
+                     coarse_downscale: int = 1,
                      ) -> Tuple[List[PatMaxResult], np.ndarray]:
-    """Dispatcher cho 6 algorithm × 3 train mode của PatMax Align Tool."""
+    """Dispatcher cho 6 algorithm × 3 train mode của PatMax Align Tool.
+
+    ``coarse_downscale`` (1/2/4): downscale image+patch+edge trước khi match.
+    Tăng tốc ~ds² lần, sai số ±ds pixel. Kết quả x/y/w/h được scale về
+    full-resolution trước khi trả về.
+    """
     if not model.is_valid():
         return [], _empty_vis(image)
 
@@ -1189,8 +1196,27 @@ def run_patmax_align(image: np.ndarray,
         return [], _empty_vis(image)
 
     bgr      = image if len(image.shape) == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    gray_img = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    H, W     = gray_img.shape
+    gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    H_full, W_full = gray_full.shape
+
+    # Pyramid downscale: hạ resolution toàn bộ pipeline match.
+    ds = max(1, int(coarse_downscale))
+    if ds > 1:
+        gray_img = cv2.resize(gray_full, (W_full // ds, H_full // ds),
+                              interpolation=cv2.INTER_AREA)
+        ph2, pw2 = max(4, patch_gray.shape[0] // ds), max(4, patch_gray.shape[1] // ds)
+        patch_gray = cv2.resize(patch_gray, (pw2, ph2), interpolation=cv2.INTER_AREA)
+        edge_image = cv2.resize(edge_image, (pw2, ph2), interpolation=cv2.INTER_AREA)
+        if getattr(model, "mask", None) is not None:
+            try:
+                model = copy.copy(model)
+                model.mask = cv2.resize(model.mask, (pw2, ph2),
+                                        interpolation=cv2.INTER_NEAREST)
+            except Exception:
+                pass
+    else:
+        gray_img = gray_full
+    H, W = gray_img.shape
     img_edges = cv2.Canny(gray_img, model.canny_low, model.canny_high)
 
     # ─── Build templates: precompute nếu Shape Models with Transform ───
@@ -1310,6 +1336,13 @@ def run_patmax_align(image: np.ndarray,
         if len(kept) >= num_results:
             break
 
+    # Map ds→full-res cho mọi toạ độ trước khi build result/origin
+    if ds > 1:
+        for d in kept:
+            d["cx"] *= ds; d["cy"] *= ds
+            d["tx"] *= ds; d["ty"] *= ds
+            d["nW"] *= ds; d["nH"] *= ds
+
     # Build PatMaxResult list (origin-aware như run_patmax)
     pdx = float(model.origin_x) - float(model.pattern_w) / 2.0
     pdy = float(model.origin_y) - float(model.pattern_h) / 2.0
@@ -1331,13 +1364,18 @@ def run_patmax_align(image: np.ndarray,
         ))
 
     # ─── Algorithm-specific refinement ───
+    # Refine luôn ở full-res — gray_full mới đủ chi tiết để tinh chỉnh.
+    refine_gray = gray_full if ds > 1 else gray_img
     if results and algorithm == "Perspective PatMax":
         for i, r in enumerate(results):
-            results[i] = _refine_perspective(gray_img, model.patch_gray, r)
+            results[i] = _refine_perspective(refine_gray, model.patch_gray, r)
     elif results and algorithm == "PatFlex":
         for i, r in enumerate(results):
-            results[i] = _refine_patflex(gray_img, model, r)
+            results[i] = _refine_patflex(refine_gray, model, r)
 
     sm_blurred = cv2.GaussianBlur(score_map, (15, 15), 0)
+    if ds > 1:
+        sm_blurred = cv2.resize(sm_blurred, (W_full, H_full),
+                                interpolation=cv2.INTER_LINEAR)
     sm_vis = _score_map_vis(bgr, sm_blurred)
     return results, sm_vis

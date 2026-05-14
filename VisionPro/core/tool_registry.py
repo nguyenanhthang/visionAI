@@ -325,6 +325,11 @@ def proc_patmax_align(inputs, params):
     ot = float(getattr(model, "overlap_threshold", 0.5) or 0.5)
     at = float(model.accept_threshold or params.get("accept_threshold", 0.5))
 
+    try:
+        ds = max(1, int(params.get("coarse_downscale", 1)))
+    except (TypeError, ValueError):
+        ds = 1
+
     results, _ = run_patmax_align(
         _bgr(img), model,
         algorithm=algorithm,
@@ -334,6 +339,7 @@ def proc_patmax_align(inputs, params):
         scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
         num_results=nr,
         overlap_threshold=ot,
+        coarse_downscale=ds,
     )
     vis = draw_patmax_results(_bgr(img), results, model)
     objects = [
@@ -1545,7 +1551,11 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("angle_range","Angle Range (°)","float",0,0,180,step=5,
        tooltip="Tìm kiếm trong ±angle_range độ. 0=không xoay"),
      P("angle_step","Angle Step (°)","float",5,1,45,step=1),
-     P("num_results","Max Results","int",1,1,20)],
+     P("num_results","Max Results","int",1,1,20),
+     P("coarse_downscale","Coarse downscale","enum","1",
+       choices=["1","2","4"],
+       tooltip="Speed-up: search ở 1/ds resolution. 2 ≈ 4× nhanh, 4 ≈ 16× nhanh. "
+               "Vị trí ±ds pixel; Perspective/PatFlex tự refine ở full-res")],
     proc_patmax_align, "CogPMAlignTool"),
 
   ToolDef("patfind","PatFind","Pattern Find",
