@@ -182,13 +182,19 @@ class CameraSetupDialog(QDialog):
         self.sp_fps = QDoubleSpinBox(); self.sp_fps.setRange(0.1, 1000); self.sp_fps.setDecimals(1); self.sp_fps.setSuffix(" fps"); self.sp_fps.setValue(30)
         self.cb_pixel_fmt = QComboBox()
         self.cb_pixel_fmt.addItems(["(keep)", "Mono8", "BayerGB8", "BayerGR8", "BayerRG8", "BayerBG8", "RGB8Packed", "BGR8Packed"])
-        gi.addWidget(QLabel("Exposure:"),     0, 0); gi.addWidget(self.sp_exposure, 0, 1)
-        gi.addWidget(QLabel("Gain:"),         1, 0); gi.addWidget(self.sp_gain,     1, 1)
-        gi.addWidget(QLabel("Frame rate:"),   2, 0); gi.addWidget(self.sp_fps,      2, 1)
-        gi.addWidget(QLabel("Pixel format:"), 3, 0); gi.addWidget(self.cb_pixel_fmt, 3, 1)
+
+        rng_style = "color:#64748b;font-size:11px;font-family:'Courier New';"
+        self.lbl_exp_rng = QLabel("(open cam to see range)"); self.lbl_exp_rng.setStyleSheet(rng_style)
+        self.lbl_gain_rng = QLabel(""); self.lbl_gain_rng.setStyleSheet(rng_style)
+        self.lbl_fps_rng = QLabel(""); self.lbl_fps_rng.setStyleSheet(rng_style)
+
+        gi.addWidget(QLabel("Exposure:"),     0, 0); gi.addWidget(self.sp_exposure, 0, 1); gi.addWidget(self.lbl_exp_rng,  0, 2)
+        gi.addWidget(QLabel("Gain:"),         1, 0); gi.addWidget(self.sp_gain,     1, 1); gi.addWidget(self.lbl_gain_rng, 1, 2)
+        gi.addWidget(QLabel("Frame rate:"),   2, 0); gi.addWidget(self.sp_fps,      2, 1); gi.addWidget(self.lbl_fps_rng,  2, 2)
+        gi.addWidget(QLabel("Pixel format:"), 3, 0); gi.addWidget(self.cb_pixel_fmt, 3, 1, 1, 2)
         self.btn_apply_img = QPushButton("Apply image params")
         self.btn_apply_img.clicked.connect(self._apply_image_params)
-        gi.addWidget(self.btn_apply_img, 4, 0, 1, 2)
+        gi.addWidget(self.btn_apply_img, 4, 0, 1, 3)
         rv.addWidget(self.gb_img)
 
         # Trigger
@@ -205,19 +211,28 @@ class CameraSetupDialog(QDialog):
         rv.addWidget(self.gb_trig)
 
         # ROI
-        self.gb_roi = QGroupBox("ROI")
+        self.gb_roi = QGroupBox("ROI (sensor max hiển thị bên cạnh)")
         gr = QGridLayout(self.gb_roi)
         self.sp_w = QSpinBox(); self.sp_w.setRange(8, 16384)
         self.sp_h = QSpinBox(); self.sp_h.setRange(8, 16384)
         self.sp_x = QSpinBox(); self.sp_x.setRange(0, 16384)
         self.sp_y = QSpinBox(); self.sp_y.setRange(0, 16384)
+        self.lbl_w_rng = QLabel("(?)"); self.lbl_w_rng.setStyleSheet(rng_style)
+        self.lbl_h_rng = QLabel("(?)"); self.lbl_h_rng.setStyleSheet(rng_style)
+        self.lbl_x_rng = QLabel("(?)"); self.lbl_x_rng.setStyleSheet(rng_style)
+        self.lbl_y_rng = QLabel("(?)"); self.lbl_y_rng.setStyleSheet(rng_style)
+
         self.btn_apply_roi = QPushButton("Apply ROI")
         self.btn_apply_roi.clicked.connect(self._apply_roi)
-        gr.addWidget(QLabel("Width:"),  0, 0); gr.addWidget(self.sp_w, 0, 1)
-        gr.addWidget(QLabel("Height:"), 0, 2); gr.addWidget(self.sp_h, 0, 3)
-        gr.addWidget(QLabel("OffsetX:"),1, 0); gr.addWidget(self.sp_x, 1, 1)
-        gr.addWidget(QLabel("OffsetY:"),1, 2); gr.addWidget(self.sp_y, 1, 3)
-        gr.addWidget(self.btn_apply_roi, 2, 0, 1, 4)
+        self.btn_roi_max = QPushButton("Use sensor max")
+        self.btn_roi_max.setToolTip("Đặt Width/Height = max của sensor, Offset = 0 (full FOV)")
+        self.btn_roi_max.clicked.connect(self._roi_use_max)
+        gr.addWidget(QLabel("Width:"),  0, 0); gr.addWidget(self.sp_w, 0, 1); gr.addWidget(self.lbl_w_rng, 0, 2)
+        gr.addWidget(QLabel("Height:"), 1, 0); gr.addWidget(self.sp_h, 1, 1); gr.addWidget(self.lbl_h_rng, 1, 2)
+        gr.addWidget(QLabel("OffsetX:"),2, 0); gr.addWidget(self.sp_x, 2, 1); gr.addWidget(self.lbl_x_rng, 2, 2)
+        gr.addWidget(QLabel("OffsetY:"),3, 0); gr.addWidget(self.sp_y, 3, 1); gr.addWidget(self.lbl_y_rng, 3, 2)
+        gr.addWidget(self.btn_roi_max,   4, 0, 1, 1)
+        gr.addWidget(self.btn_apply_roi, 4, 1, 1, 2)
         rv.addWidget(self.gb_roi)
 
         # Feature file
@@ -343,24 +358,71 @@ class CameraSetupDialog(QDialog):
         self._set_param_enabled(False)
 
     def _pull_current_params(self):
-        """Đọc các param hiện tại của cam và load vào UI."""
+        """Đọc các param hiện tại của cam + min/max và load vào UI."""
+        # Reset labels
+        for lbl in (self.lbl_exp_rng, self.lbl_gain_rng, self.lbl_fps_rng,
+                    self.lbl_w_rng, self.lbl_h_rng, self.lbl_x_rng, self.lbl_y_rng):
+            lbl.setText("(?)")
+        if not isinstance(self._cam, MVSCamera):
+            return
+
+        def _try_float(key, spinbox, lbl, fmt="{:.1f}"):
+            try:
+                v = self._cam.get_float(key)
+                spinbox.setRange(v["min"], v["max"])
+                spinbox.setValue(v["current"])
+                lbl.setText(f"min {fmt.format(v['min'])} .. max {fmt.format(v['max'])}")
+            except CameraError as e:
+                lbl.setText("(unsupported)")
+
+        def _try_int(key, spinbox, lbl):
+            try:
+                v = self._cam.get_int(key)
+                spinbox.setRange(v["min"], v["max"])
+                spinbox.setValue(v["current"])
+                inc = v.get("inc", 1)
+                spinbox.setSingleStep(max(1, inc))
+                inc_txt = f" step {inc}" if inc > 1 else ""
+                lbl.setText(f"min {v['min']} .. max {v['max']}{inc_txt}")
+            except CameraError as e:
+                lbl.setText("(unsupported)")
+
+        _try_float("ExposureTime",          self.sp_exposure, self.lbl_exp_rng)
+        _try_float("Gain",                  self.sp_gain,     self.lbl_gain_rng, "{:.2f}")
+        _try_float("AcquisitionFrameRate",  self.sp_fps,      self.lbl_fps_rng)
+        # ROI — đọc theo thứ tự WidthMax/HeightMax cho label tổng quát nếu có,
+        # còn lại lấy min/max của từng feature (đã trừ ROI hiện tại).
+        _try_int("Width",   self.sp_w, self.lbl_w_rng)
+        _try_int("Height",  self.sp_h, self.lbl_h_rng)
+        _try_int("OffsetX", self.sp_x, self.lbl_x_rng)
+        _try_int("OffsetY", self.sp_y, self.lbl_y_rng)
+        # Bổ sung sensor-max nếu cam cung cấp (Hik thường có WidthMax/HeightMax)
+        try:
+            wmax = self._cam.get_int("WidthMax")["current"]
+            hmax = self._cam.get_int("HeightMax")["current"]
+            self.lbl_w_rng.setText(self.lbl_w_rng.text() + f"  · sensor {wmax}")
+            self.lbl_h_rng.setText(self.lbl_h_rng.text() + f"  · sensor {hmax}")
+        except CameraError:
+            pass
+
+    def _roi_use_max(self):
+        """Set ROI = full sensor: Width/Height = max, Offset = 0."""
         if not isinstance(self._cam, MVSCamera):
             return
         try:
-            v = self._cam.get_float("ExposureTime");      self.sp_exposure.setValue(v["current"])
-        except CameraError: pass
+            wmax = self._cam.get_int("WidthMax")["current"]
+        except CameraError:
+            wmax = self.sp_w.maximum()
         try:
-            v = self._cam.get_float("Gain");              self.sp_gain.setValue(v["current"])
-        except CameraError: pass
-        try:
-            v = self._cam.get_float("AcquisitionFrameRate"); self.sp_fps.setValue(v["current"])
-        except CameraError: pass
-        try:
-            v = self._cam.get_int("Width");   self.sp_w.setValue(v["current"]); self.sp_w.setRange(v["min"], v["max"])
-            v = self._cam.get_int("Height");  self.sp_h.setValue(v["current"]); self.sp_h.setRange(v["min"], v["max"])
-            v = self._cam.get_int("OffsetX"); self.sp_x.setValue(v["current"]); self.sp_x.setRange(v["min"], v["max"])
-            v = self._cam.get_int("OffsetY"); self.sp_y.setValue(v["current"]); self.sp_y.setRange(v["min"], v["max"])
-        except CameraError: pass
+            hmax = self._cam.get_int("HeightMax")["current"]
+        except CameraError:
+            hmax = self.sp_h.maximum()
+        # Offset trước (về 0) để Width/Height không exceed
+        self.sp_x.setValue(0)
+        self.sp_y.setValue(0)
+        self.sp_w.setValue(wmax)
+        self.sp_h.setValue(hmax)
+        self._log(f"ROI prefilled to sensor max: {wmax}×{hmax}")
 
     # ── Preview ──────────────────────────────────────────────────
     def _start_preview(self):
@@ -489,6 +551,8 @@ class CameraSetupDialog(QDialog):
         except Exception:
             pass
         self._log("ROI applied" + (f" with errors: {errs}" if errs else ""))
+        # Refresh dynamic min/max (Width/Height/OffsetX/OffsetY phụ thuộc lẫn nhau)
+        self._pull_current_params()
         if was_preview:
             self._start_preview()
 
