@@ -423,11 +423,15 @@ class PropertiesPanel(QWidget):
         cl.setSpacing(6)
 
         for param in tool.params:
-            # Conditional visibility
+            # Conditional visibility — v có thể là single value HOẶC list/tuple
+            # (any-of match) để 1 sub-param dùng cho nhiều operation mode.
             if getattr(param, "visible_if", None):
                 ok = True
                 for k, v in param.visible_if.items():
-                    if node.params.get(k) != v:
+                    actual = node.params.get(k)
+                    if isinstance(v, (list, tuple, set)):
+                        if actual not in v: ok = False; break
+                    elif actual != v:
                         ok = False; break
                 if not ok:
                     continue

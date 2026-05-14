@@ -1292,11 +1292,15 @@ class NodeDetailDialog(QDialog):
         else:
             self._param_rows = {}
             for param in tool.params:
-                # Conditional visibility (visible_if)
+                # Conditional visibility (visible_if) — v có thể là list/tuple
+                # để any-of match (1 sub-param dùng cho nhiều operation mode).
                 if getattr(param, "visible_if", None):
                     ok = True
                     for k, v in param.visible_if.items():
-                        if node.params.get(k) != v:
+                        actual = node.params.get(k)
+                        if isinstance(v, (list, tuple, set)):
+                            if actual not in v: ok = False; break
+                        elif actual != v:
                             ok = False; break
                     if not ok:
                         continue

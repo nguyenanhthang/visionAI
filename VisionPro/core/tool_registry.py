@@ -1017,6 +1017,223 @@ def proc_image_convert(inputs, params):
     else:                      out=_bgr(img)
     return {"image":out}
 
+
+# ─────────────────────────────────────────────────────────────────────
+#  IMAGE STUDIO — all-in-one image manipulation tool
+#  Gộp resize / convert / flip / rotate / crop / translate / brightness
+#  / gamma / blur / sharpen / hist-eq / pad / denoise / wb vào 1 node.
+#  Operation chọn qua enum, sub-params hiện theo visible_if.
+# ─────────────────────────────────────────────────────────────────────
+_INTERP_MAP = {
+    "Nearest":  cv2.INTER_NEAREST,
+    "Linear":   cv2.INTER_LINEAR,
+    "Cubic":    cv2.INTER_CUBIC,
+    "Area":     cv2.INTER_AREA,
+    "Lanczos4": cv2.INTER_LANCZOS4,
+}
+_BORDER_MAP = {
+    "Constant":     cv2.BORDER_CONSTANT,
+    "Replicate":    cv2.BORDER_REPLICATE,
+    "Reflect":      cv2.BORDER_REFLECT,
+    "Reflect 101":  cv2.BORDER_REFLECT_101,
+    "Wrap":         cv2.BORDER_WRAP,
+}
+
+def _gamma_lut(gamma: float) -> np.ndarray:
+    g = max(0.05, float(gamma))
+    inv = 1.0 / g
+    return np.array([((i / 255.0) ** inv) * 255.0 for i in range(256)],
+                    dtype=np.uint8)
+
+
+def proc_image_studio(inputs, params):
+    """All-in-one image manipulation. 1 operation/node — chọn qua param
+    `operation`; sub-params hiển thị theo visible_if."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "width": 0, "height": 0}
+    op = params.get("operation", "Resize")
+    out = img
+
+    # ── RESIZE ─────────────────────────────────────────────────────
+    if op == "Resize":
+        mode = params.get("resize_mode", "Scale")
+        interp = _INTERP_MAP.get(params.get("resize_interp", "Linear"),
+                                  cv2.INTER_LINEAR)
+        h, w = img.shape[:2]
+        if mode == "Scale":
+            s = max(0.01, float(params.get("resize_scale", 1.0)))
+            nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+        else:
+            tw = max(1, int(params.get("resize_width", w)))
+            th = max(1, int(params.get("resize_height", h)))
+            if mode == "Target Size":
+                nw, nh = tw, th
+            elif mode == "Fit Inside":
+                # Giữ aspect ratio, vừa khít vào (tw × th)
+                r = min(tw / w, th / h)
+                nw, nh = max(1, int(round(w * r))), max(1, int(round(h * r)))
+            elif mode == "Fill":
+                # Giữ aspect, lấp đầy (tw × th) — có thể vượt cạnh
+                r = max(tw / w, th / h)
+                nw, nh = max(1, int(round(w * r))), max(1, int(round(h * r)))
+            else:
+                nw, nh = tw, th
+        out = cv2.resize(img, (nw, nh), interpolation=interp)
+
+    # ── CONVERT COLOR ──────────────────────────────────────────────
+    elif op == "Convert Color":
+        mode = params.get("convert_mode", "Grayscale")
+        if mode == "Grayscale":     out = _bgr(_gray(img))
+        elif mode == "BGR↔RGB":     out = cv2.cvtColor(_bgr(img), cv2.COLOR_BGR2RGB)
+        elif mode == "HSV":         out = cv2.cvtColor(_bgr(img), cv2.COLOR_BGR2HSV)
+        elif mode == "LAB":         out = cv2.cvtColor(_bgr(img), cv2.COLOR_BGR2LAB)
+        elif mode == "YCrCb":       out = cv2.cvtColor(_bgr(img), cv2.COLOR_BGR2YCrCb)
+        elif mode == "Invert":      out = cv2.bitwise_not(_bgr(img))
+        else:                       out = _bgr(img)
+
+    # ── FLIP ───────────────────────────────────────────────────────
+    elif op == "Flip":
+        direction = params.get("flip_direction", "Horizontal")
+        code = {"Horizontal": 1, "Vertical": 0, "Both": -1}.get(direction, 1)
+        out = cv2.flip(img, code)
+
+    # ── ROTATE ─────────────────────────────────────────────────────
+    elif op == "Rotate":
+        mode = params.get("rotate_mode", "90° CW")
+        if mode == "90° CW":
+            out = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+        elif mode == "90° CCW":
+            out = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif mode == "180°":
+            out = cv2.rotate(img, cv2.ROTATE_180)
+        else:   # Custom angle
+            ang = float(params.get("rotate_angle", 0.0))
+            keep_size = bool(params.get("rotate_keep_size", False))
+            h, w = img.shape[:2]
+            M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, 1.0)
+            if keep_size:
+                nw, nh = w, h
+            else:
+                rad = math.radians(ang)
+                cos_a = abs(math.cos(rad)); sin_a = abs(math.sin(rad))
+                nw = int(h * sin_a + w * cos_a)
+                nh = int(h * cos_a + w * sin_a)
+                M[0, 2] += (nw - w) / 2.0
+                M[1, 2] += (nh - h) / 2.0
+            border = _BORDER_MAP.get(params.get("rotate_border", "Constant"),
+                                      cv2.BORDER_CONSTANT)
+            out = cv2.warpAffine(img, M, (nw, nh), borderMode=border)
+
+    # ── TRANSLATE (SHIFT) ──────────────────────────────────────────
+    elif op == "Translate":
+        tx = int(params.get("translate_x", 0))
+        ty = int(params.get("translate_y", 0))
+        M = np.float32([[1, 0, tx], [0, 1, ty]])
+        border = _BORDER_MAP.get(params.get("translate_border", "Constant"),
+                                  cv2.BORDER_CONSTANT)
+        h, w = img.shape[:2]
+        out = cv2.warpAffine(img, M, (w, h), borderMode=border)
+
+    # ── CROP ───────────────────────────────────────────────────────
+    elif op == "Crop":
+        h, w = img.shape[:2]
+        x = max(0, min(int(params.get("crop_x", 0)), w - 1))
+        y = max(0, min(int(params.get("crop_y", 0)), h - 1))
+        cw = max(1, min(int(params.get("crop_w", w)), w - x))
+        ch = max(1, min(int(params.get("crop_h", h)), h - y))
+        out = img[y:y + ch, x:x + cw].copy()
+
+    # ── BRIGHTNESS / CONTRAST ──────────────────────────────────────
+    elif op == "Brightness/Contrast":
+        alpha = float(params.get("bc_alpha", 1.0))   # contrast
+        beta  = float(params.get("bc_beta", 0.0))    # brightness
+        out = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
+
+    # ── GAMMA ──────────────────────────────────────────────────────
+    elif op == "Gamma":
+        out = cv2.LUT(_bgr(img), _gamma_lut(params.get("gamma", 1.0)))
+
+    # ── BLUR ───────────────────────────────────────────────────────
+    elif op == "Blur":
+        btype = params.get("blur_type", "Gaussian")
+        k = max(1, int(params.get("blur_kernel", 5)))
+        if k % 2 == 0: k += 1
+        if btype == "Gaussian":
+            sigma = float(params.get("blur_sigma", 0.0))
+            out = cv2.GaussianBlur(img, (k, k), sigma)
+        elif btype == "Median":
+            out = cv2.medianBlur(img, k)
+        elif btype == "Bilateral":
+            sigma = float(params.get("blur_sigma", 50.0))
+            out = cv2.bilateralFilter(img, k, sigma, sigma)
+        else:   # Average
+            out = cv2.blur(img, (k, k))
+
+    # ── SHARPEN (unsharp mask) ─────────────────────────────────────
+    elif op == "Sharpen":
+        strength = float(params.get("sharpen_strength", 1.0))
+        k = max(1, int(params.get("sharpen_kernel", 5)))
+        if k % 2 == 0: k += 1
+        blurred = cv2.GaussianBlur(img, (k, k), 0)
+        out = cv2.addWeighted(img, 1.0 + strength, blurred, -strength, 0)
+
+    # ── HISTOGRAM EQUALIZE ─────────────────────────────────────────
+    elif op == "Histogram Equalize":
+        mode = params.get("hist_mode", "CLAHE")
+        if mode == "Global":
+            if len(img.shape) == 3:
+                ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+                ycrcb[:, :, 0] = cv2.equalizeHist(ycrcb[:, :, 0])
+                out = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+            else:
+                out = cv2.equalizeHist(img)
+        else:   # CLAHE
+            clip = float(params.get("clahe_clip", 2.0))
+            tile = max(1, int(params.get("clahe_tile", 8)))
+            clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tile, tile))
+            if len(img.shape) == 3:
+                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+                out = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            else:
+                out = clahe.apply(img)
+
+    # ── PADDING / BORDER ───────────────────────────────────────────
+    elif op == "Padding":
+        top    = max(0, int(params.get("pad_top", 0)))
+        bottom = max(0, int(params.get("pad_bottom", 0)))
+        left   = max(0, int(params.get("pad_left", 0)))
+        right  = max(0, int(params.get("pad_right", 0)))
+        mode = _BORDER_MAP.get(params.get("pad_mode", "Constant"),
+                                cv2.BORDER_CONSTANT)
+        color = int(params.get("pad_color", 0))
+        out = cv2.copyMakeBorder(img, top, bottom, left, right, mode,
+                                  value=(color, color, color))
+
+    # ── DENOISE ────────────────────────────────────────────────────
+    elif op == "Denoise":
+        strength = float(params.get("denoise_strength", 10.0))
+        if len(img.shape) == 3:
+            out = cv2.fastNlMeansDenoisingColored(img, None, strength, strength, 7, 21)
+        else:
+            out = cv2.fastNlMeansDenoising(img, None, strength, 7, 21)
+
+    # ── AUTO WHITE BALANCE (gray-world) ────────────────────────────
+    elif op == "Auto White Balance":
+        bgr_img = _bgr(img).astype(np.float32)
+        means = bgr_img.reshape(-1, 3).mean(axis=0)
+        gray_mean = means.mean()
+        if means.min() > 1e-3:
+            gains = gray_mean / means
+            bgr_img *= gains
+            out = np.clip(bgr_img, 0, 255).astype(np.uint8)
+        else:
+            out = _bgr(img)
+
+    h, w = (out.shape[:2] if out is not None else (0, 0))
+    return {"image": out, "width": w, "height": h}
+
 def proc_sharpen(inputs, params):
     img=inputs.get("image")
     if img is None: return {"image":None}
@@ -1471,8 +1688,7 @@ TOOL_REGISTRY: List[ToolDef] = [
               visible_if={"source_mode":"Folder"}),
      ParamDef("file_path","Image File","str","",
               tooltip="Đường dẫn 1 file ảnh",
-              visible_if={"source_mode":"File"}),
-     P("width","Width","int",640,1,8192),P("height","Height","int",480,1,8192)],
+              visible_if={"source_mode":"File"})],
     proc_acquire_image, "CogAcqFifoTool"),
 
   ToolDef("camera_acquire","Camera Acquire","Acquire Image",
@@ -1483,10 +1699,6 @@ TOOL_REGISTRY: List[ToolDef] = [
         choices=["OpenCV","HikRobot/Do3think"],
         tooltip="OpenCV cho USB UVC; HikRobot/Do3think dùng MVS SDK (Windows only)"),
      P("camera_id","OpenCV index","int",0,0,16,
-        visible_if={"backend":"OpenCV"}),
-     P("width","Width","int",0,0,8192,tooltip="0=auto",
-        visible_if={"backend":"OpenCV"}),
-     P("height","Height","int",0,0,8192,tooltip="0=auto",
         visible_if={"backend":"OpenCV"}),
      P("device_index","MVS device index","int",0,0,16,
         tooltip="0-based theo enumeration order",
@@ -1796,6 +2008,136 @@ TOOL_REGISTRY: List[ToolDef] = [
     [P("mode","Mode","enum","Grayscale",
        choices=["Grayscale","BGR to RGB","Invert","HSV","LAB","YCrCb"])],
     proc_image_convert, "CogImageConvertTool"),
+
+  ToolDef("image_studio","Image Studio","Image Processing",
+    "All-in-one: Resize / Convert / Flip / Rotate / Crop / Brightness / "
+    "Gamma / Blur / Sharpen / Hist-EQ / Pad / Denoise / WB",
+    "#2c3e50","🛠",
+    [PortDef("image","image")],
+    [PortDef("image","image"),PortDef("width","number"),PortDef("height","number")],
+    [P("operation","Operation","enum","Resize",
+       choices=["Resize","Convert Color","Flip","Rotate","Translate","Crop",
+                "Brightness/Contrast","Gamma","Blur","Sharpen",
+                "Histogram Equalize","Padding","Denoise","Auto White Balance"],
+       tooltip="Chọn phép xử lý ảnh"),
+
+     # ── RESIZE ────────────────────────────────────────────────
+     P("resize_mode","Mode","enum","Scale",
+       choices=["Scale","Target Size","Fit Inside","Fill"],
+       tooltip="Scale: nhân theo factor. Target: đặt W×H. Fit/Fill: giữ aspect ratio",
+       visible_if={"operation":"Resize"}),
+     P("resize_scale","Scale","float",1.0,0.01,10.0,step=0.1,
+       tooltip="Scale factor (1.0 = giữ nguyên, 0.5 = thu một nửa)",
+       visible_if={"resize_mode":"Scale"}),
+     P("resize_width","Width","int",640,1,16384,
+       visible_if={"resize_mode":["Target Size","Fit Inside","Fill"]}),
+     P("resize_height","Height","int",480,1,16384,
+       visible_if={"resize_mode":["Target Size","Fit Inside","Fill"]}),
+     P("resize_interp","Interpolation","enum","Linear",
+       choices=["Nearest","Linear","Cubic","Area","Lanczos4"],
+       tooltip="Area = best cho thu nhỏ; Cubic/Lanczos4 = best cho phóng to",
+       visible_if={"operation":"Resize"}),
+
+     # ── CONVERT COLOR ─────────────────────────────────────────
+     P("convert_mode","Color Mode","enum","Grayscale",
+       choices=["Grayscale","BGR↔RGB","HSV","LAB","YCrCb","Invert"],
+       visible_if={"operation":"Convert Color"}),
+
+     # ── FLIP ──────────────────────────────────────────────────
+     P("flip_direction","Direction","enum","Horizontal",
+       choices=["Horizontal","Vertical","Both"],
+       visible_if={"operation":"Flip"}),
+
+     # ── ROTATE ────────────────────────────────────────────────
+     P("rotate_mode","Mode","enum","90° CW",
+       choices=["90° CW","90° CCW","180°","Custom"],
+       visible_if={"operation":"Rotate"}),
+     P("rotate_angle","Angle (°)","float",0.0,-360.0,360.0,step=1.0,
+       tooltip="Góc xoay (positive = CCW theo OpenCV)",
+       visible_if={"rotate_mode":"Custom"}),
+     P("rotate_keep_size","Keep Original Size","bool",False,
+       tooltip="True: crop về kích thước gốc; False: mở rộng để không mất pixel",
+       visible_if={"rotate_mode":"Custom"}),
+     P("rotate_border","Border","enum","Constant",
+       choices=["Constant","Replicate","Reflect","Reflect 101","Wrap"],
+       visible_if={"rotate_mode":"Custom"}),
+
+     # ── TRANSLATE ─────────────────────────────────────────────
+     P("translate_x","Shift X (px)","int",0,-8192,8192,
+       visible_if={"operation":"Translate"}),
+     P("translate_y","Shift Y (px)","int",0,-8192,8192,
+       visible_if={"operation":"Translate"}),
+     P("translate_border","Border","enum","Constant",
+       choices=["Constant","Replicate","Reflect","Reflect 101","Wrap"],
+       visible_if={"operation":"Translate"}),
+
+     # ── CROP ──────────────────────────────────────────────────
+     P("crop_x","X","int",0,0,16384,visible_if={"operation":"Crop"}),
+     P("crop_y","Y","int",0,0,16384,visible_if={"operation":"Crop"}),
+     P("crop_w","Width","int",640,1,16384,visible_if={"operation":"Crop"}),
+     P("crop_h","Height","int",480,1,16384,visible_if={"operation":"Crop"}),
+
+     # ── BRIGHTNESS / CONTRAST ─────────────────────────────────
+     P("bc_alpha","Contrast (α)","float",1.0,0.0,5.0,step=0.05,
+       tooltip="α = 1.0 giữ nguyên; > 1 tăng contrast",
+       visible_if={"operation":"Brightness/Contrast"}),
+     P("bc_beta","Brightness (β)","float",0.0,-255.0,255.0,step=1.0,
+       tooltip="β cộng vào sau α (>0 sáng hơn, <0 tối hơn)",
+       visible_if={"operation":"Brightness/Contrast"}),
+
+     # ── GAMMA ─────────────────────────────────────────────────
+     P("gamma","Gamma","float",1.0,0.1,5.0,step=0.1,
+       tooltip="γ < 1 sáng vùng tối; γ > 1 tối vùng sáng",
+       visible_if={"operation":"Gamma"}),
+
+     # ── BLUR ──────────────────────────────────────────────────
+     P("blur_type","Type","enum","Gaussian",
+       choices=["Gaussian","Median","Bilateral","Average"],
+       visible_if={"operation":"Blur"}),
+     P("blur_kernel","Kernel","int",5,1,99,step=2,
+       tooltip="Kích thước kernel (lẻ; chẵn sẽ +1 tự động)",
+       visible_if={"operation":"Blur"}),
+     P("blur_sigma","Sigma","float",0.0,0.0,200.0,step=1.0,
+       tooltip="Gaussian: 0=auto. Bilateral: sigmaColor=sigmaSpace.",
+       visible_if={"blur_type":["Gaussian","Bilateral"]}),
+
+     # ── SHARPEN ───────────────────────────────────────────────
+     P("sharpen_strength","Strength","float",1.0,0.0,5.0,step=0.1,
+       tooltip="Unsharp mask amount",
+       visible_if={"operation":"Sharpen"}),
+     P("sharpen_kernel","Kernel","int",5,3,99,step=2,
+       tooltip="Kernel của blur dùng cho unsharp mask",
+       visible_if={"operation":"Sharpen"}),
+
+     # ── HISTOGRAM EQUALIZE ────────────────────────────────────
+     P("hist_mode","Mode","enum","CLAHE",
+       choices=["Global","CLAHE"],
+       tooltip="Global: equalizeHist toàn ảnh. CLAHE: adaptive (khuyến nghị)",
+       visible_if={"operation":"Histogram Equalize"}),
+     P("clahe_clip","Clip Limit","float",2.0,0.5,40.0,step=0.5,
+       visible_if={"hist_mode":"CLAHE"}),
+     P("clahe_tile","Tile Grid","int",8,2,64,
+       tooltip="Số tile mỗi chiều (8×8 mặc định)",
+       visible_if={"hist_mode":"CLAHE"}),
+
+     # ── PADDING ───────────────────────────────────────────────
+     P("pad_top","Top","int",0,0,4096,visible_if={"operation":"Padding"}),
+     P("pad_bottom","Bottom","int",0,0,4096,visible_if={"operation":"Padding"}),
+     P("pad_left","Left","int",0,0,4096,visible_if={"operation":"Padding"}),
+     P("pad_right","Right","int",0,0,4096,visible_if={"operation":"Padding"}),
+     P("pad_mode","Mode","enum","Constant",
+       choices=["Constant","Replicate","Reflect","Reflect 101","Wrap"],
+       visible_if={"operation":"Padding"}),
+     P("pad_color","Color (0-255)","int",0,0,255,
+       tooltip="Giá trị border khi mode=Constant (gray level)",
+       visible_if={"pad_mode":"Constant"}),
+
+     # ── DENOISE ───────────────────────────────────────────────
+     P("denoise_strength","Strength (h)","float",10.0,1.0,50.0,step=1.0,
+       tooltip="fastNlMeansDenoising h; 10 cân bằng, càng cao càng mờ",
+       visible_if={"operation":"Denoise"}),
+    ],
+    proc_image_studio, "CogImageProcessingTool"),
 
   ToolDef("crop_roi","Crop ROI","Image Processing",
     "Cắt vùng ROI — nhận x/y/w/h từ PatMax để tracking","#2c3e50","✂",
