@@ -340,6 +340,7 @@ def proc_patmax_align(inputs, params):
         num_results=nr,
         overlap_threshold=ot,
         coarse_downscale=ds,
+        build_score_map=False,   # production: skip heatmap (caller discards)
     )
     vis = draw_patmax_results(_bgr(img), results, model)
     objects = [

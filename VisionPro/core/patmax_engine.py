@@ -510,16 +510,20 @@ def _match_template(gray_img: np.ndarray,
     except cv2.error:
         return []
 
+    # Mask-mode matchTemplate đôi khi vượt [0,1] do numerical noise → clip.
+    s_ncc_map = np.clip(res_ncc, 0.0, 1.0, out=res_ncc).astype(np.float32, copy=False)
+    s_edge_map = None
+    s_sq_map   = None
+
     if chan_edge:
         img_e_f   = img_edges.astype(np.float32) / 255.0
         templ_e_f = edge_rot_d.astype(np.float32) / 255.0
         try:
             res_edge = cv2.matchTemplate(img_e_f, templ_e_f, cv2.TM_CCOEFF_NORMED)
             res_edge = np.nan_to_num(res_edge, nan=0.0, posinf=0.0, neginf=0.0)
+            s_edge_map = np.clip(res_edge, 0.0, 1.0, out=res_edge).astype(np.float32, copy=False)
         except cv2.error:
-            res_edge = np.zeros_like(res_ncc)
-    else:
-        res_edge = np.zeros_like(res_ncc)
+            chan_edge = False
 
     if chan_sq:
         try:
@@ -530,26 +534,27 @@ def _match_template(gray_img: np.ndarray,
                 res_sq = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_SQDIFF_NORMED)
             res_sq = np.nan_to_num(res_sq, nan=1.0, posinf=1.0, neginf=1.0)
             res_sq_inv = 1.0 - res_sq
+            s_sq_map = np.clip(res_sq_inv, 0.0, 1.0, out=res_sq_inv).astype(np.float32, copy=False)
         except cv2.error:
-            res_sq_inv = np.zeros_like(res_ncc)
-    else:
-        res_sq_inv = np.zeros_like(res_ncc)
+            chan_sq = False
 
-    # Mask-mode matchTemplate đôi khi vượt [0,1] do numerical noise → clip.
-    s_ncc_map  = np.clip(res_ncc, 0.0, 1.0).astype(np.float32)
-    s_edge_map = np.clip(res_edge, 0.0, 1.0).astype(np.float32)
-    s_sq_map   = np.clip(res_sq_inv, 0.0, 1.0).astype(np.float32)
     # Weights configurable per template (algorithm-dependent).
-    # Mặc định bám sát công thức cũ: 0.5 NCC + 0.3 edge + 0.2 SQDIFF.
     w_ncc, w_edge, w_sq = t.get("weights", (0.5, 0.3, 0.2))
     if not chan_edge: w_edge = 0.0
     if not chan_sq:   w_sq   = 0.0
     w_sum = w_ncc + w_edge + w_sq
     if w_sum > 0:
         w_ncc, w_edge, w_sq = w_ncc / w_sum, w_edge / w_sum, w_sq / w_sum
-    score_map  = (w_ncc * s_ncc_map
-                  + w_edge * s_edge_map
-                  + w_sq   * s_sq_map)
+    # Tránh nhân với map zero không cần thiết — đặc biệt lợi khi PatQuick chỉ
+    # dùng NCC (w_edge=w_sq=0): score_map = s_ncc_map nguyên gốc, 0 cộng/nhân.
+    if w_edge == 0.0 and w_sq == 0.0:
+        score_map = s_ncc_map
+    else:
+        score_map = w_ncc * s_ncc_map
+        if w_edge > 0.0 and s_edge_map is not None:
+            score_map = score_map + w_edge * s_edge_map
+        if w_sq > 0.0 and s_sq_map is not None:
+            score_map = score_map + w_sq * s_sq_map
 
     # Local NMS: suppress peaks gần nhau bằng cách lấy max trong cửa sổ
     win = max(3, min(nW, nH) // 2)
@@ -577,8 +582,8 @@ def _match_template(gray_img: np.ndarray,
         out.append({
             "score":  float(scores[i]),
             "s_ncc":  float(s_ncc_map[ty, tx]),
-            "s_edge": float(s_edge_map[ty, tx]),
-            "s_sq":   float(s_sq_map[ty, tx]),
+            "s_edge": float(s_edge_map[ty, tx]) if s_edge_map is not None else 0.0,
+            "s_sq":   float(s_sq_map[ty, tx])   if s_sq_map   is not None else 0.0,
             "cx": float(tx + nW / 2),
             "cy": float(ty + nH / 2),
             "tx": tx, "ty": ty,
@@ -1021,7 +1026,7 @@ def _ensure_precomputed(model: PatMaxModel,
     """Build (hoặc cache) precomputed templates cho path 'Shape Models with Transform'."""
     cache_key = (round(angle_low, 2), round(angle_high, 2), round(angle_step, 2),
                  round(scale_low, 3), round(scale_high, 3), round(scale_step, 3),
-                 weights)
+                 weights, tuple(patch_gray.shape))
     cached = getattr(model, "_align_tmpl_cache", None)
     if cached and cached.get("key") == cache_key:
         return cached["templates"]
@@ -1162,6 +1167,107 @@ def _refine_patflex(gray_img: np.ndarray,
     return result
 
 
+def _auto_pyramid_level(image_shape: Tuple[int, int],
+                        pattern_shape: Tuple[int, int],
+                        requested_ds: int) -> int:
+    """Pick pyramid downscale tự động (Cognex-style).
+
+    Aim cho pattern dim nhỏ nhất ~48 px ở mức coarsest. Pattern lớn → ds lớn
+    → match nhanh hơn ds² lần; refinement step bù sai số ±ds pixel.
+    User-requested ds > 1 được tôn trọng nguyên gốc.
+    """
+    if requested_ds > 1:
+        return requested_ds
+    ph, pw = pattern_shape[:2]
+    min_pat = max(8, min(pw, ph))
+    target = 48
+    if min_pat <= target * 1.5:
+        return 1
+    ds = min_pat // target
+    if ds >= 4:
+        return 4
+    if ds >= 2:
+        return 2
+    return 1
+
+
+def _refine_candidate(gray_full: np.ndarray,
+                      model: PatMaxModel,
+                      patch_gray_full: np.ndarray,
+                      edge_image_full: np.ndarray,
+                      mask_full: Optional[np.ndarray],
+                      cand: Dict,
+                      ds: int,
+                      weights: Tuple[float, float, float],
+                      ang_step_coarse: float,
+                      sc_step_coarse: float,
+                      channels: Tuple[bool, bool, bool],
+                      canny_lo: int,
+                      canny_hi: int,
+                      angle_range: float = 0.0,
+                      scale_range: float = 0.0) -> Dict:
+    """Refine 1 candidate ở full-resolution (sau coarse search ds-downscale).
+
+    cand: (cx, cy, nW, nH, angle, scale) đã map về full-res. Refine = crop
+    window quanh candidate + match angle/scale lân cận. Trả best dict.
+
+    angle_range, scale_range: total range user đã search ở coarse pass.
+    Nếu range = 0 → chỉ refine translation (1 template duy nhất → cực nhanh).
+    Nếu range > 0 → thêm ±half coarse step để bù quantization angle/scale.
+    """
+    H, W = gray_full.shape[:2]
+    base_cx = float(cand["cx"]); base_cy = float(cand["cy"])
+    base_angle = float(cand["angle"]); base_scale = float(cand["scale"])
+    pw_full = patch_gray_full.shape[1]
+    ph_full = patch_gray_full.shape[0]
+    # Template bbox sau xoay (axis-aligned)
+    rad = math.radians(base_angle)
+    cos_a = abs(math.cos(rad)); sin_a = abs(math.sin(rad))
+    nW_est = int(pw_full * base_scale * cos_a + ph_full * base_scale * sin_a) + 4
+    nH_est = int(pw_full * base_scale * sin_a + ph_full * base_scale * cos_a) + 4
+    pad = max(4, ds * 2 + 4)
+    half_w = nW_est / 2.0 + pad
+    half_h = nH_est / 2.0 + pad
+    x0 = max(0, int(round(base_cx - half_w)))
+    y0 = max(0, int(round(base_cy - half_h)))
+    x1 = min(W, int(round(base_cx + half_w + 1)))
+    y1 = min(H, int(round(base_cy + half_h + 1)))
+    if x1 - x0 < nW_est + 4 or y1 - y0 < nH_est + 4:
+        return cand
+    sub_gray = gray_full[y0:y1, x0:x1]
+    # Canny chỉ tính khi edge channel ON (tiết kiệm ~2-5ms với window 600×400)
+    sub_edge = (cv2.Canny(sub_gray, canny_lo, canny_hi)
+                if channels[1] else np.empty((0, 0), dtype=np.uint8))
+
+    # Chỉ mở rộng angle/scale grid khi user thực sự đã search range > step.
+    # Mặc định angle=0 / scale=1 → 1 template duy nhất, refinement = O(1).
+    fine_a_step = max(0.5, ang_step_coarse * 0.5)
+    fine_s_step = max(0.01, sc_step_coarse * 0.5)
+    angles: List[float] = [base_angle]
+    if angle_range > 0.5 and ang_step_coarse > 0.5:
+        angles.extend([base_angle - fine_a_step, base_angle + fine_a_step])
+    scales: List[float] = [base_scale]
+    if scale_range > 0.01 and sc_step_coarse > 0.01:
+        scales.extend([max(0.1, base_scale - fine_s_step),
+                       base_scale + fine_s_step])
+
+    best = dict(cand)
+    for sc in scales:
+        for ang in angles:
+            t = _build_template(patch_gray_full, edge_image_full,
+                                ang, sc, weights, mask=mask_full)
+            t["_channels"] = channels
+            res = _match_template(sub_gray, sub_edge, t, 1)
+            if not res:
+                continue
+            r = res[0]
+            if r["score"] >= best["score"]:
+                r["cx"] += x0; r["cy"] += y0
+                r["tx"] += x0; r["ty"] += y0
+                best = r
+    return best
+
+
 def run_patmax_align(image: np.ndarray,
                      model: PatMaxModel,
                      *,
@@ -1175,6 +1281,7 @@ def run_patmax_align(image: np.ndarray,
                      num_results: int = 1,
                      overlap_threshold: float = 0.5,
                      coarse_downscale: int = 1,
+                     build_score_map: bool = True,
                      ) -> Tuple[List[PatMaxResult], np.ndarray]:
     """Dispatcher cho 6 algorithm × 3 train mode của PatMax Align Tool.
 
@@ -1190,34 +1297,52 @@ def run_patmax_align(image: np.ndarray,
     ang_step_eff = max(0.5, angle_step * a_fac)
     sc_step_eff  = max(0.01, scale_step * s_fac)
 
-    # Train Mode → chọn cặp (patch, edge) phù hợp
-    patch_gray, edge_image = _shape_model_pair(model, train_mode_align)
-    if patch_gray is None or edge_image is None:
+    # PatQuick: NCC-only (skip edge & SQDIFF) → ~3× nhanh hơn full 3-channel.
+    # Các algorithm khác giữ full 3-channel để bám sát behavior Cognex.
+    if algorithm == "PatQuick":
+        channels = (True, False, False)
+    else:
+        channels = (True, True, True)
+
+    # Train Mode → chọn cặp (patch, edge) phù hợp. GIỮ full-res references
+    # cho bước refinement sau coarse search.
+    patch_full, edge_full = _shape_model_pair(model, train_mode_align)
+    if patch_full is None or edge_full is None:
         return [], _empty_vis(image)
+    mask_full = getattr(model, "mask", None)
 
     bgr      = image if len(image.shape) == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     H_full, W_full = gray_full.shape
 
-    # Pyramid downscale: hạ resolution toàn bộ pipeline match.
-    ds = max(1, int(coarse_downscale))
+    # Auto-pyramid: nếu user để ds=1 và ảnh đủ lớn → tự chọn ds 2/4 để giảm
+    # ~ds² lần chi phí matchTemplate. Refinement bước sau sẽ bù sai số.
+    requested_ds = max(1, int(coarse_downscale))
+    ds = _auto_pyramid_level(gray_full.shape, patch_full.shape, requested_ds)
+
     if ds > 1:
         gray_img = cv2.resize(gray_full, (W_full // ds, H_full // ds),
                               interpolation=cv2.INTER_AREA)
-        ph2, pw2 = max(4, patch_gray.shape[0] // ds), max(4, patch_gray.shape[1] // ds)
-        patch_gray = cv2.resize(patch_gray, (pw2, ph2), interpolation=cv2.INTER_AREA)
-        edge_image = cv2.resize(edge_image, (pw2, ph2), interpolation=cv2.INTER_AREA)
-        if getattr(model, "mask", None) is not None:
+        ph2 = max(4, patch_full.shape[0] // ds)
+        pw2 = max(4, patch_full.shape[1] // ds)
+        patch_gray = cv2.resize(patch_full, (pw2, ph2), interpolation=cv2.INTER_AREA)
+        edge_image = cv2.resize(edge_full, (pw2, ph2), interpolation=cv2.INTER_AREA)
+        if mask_full is not None:
             try:
                 model = copy.copy(model)
-                model.mask = cv2.resize(model.mask, (pw2, ph2),
+                model.mask = cv2.resize(mask_full, (pw2, ph2),
                                         interpolation=cv2.INTER_NEAREST)
             except Exception:
                 pass
     else:
         gray_img = gray_full
+        patch_gray, edge_image = patch_full, edge_full
     H, W = gray_img.shape
-    img_edges = cv2.Canny(gray_img, model.canny_low, model.canny_high)
+    # Bỏ qua Canny nếu edge channel OFF (PatQuick) — tiết kiệm trên ảnh lớn.
+    if channels[1]:
+        img_edges = cv2.Canny(gray_img, model.canny_low, model.canny_high)
+    else:
+        img_edges = np.empty((0, 0), dtype=np.uint8)
 
     # ─── Build templates: precompute nếu Shape Models with Transform ───
     if train_mode_align == "Shape Models with Transform":
@@ -1232,13 +1357,24 @@ def run_patmax_align(image: np.ndarray,
                                        mask=model.mask)
                      for s in scales for a in angles]
 
+    # Tag templates với channels để _match_template biết bỏ qua edge/SQDIFF.
+    for _t in templates:
+        _t["_channels"] = channels
+
     print(f"[PatMax Align] algorithm={algorithm}  train_mode={train_mode_align}  "
-          f"weights={weights}  templates={len(templates)}  "
+          f"weights={weights}  channels={channels}  templates={len(templates)}  "
+          f"ds={ds} (req={requested_ds})  "
           f"step(ang={ang_step_eff:.2f}, sc={sc_step_eff:.3f})")
 
     # ─── Special path: PatMax & PatQuick — 2-pass coarse→fine ───
-    if algorithm == "PatMax & PatQuick":
-        # Pass 1: PatQuick (NCC-heavy, coarse)
+    # Khi user không search angle/scale, 2-pass thoái hoá thành 1-pass (1
+    # template duy nhất) — không cần seeds/refine, dùng generic path luôn.
+    ang_range_user = max(0.0, angle_high - angle_low)
+    sc_range_user  = max(0.0, scale_high - scale_low)
+    use_two_pass = (algorithm == "PatMax & PatQuick"
+                    and (ang_range_user > 0.5 or sc_range_user > 0.01))
+    if use_two_pass:
+        # Pass 1: PatQuick (NCC-only, coarse) — single channel cho tốc độ
         wq = ALGO_WEIGHTS["PatQuick"]
         ang_step_coarse = max(1.0, ang_step_eff * 2.0)
         sc_step_coarse  = max(0.05, sc_step_eff * 2.0)
@@ -1247,6 +1383,8 @@ def run_patmax_align(image: np.ndarray,
         tmpls_q = [_build_template(patch_gray, edge_image, a, s, wq,
                                      mask=model.mask)
                    for s in sc_q for a in ang_q]
+        for _t in tmpls_q:
+            _t["_channels"] = (True, False, False)   # NCC-only cho coarse pass
         cands_q: List[Dict] = []
         for t in tmpls_q:
             cands_q.extend(_match_template(gray_img, img_edges, t,
@@ -1269,22 +1407,25 @@ def run_patmax_align(image: np.ndarray,
                 break
         print(f"[PatMax Align] PatQuick pass: {len(cands_q)} cands, "
               f"{len(seeds)} seeds")
-        # Pass 2: PatMax fine — chỉ quanh seed angles ±2*ang_step_eff
+        # Pass 2: PatMax fine — quanh seed angles ±0.5*ang_step_coarse
+        # (đủ phủ vùng quantization của coarse mà không over-search).
         candidates: List[Dict] = []
         score_map = np.zeros((H, W), dtype=np.float32)
         best_any = 0.0
+        # Fine grid: ±half coarse step, step = ang_step_eff → tối đa ~3×3=9 tpls/seed
         for seed in seeds:
             seed_a = seed["angle"]; seed_s = seed["scale"]
-            a_lo = seed_a - ang_step_coarse
-            a_hi = seed_a + ang_step_coarse
-            s_lo = max(scale_low, seed_s - sc_step_coarse)
-            s_hi = min(scale_high, seed_s + sc_step_coarse)
+            a_lo = seed_a - ang_step_coarse * 0.5
+            a_hi = seed_a + ang_step_coarse * 0.5
+            s_lo = max(scale_low, seed_s - sc_step_coarse * 0.5)
+            s_hi = min(scale_high, seed_s + sc_step_coarse * 0.5)
             ang_f, sc_f = _build_search_grid(a_lo, a_hi, ang_step_eff,
                                              s_lo, s_hi, sc_step_eff)
             for sc in sc_f:
                 for ang in ang_f:
                     t = _build_template(patch_gray, edge_image, ang, sc, weights,
                                           mask=model.mask)
+                    t["_channels"] = channels   # PatMax fine: full 3-channel
                     res_t = _match_template(gray_img, img_edges, t,
                                             max(2, int(num_results * peak_fac) + 1))
                     for r in res_t:
@@ -1343,6 +1484,29 @@ def run_patmax_align(image: np.ndarray,
             d["tx"] *= ds; d["ty"] *= ds
             d["nW"] *= ds; d["nH"] *= ds
 
+    # ─── Full-resolution refinement ───
+    # Sau coarse search ds-downscale, toạ độ trên có sai số ±ds px. Refine
+    # mỗi candidate bằng cách crop window quanh nó ở gray_full và chạy
+    # _match_template với patch full-res. Window nhỏ → rẻ nhưng đưa độ chính
+    # xác về sub-pixel (≈ Cognex pyramid refinement).
+    if ds > 1 and kept:
+        refined: List[Dict] = []
+        ang_range_used = max(0.0, angle_high - angle_low)
+        sc_range_used  = max(0.0, scale_high - scale_low)
+        for k in kept:
+            r = _refine_candidate(
+                gray_full, model,
+                patch_full, edge_full, mask_full,
+                k, ds, weights,
+                ang_step_eff, sc_step_eff,
+                channels,
+                model.canny_low, model.canny_high,
+                angle_range=ang_range_used,
+                scale_range=sc_range_used,
+            )
+            refined.append(r)
+        kept = refined
+
     # Build PatMaxResult list (origin-aware như run_patmax)
     pdx = float(model.origin_x) - float(model.pattern_w) / 2.0
     pdy = float(model.origin_y) - float(model.pattern_h) / 2.0
@@ -1373,9 +1537,15 @@ def run_patmax_align(image: np.ndarray,
         for i, r in enumerate(results):
             results[i] = _refine_patflex(refine_gray, model, r)
 
-    sm_blurred = cv2.GaussianBlur(score_map, (15, 15), 0)
-    if ds > 1:
-        sm_blurred = cv2.resize(sm_blurred, (W_full, H_full),
-                                interpolation=cv2.INTER_LINEAR)
-    sm_vis = _score_map_vis(bgr, sm_blurred)
+    # Skip score-map visualization khi caller không cần — heatmap blending
+    # tốn ~90ms với ảnh 8MP. proc_patmax_align discard sm_vis nên đặt
+    # build_score_map=False ở production path.
+    if build_score_map:
+        sm_blurred = cv2.GaussianBlur(score_map, (15, 15), 0)
+        if ds > 1:
+            sm_blurred = cv2.resize(sm_blurred, (W_full, H_full),
+                                    interpolation=cv2.INTER_LINEAR)
+        sm_vis = _score_map_vis(bgr, sm_blurred)
+    else:
+        sm_vis = bgr
     return results, sm_vis
