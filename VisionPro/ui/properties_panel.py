@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                 QLineEdit, QSpinBox, QDoubleSpinBox,
                                 QComboBox, QCheckBox, QPushButton,
                                 QScrollArea, QFrame, QTabWidget, QFileDialog)
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage
 
 from core.flow_graph import FlowGraph, NodeInstance
@@ -89,12 +89,16 @@ class ParamRow(QWidget):
         le.textChanged.connect(lambda t: self.value_changed.emit(p.name, t))
         hl.addWidget(le)
         if "path" in p.name.lower():
-            btn = QPushButton("…")
-            btn.setFixedWidth(24)
+            is_folder = "folder" in p.name.lower() or "dir" in p.name.lower()
+            btn = QPushButton("📂" if is_folder else "…")
+            btn.setFixedWidth(28)
             btn.setStyleSheet(
                 "QPushButton{background:#1e2d45;border:none;border-radius:3px;color:#e2e8f0;}"
                 "QPushButton:hover{background:#00d4ff;color:#000;}")
-            btn.clicked.connect(lambda: self._browse_file(le))
+            if is_folder:
+                btn.clicked.connect(lambda: self._browse_folder(le))
+            else:
+                btn.clicked.connect(lambda: self._browse_file(le))
             hl.addWidget(btn)
         return w
 
@@ -102,6 +106,12 @@ class ParamRow(QWidget):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select File", "",
             "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.tif);;All Files (*)")
+        if path:
+            le.setText(path)
+
+    def _browse_folder(self, le: QLineEdit):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Image Folder", le.text() or "")
         if path:
             le.setText(path)
 
@@ -413,6 +423,14 @@ class PropertiesPanel(QWidget):
         cl.setSpacing(6)
 
         for param in tool.params:
+            # Conditional visibility
+            if getattr(param, "visible_if", None):
+                ok = True
+                for k, v in param.visible_if.items():
+                    if node.params.get(k) != v:
+                        ok = False; break
+                if not ok:
+                    continue
             pr = ParamRow(param, node.params.get(param.name, param.default))
             pr.value_changed.connect(
                 lambda name, val, nid=node.node_id:
@@ -430,9 +448,22 @@ class PropertiesPanel(QWidget):
         self._params_scroll.setWidget(container)
 
     def _on_param_changed(self, node_id: str, name: str, value: Any):
-        if self._graph and node_id in self._graph.nodes:
-            self._graph.nodes[node_id].params[name] = value
-            self.params_changed.emit(node_id)
+        if not (self._graph and node_id in self._graph.nodes):
+            return
+        node = self._graph.nodes[node_id]
+        node.params[name] = value
+        self.params_changed.emit(node_id)
+        # Nếu có param khác phụ thuộc vào tên này → rebuild để cập nhật visibility.
+        # Defer qua event loop: nếu rebuild ngay trong slot sẽ xoá chính widget
+        # đang phát signal (vd QComboBox source_mode) → crash C++ deleted object.
+        if any(getattr(p, "visible_if", None) and name in p.visible_if
+                for p in node.tool.params):
+            QTimer.singleShot(0, lambda nid=node_id: self._rebuild_params_if_current(nid))
+
+    def _rebuild_params_if_current(self, node_id: str):
+        if (self._graph and self._current_node_id == node_id
+                and node_id in self._graph.nodes):
+            self._build_params_tab(self._graph.nodes[node_id])
 
     def _refresh_outputs_tab(self, node: NodeInstance):
         self._out_scroll.setWidget(OutputsWidget(node))

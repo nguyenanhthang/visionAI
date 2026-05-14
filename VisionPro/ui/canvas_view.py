@@ -92,6 +92,7 @@ class AOIScene(QGraphicsScene):
         self._signals.delete_req.connect(self._delete_node)
         self._signals.open_props.connect(self.node_selected)
         self._signals.moved.connect(self._on_node_moved)
+        self._signals.ports_changed.connect(self._on_ports_changed)
 
         self._drag_port: Optional[PortItem] = None
         self._temp_curve: Optional[TempCurve] = None
@@ -143,6 +144,21 @@ class AOIScene(QGraphicsScene):
         self.node_deselected.emit()
         self.graph_changed.emit()
 
+    def _on_ports_changed(self, node_id: str):
+        """Khi node thêm/xoá output terminal — vẽ lại các connection liên quan."""
+        for conn in self.graph.connections_for_node(node_id):
+            ci = self._conn_items.get(conn.conn_id)
+            if not ci:
+                continue
+            si = self._node_items.get(conn.src_id)
+            di = self._node_items.get(conn.dst_id)
+            if not si or not di:
+                continue
+            sp = si.get_port_scene_pos(conn.src_port, True)
+            dp = di.get_port_scene_pos(conn.dst_port, False)
+            if sp and dp:
+                ci.update_positions(sp, dp)
+
     def _on_node_moved(self, node_id: str, x: float, y: float):
         for conn in self.graph.connections_for_node(node_id):
             ci = self._conn_items.get(conn.conn_id)
@@ -157,12 +173,25 @@ class AOIScene(QGraphicsScene):
                     ci.update_positions(sp, dp)
 
     def _port_at(self, scene_pos: QPointF) -> Optional[PortItem]:
+        """Tìm PortItem GẦN NHẤT trong bán kính SNAP (px scene).
+        QGraphicsScene.items() trả về theo z-order, không theo khoảng cách —
+        nên với các port xếp dọc khít nhau (Acquire Image: image/width/height/...)
+        có thể trả về nhầm port khác → fix: chọn theo Euclidean distance.
+        """
         SNAP = 16.0
+        best: Optional[PortItem] = None
+        best_d2 = SNAP * SNAP + 1
         for item in self.items(QRectF(scene_pos.x()-SNAP, scene_pos.y()-SNAP,
                                        SNAP*2, SNAP*2)):
-            if isinstance(item, PortItem):
-                return item
-        return None
+            if not isinstance(item, PortItem):
+                continue
+            c = item.scene_center()
+            dx = c.x() - scene_pos.x(); dy = c.y() - scene_pos.y()
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best_d2 = d2
+                best = item
+        return best
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:

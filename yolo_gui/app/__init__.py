@@ -1,1 +1,0 @@
-# YOLO GUI Application package

@@ -202,8 +202,17 @@ class ResultsPanel(QWidget):
             st_item.setForeground(QBrush(QColor(sc)))
             st_item.setFont(QFont("Courier New", 10, QFont.Bold))
 
-            dur_item = QTableWidgetItem(f"{duration_ms:.0f}ms")
-            dur_item.setForeground(QBrush(QColor("#64748b")))
+            # Per-node elapsed_ms từ FlowGraph.execute; fallback về total
+            # nếu node cũ chưa có field.
+            node_ms = res.get("elapsed_ms")
+            if node_ms is None and node is not None:
+                node_ms = getattr(node, "last_run_ms", 0.0)
+            if node_ms is None:
+                node_ms = duration_ms
+            dur_item = QTableWidgetItem(f"{node_ms:.0f}ms")
+            # Tô đỏ nếu > 200ms để dễ thấy bottleneck
+            dur_color = "#ff8a4d" if node_ms > 200 else "#64748b"
+            dur_item.setForeground(QBrush(QColor(dur_color)))
 
             outputs = res.get("outputs", {})
             out_parts = []

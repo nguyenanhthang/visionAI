@@ -1,1 +1,0 @@
-d:\Folder_python\thang\venv\ultra\Scripts\python.exe d:/Folder_python/thang/venv/yolo_gui/main.py

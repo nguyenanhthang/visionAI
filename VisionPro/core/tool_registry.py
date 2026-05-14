@@ -31,6 +31,8 @@ class ParamDef:
     choices: List[str] = field(default_factory=list)
     step: Any = 1
     tooltip: str = ""
+    # Conditional visibility: dict {param_name: required_value}
+    visible_if: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -72,33 +74,95 @@ def _draw_pass_fail(img, is_pass, text=""):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_acquire_image(inputs, params):
-    """CogAcqFifoTool — Acquire image từ file hoặc camera."""
+    """CogAcqFifoTool — Acquire image từ file đơn hoặc folder (frame index).
+
+    Ưu tiên: folder_path > file_path.
+    Khi folder_path là thư mục có ảnh, sẽ lấy ảnh tại index `frame_index`
+    (modulo số file). Hỗ trợ .png .jpg .jpeg .bmp .tif .tiff.
+    """
+    mode = params.get("source_mode", "Folder")
+    folder = params.get("folder_path", "") or ""
+    files = []
+    if mode == "Folder" and folder and os.path.isdir(folder):
+        exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+        try:
+            files = sorted(
+                f for f in os.listdir(folder)
+                if f.lower().endswith(exts) and os.path.isfile(os.path.join(folder, f))
+            )
+        except OSError:
+            files = []
+
+    if files:
+        idx = int(params.get("frame_index", 0)) % len(files)
+        path = os.path.join(folder, files[idx])
+        img = cv2.imread(path)
+        if img is not None:
+            h, w = img.shape[:2]
+            # Auto-advance: lần Run kế tiếp sẽ sang ảnh kế tiếp (cycle)
+            if params.get("auto_advance", True):
+                params["frame_index"] = (idx + 1) % len(files)
+            return {"image": img, "width": w, "height": h,
+                    "acquired": True, "frame_number": idx,
+                    "file_name": files[idx], "frame_count": len(files)}
+
     path = params.get("file_path", "")
     if path and os.path.exists(path):
         img = cv2.imread(path)
         if img is not None:
-            h,w = img.shape[:2]
+            h, w = img.shape[:2]
             return {"image": img, "width": w, "height": h,
-                    "acquired": True, "frame_number": 0}
+                    "acquired": True, "frame_number": 0,
+                    "file_name": os.path.basename(path), "frame_count": 1}
+
     w = max(1, params.get("width", 640))
     h = max(1, params.get("height", 480))
-    img = np.zeros((h,w,3), dtype=np.uint8)
-    cv2.putText(img,"No Image Acquired",(w//2-120,h//2),
-                cv2.FONT_HERSHEY_SIMPLEX,1,(50,50,80),2)
-    return {"image":img,"width":w,"height":h,"acquired":False,"frame_number":0}
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    cv2.putText(img, "No Image Acquired", (w//2 - 120, h//2),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (50, 50, 80), 2)
+    return {"image": img, "width": w, "height": h, "acquired": False,
+            "frame_number": 0, "file_name": "", "frame_count": 0}
 
 def proc_camera_acquire(inputs, params):
-    """CogAcqFifoTool (Camera) — Capture từ camera."""
-    cap = cv2.VideoCapture(params.get("camera_id",0))
-    if params.get("width",0)>0: cap.set(cv2.CAP_PROP_FRAME_WIDTH,params["width"])
-    if params.get("height",0)>0: cap.set(cv2.CAP_PROP_FRAME_HEIGHT,params["height"])
-    ret, frame = cap.read(); cap.release()
-    if not ret:
-        frame = np.zeros((480,640,3),dtype=np.uint8)
-        cv2.putText(frame,"Camera Error",(200,240),cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,200),2)
-        return {"image":frame,"width":640,"height":480,"acquired":False,"frame_number":0}
-    h,w = frame.shape[:2]
-    return {"image":frame,"width":w,"height":h,"acquired":True,"frame_number":0}
+    """CogAcqFifoTool (Camera) — Capture từ OpenCV/USB hoặc HikRobot/Do3think MVS."""
+    backend = (params.get("backend") or "OpenCV").strip()
+    try:
+        from core.camera import CameraRegistry, CameraError
+        reg = CameraRegistry.instance()
+        if backend in ("HikRobot/Do3think", "HikRobot", "Do3think", "MVS"):
+            kwargs = {"device_index": int(params.get("device_index", 0))}
+            sn = (params.get("serial") or "").strip()
+            if sn:
+                kwargs["serial"] = sn
+            kwargs["access_mode"] = (params.get("access_mode") or "exclusive").lower()
+            kwargs["heartbeat_ms"] = int(params.get("heartbeat_ms", 5000))
+            cam = reg.get_or_open("mvs", **kwargs)
+            # Continuous grab: pipeline lấy frame buffered <1ms thay vì
+            # chờ ~33ms cho khung kế tiếp. Tắt khi cần single-frame chính
+            # xác lúc trigger (vd. PLC trigger camera đồng bộ).
+            if bool(params.get("continuous_grab", True)):
+                cam.start_continuous()
+            else:
+                cam.stop_continuous()
+        else:
+            cam = reg.get_or_open(
+                "opencv",
+                index=int(params.get("camera_id", 0)),
+                width=int(params.get("width", 0)),
+                height=int(params.get("height", 0)))
+        frame = cam.grab(timeout_ms=int(params.get("timeout_ms", 1000)))
+    except Exception as e:
+        msg = str(e)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(frame, f"Cam err: {msg[:40]}", (10, 240),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 200), 2)
+        return {"image": frame, "width": 640, "height": 480,
+                "acquired": False, "frame_number": 0}
+    if frame.ndim == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    h, w = frame.shape[:2]
+    return {"image": frame, "width": w, "height": h,
+            "acquired": True, "frame_number": 0}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -109,44 +173,203 @@ def proc_patmax(inputs, params):
     """
     CogPatMaxPatternAlignTool — dùng PatMaxEngine.
     Model được train trong PatMaxDialog (double-click node).
+    Hỗ trợ multi-pattern: nếu params có "_patmax_models" (list) sẽ search
+    qua tất cả models và gộp kết quả qua run_patmax_multi.
     """
-    from core.patmax_engine import (PatMaxModel, run_patmax,
+    from core.patmax_engine import (PatMaxModel, run_patmax, run_patmax_multi,
                                      draw_patmax_results, _empty_vis)
     img = inputs.get("image")
     if img is None:
         return {"image": None, "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
 
+    models_list = params.get("_patmax_models") or []
+    model: PatMaxModel = params.get("_patmax_model") or PatMaxModel()
+    use_multi = (params.get("_patmax_roi_mode") == "multi_pattern"
+                 and isinstance(models_list, list)
+                 and any(m.is_valid() for m in models_list))
+
+    if not use_multi and not model.is_valid():
+        vis = _empty_vis(_bgr(img))
+        return {"image": vis, "found": False, "score": 0.0,
+                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
+
+    ref = models_list[0] if use_multi else model
+    ang_low  = ref.angle_low
+    ang_high = ref.angle_high
+    ang_step = max(0.5, ref.angle_step)
+    sc_low   = ref.scale_low
+    sc_high  = ref.scale_high
+    sc_step  = max(0.01, getattr(ref, "scale_step", 0.1) or 0.1)
+
+    # Ưu tiên giá trị đã save trong model (PatMaxDialog auto-save). Fall back
+    # node.params chỉ khi model chưa có (PatMaxModel default = 1, ổn).
+    nr = max(1, int(ref.num_results or 0)) or int(params.get("num_results", 1))
+    ot = float(getattr(ref, "overlap_threshold", 0.5) or 0.5)
+    at = float(ref.accept_threshold or 0.5)
+
+    # Speed knobs
+    try:
+        ds = max(1, int(params.get("coarse_downscale", 1)))
+    except (TypeError, ValueError):
+        ds = 1
+    chans = (True, bool(params.get("use_edge", True)),
+                    bool(params.get("use_sqdiff", True)))
+
+    if use_multi:
+        results, score_map = run_patmax_multi(
+            _bgr(img), [m for m in models_list if m.is_valid()],
+            accept_threshold=at,
+            angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
+            scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
+            num_results_per_model=nr,
+            overlap_threshold=ot,
+            coarse_downscale=ds, channels=chans,
+        )
+        # Vẽ với model đầu tiên (origin reference) — multi-pattern share style
+        model = ref
+    else:
+        results, score_map = run_patmax(
+            _bgr(img), model,
+            accept_threshold=at,
+            angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
+            scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
+            num_results=nr,
+            overlap_threshold=ot,
+            coarse_downscale=ds, channels=chans,
+        )
+
+    vis = draw_patmax_results(_bgr(img), results, model)
+
+    objects = [
+        {"x": r.origin_x, "y": r.origin_y, "score": r.score,
+         "angle": r.angle, "scale": r.scale,
+         "center_x": r.x, "center_y": r.y,
+         "origin_x": r.origin_x, "origin_y": r.origin_y}
+        for r in results
+    ]
+    if results:
+        r = results[0]
+        out = {"image": vis, "found": True, "score": r.score,
+               "x": r.origin_x, "y": r.origin_y,
+               "angle": r.angle, "scale": r.scale,
+               "num_found": len(results), "objects": objects}
+    else:
+        out = {"image": vis, "found": False, "score": 0.0,
+               "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+               "num_found": 0, "objects": []}
+    # Extra terminals: [{"object": int, "field": str, "name": str}, ...]
+    for term in (params.get("_extra_terminals") or []):
+        try:
+            obj_idx = int(term.get("object", 0))
+            field = str(term.get("field", "x"))
+            name = term.get("name") or f"{field}_{obj_idx}"
+            if 0 <= obj_idx < len(objects):
+                out[name] = objects[obj_idx].get(field, 0.0)
+            else:
+                out[name] = 0.0
+        except Exception:
+            continue
+    return out
+
+
+def _is_gray_image(img) -> bool:
+    """True nếu ảnh là grayscale (1 kênh, hoặc 3 kênh nhưng B==G==R)."""
+    if img is None:
+        return False
+    if len(img.shape) == 2:
+        return True
+    if len(img.shape) == 3 and img.shape[2] == 1:
+        return True
+    if len(img.shape) == 3 and img.shape[2] >= 3:
+        b, g, r = img[:,:,0], img[:,:,1], img[:,:,2]
+        return bool(np.array_equal(b, g) and np.array_equal(g, r))
+    return False
+
+
+def proc_patmax_align(inputs, params):
+    """
+    PatMax Align Tool — dispatch theo Algorithm + Train Mode (Cognex-style
+    behavioral approximation). Validate input gray; nếu không gray trả ảnh
+    gốc + found=False (UI dialog popup cảnh báo khi user ấn Train).
+    """
+    from core.patmax_engine import (PatMaxModel, run_patmax_align,
+                                     draw_patmax_results, _empty_vis)
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "found": False, "score": 0.0,
+                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+                "num_found": 0, "objects": []}
+    if not _is_gray_image(img):
+        return {"image": _bgr(img), "found": False, "score": 0.0,
+                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+                "num_found": 0, "objects": []}
+
     model: PatMaxModel = params.get("_patmax_model") or PatMaxModel()
     if not model.is_valid():
         vis = _empty_vis(_bgr(img))
         return {"image": vis, "found": False, "score": 0.0,
-                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
+                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+                "num_found": 0, "objects": []}
+
+    algorithm        = str(params.get("algorithm", "PatQuick"))
+    train_mode_align = str(params.get("train_mode", "Image"))
 
     ang_low  = model.angle_low
     ang_high = model.angle_high
     ang_step = max(0.5, model.angle_step)
     sc_low   = model.scale_low
     sc_high  = model.scale_high
+    sc_step  = max(0.01, getattr(model, "scale_step", 0.1) or 0.1)
+    nr = max(1, int(model.num_results or 0)) or int(params.get("num_results", 1))
+    ot = float(getattr(model, "overlap_threshold", 0.5) or 0.5)
+    at = float(model.accept_threshold or params.get("accept_threshold", 0.5))
 
-    results, score_map = run_patmax(
+    try:
+        ds = max(1, int(params.get("coarse_downscale", 1)))
+    except (TypeError, ValueError):
+        ds = 1
+
+    results, _ = run_patmax_align(
         _bgr(img), model,
-        accept_threshold=params.get("accept_threshold", model.accept_threshold),
+        algorithm=algorithm,
+        train_mode_align=train_mode_align,
+        accept_threshold=at,
         angle_low=ang_low, angle_high=ang_high, angle_step=ang_step,
-        scale_low=sc_low,  scale_high=sc_high,  scale_step=0.05,
-        num_results=params.get("num_results", model.num_results),
-        overlap_threshold=params.get("overlap_threshold", 0.5),
+        scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
+        num_results=nr,
+        overlap_threshold=ot,
+        coarse_downscale=ds,
+        build_score_map=False,   # production: skip heatmap (caller discards)
     )
-
     vis = draw_patmax_results(_bgr(img), results, model)
-
+    objects = [
+        {"x": r.origin_x, "y": r.origin_y, "score": r.score,
+         "angle": r.angle, "scale": r.scale,
+         "center_x": r.x, "center_y": r.y,
+         "origin_x": r.origin_x, "origin_y": r.origin_y}
+        for r in results
+    ]
     if results:
         r = results[0]
-        return {"image": vis, "found": True, "score": r.score,
-                "x": r.x, "y": r.y, "angle": r.angle, "scale": r.scale,
-                "num_found": len(results)}
-    return {"image": vis, "found": False, "score": 0.0,
-            "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
+        out = {"image": vis, "found": True, "score": r.score,
+               "x": r.origin_x, "y": r.origin_y,
+               "angle": r.angle, "scale": r.scale,
+               "num_found": len(results), "objects": objects}
+    else:
+        out = {"image": vis, "found": False, "score": 0.0,
+               "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
+               "num_found": 0, "objects": []}
+    for term in (params.get("_extra_terminals") or []):
+        try:
+            obj_idx = int(term.get("object", 0))
+            field = str(term.get("field", "x"))
+            name = term.get("name") or f"{field}_{obj_idx}"
+            out[name] = (objects[obj_idx].get(field, 0.0)
+                          if 0 <= obj_idx < len(objects) else 0.0)
+        except Exception:
+            continue
+    return out
 
 
 def proc_patfind(inputs, params):
@@ -838,9 +1061,10 @@ def proc_gaussian_blur(inputs, params):
 def proc_crop(inputs, params):
     """
     Crop ROI logic:
-    - Nếu port x/y/w/h CÓ giá trị (được kết nối từ upstream) → dùng giá trị đó
-    - Nếu port KHÔNG có giá trị → dùng vùng vẽ thủ công (_drawn_roi trong params)
-      hoặc fallback về x/y/crop_w/crop_h trong params
+    - Mỗi port x/y/w/h: nếu CÓ giá trị từ upstream → ưu tiên dùng;
+      port nào KHÔNG kết nối thì fall back về params / _drawn_roi.
+    - Cho phép half-connect: ví dụ PatMax chỉ cung cấp x/y (không w/h) →
+      x/y track theo PatMax, w/h lấy từ Width/Height params.
     """
     img = inputs.get("image")
     if img is None:
@@ -848,38 +1072,49 @@ def proc_crop(inputs, params):
 
     ih, iw = img.shape[:2]
 
-    # Kiểm tra xem port x/y/w/h có được kết nối (giá trị không phải None)
-    port_x = inputs.get("x")   # None nếu không kết nối
+    port_x = inputs.get("x")
     port_y = inputs.get("y")
     port_w = inputs.get("w")
     port_h = inputs.get("h")
 
-    ports_connected = (port_x is not None and port_y is not None
-                       and port_w is not None and port_h is not None)
-
-    if ports_connected:
-        # MODE 1: Dùng giá trị từ port (tracking từ PatMax hoặc tool khác)
-        x  = int(float(port_x))
-        y  = int(float(port_y))
-        cw = int(float(port_w))
-        ch = int(float(port_h))
-        mode_label = "TRACKED"
-        border_color = (0, 255, 180)   # xanh lá = tracking
+    # Default từ _drawn_roi (vẽ tay) hoặc params spinbox
+    drawn = params.get("_drawn_roi")
+    if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
+        dx, dy, dw, dh = [int(v) for v in drawn]
+        manual_src = "MANUAL ROI"
     else:
-        # MODE 2: Dùng vùng vẽ thủ công (_drawn_roi) hoặc params thủ công
-        drawn = params.get("_drawn_roi")  # (x,y,w,h) được lưu từ InteractiveImageLabel
-        if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
-            x, y, cw, ch = [int(v) for v in drawn]
-            mode_label = "MANUAL ROI"
-            border_color = (0, 212, 255)   # cyan = vẽ tay
-        else:
-            # Fallback: dùng params spinbox
-            x  = int(params.get("x", 0))
-            y  = int(params.get("y", 0))
-            cw = int(params.get("crop_w", 320))
-            ch = int(params.get("crop_h", 240))
-            mode_label = "PARAMS"
-            border_color = (150, 150, 255)  # tím nhạt = params
+        # First-run init: chưa từng drawn, chưa từng có port → default w/h
+        # = kích thước ảnh nguồn (full image), không phải 320x240 cứng.
+        if not params.get("_crop_initialized"):
+            params["x"] = 0
+            params["y"] = 0
+            params["crop_w"] = iw
+            params["crop_h"] = ih
+            params["_crop_initialized"] = True
+        dx = int(params.get("x", 0))
+        dy = int(params.get("y", 0))
+        dw = int(params.get("crop_w", iw))
+        dh = int(params.get("crop_h", ih))
+        manual_src = "PARAMS"
+
+    # Per-port override
+    x  = int(float(port_x)) if port_x is not None else dx
+    y  = int(float(port_y)) if port_y is not None else dy
+    cw = int(float(port_w)) if port_w is not None else dw
+    ch = int(float(port_h)) if port_h is not None else dh
+
+    tracked_ports = [n for n, v in [("x", port_x), ("y", port_y),
+                                     ("w", port_w), ("h", port_h)]
+                     if v is not None]
+    if not tracked_ports:
+        mode_label = manual_src
+        border_color = (0, 212, 255) if manual_src == "MANUAL ROI" else (150, 150, 255)
+    elif len(tracked_ports) == 4:
+        mode_label = "TRACKED"
+        border_color = (0, 255, 180)
+    else:
+        mode_label = "TRACKED " + "".join(tracked_ports)
+        border_color = (0, 255, 180)
 
     # Clamp
     x  = max(0, min(x,  iw - 1))
@@ -887,22 +1122,30 @@ def proc_crop(inputs, params):
     cw = max(1, min(cw, iw - x))
     ch = max(1, min(ch, ih - y))
 
-    roi = img[y:y + ch, x:x + cw]
+    # Persist giá trị thực tế (đã clamp) ngược vào params nếu nguồn là
+    # MANUAL ROI / PARAMS — để spinbox hiển thị đúng vùng đang cắt sau khi
+    # user vẽ ROI rồi Run. Không ghi đè khi đang TRACKED qua port.
+    if not tracked_ports:
+        params["x"] = x
+        params["y"] = y
+        params["crop_w"] = cw
+        params["crop_h"] = ch
 
-    # Vẽ overlay trên ảnh gốc — không modify ảnh gốc
-    vis = _bgr(img.copy())
-    cv2.rectangle(vis, (x, y), (x + cw, y + ch), border_color, 2)
-    # Label góc trên trái
-    lbl_y = max(16, y - 6)
-    cv2.putText(vis, f"[{mode_label}] ({x},{y}) {cw}×{ch}",
-                (x + 2, lbl_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, border_color, 1)
-    # Góc bo nhẹ
-    cv2.rectangle(vis, (x, y), (x + 8, y + 8), border_color, -1)
-    cv2.rectangle(vis, (x + cw - 8, y), (x + cw, y + 8), border_color, -1)
-    cv2.rectangle(vis, (x, y + ch - 8), (x + 8, y + ch), border_color, -1)
-    cv2.rectangle(vis, (x + cw - 8, y + ch - 8), (x + cw, y + ch), border_color, -1)
+    roi = img[y:y + ch, x:x + cw].copy()
 
-    return {"image": vis, "roi_image": roi, "x": x, "y": y, "w": cw, "h": ch}
+    # Output port "image" = vùng đã cắt (crop result), không phải ảnh gốc
+    # với rectangle overlay → downstream tool thấy đúng vùng ROI để xử lý.
+    # Vẽ nhãn nhỏ ở góc trái trên ROI để biết source x,y,w,h và mode.
+    vis_roi = _bgr(roi.copy())
+    label = f"[{mode_label}] ({x},{y}) {cw}x{ch}"  # 'x' ASCII (cv2.putText
+    # không hỗ trợ unicode ×). Outline đen + chữ màu border_color cho dễ đọc.
+    cv2.putText(vis_roi, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.putText(vis_roi, label, (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                border_color, 1, cv2.LINE_AA)
+
+    return {"image": vis_roi, "roi_image": roi,
+            "x": x, "y": y, "w": cw, "h": ch}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1210,37 +1453,111 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
   ToolDef("acquire_image","Acquire Image","Acquire Image",
-    "Load ảnh từ file — CogAcqFifoTool","#0f3460","🖼",
+    "Load ảnh từ file hoặc folder — CogAcqFifoTool","#0f3460","🖼",
     [],[PortDef("image","image"),PortDef("width","number"),PortDef("height","number"),
-        PortDef("acquired","bool")],
-    [P("file_path","Image File","str","",tooltip="Đường dẫn file ảnh"),
+        PortDef("acquired","bool"),PortDef("frame_number","number"),
+        PortDef("frame_count","number"),PortDef("file_name","str")],
+    [ParamDef("source_mode","Source Mode","enum","Folder",
+              choices=["Folder","File"],
+              tooltip="Chọn nguồn ảnh: 1 thư mục cycle qua các ảnh, hoặc 1 file"),
+     ParamDef("folder_path","Image Folder","str","",
+              tooltip="Thư mục chứa ảnh",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("frame_index","Frame Index","int",0,0,99999,
+              tooltip="Index ảnh trong folder — sẽ tự modulo theo số file",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("auto_advance","Auto Advance","bool",True,
+              tooltip="Mỗi lần Run sẽ tự sang ảnh kế tiếp (cycle qua folder)",
+              visible_if={"source_mode":"Folder"}),
+     ParamDef("file_path","Image File","str","",
+              tooltip="Đường dẫn 1 file ảnh",
+              visible_if={"source_mode":"File"}),
      P("width","Width","int",640,1,8192),P("height","Height","int",480,1,8192)],
     proc_acquire_image, "CogAcqFifoTool"),
 
   ToolDef("camera_acquire","Camera Acquire","Acquire Image",
-    "Capture từ camera — CogAcqFifoTool","#0f3460","📷",
+    "Capture từ camera (OpenCV / HikRobot / Do3think) — CogAcqFifoTool","#0f3460","📷",
     [],[PortDef("image","image"),PortDef("width","number"),PortDef("height","number"),
         PortDef("acquired","bool")],
-    [P("camera_id","Camera ID","int",0,0,16),
-     P("width","Width","int",0,0,8192,tooltip="0=auto"),
-     P("height","Height","int",0,0,8192,tooltip="0=auto")],
+    [P("backend","Backend","enum","OpenCV",
+        choices=["OpenCV","HikRobot/Do3think"],
+        tooltip="OpenCV cho USB UVC; HikRobot/Do3think dùng MVS SDK (Windows only)"),
+     P("camera_id","OpenCV index","int",0,0,16,
+        visible_if={"backend":"OpenCV"}),
+     P("width","Width","int",0,0,8192,tooltip="0=auto",
+        visible_if={"backend":"OpenCV"}),
+     P("height","Height","int",0,0,8192,tooltip="0=auto",
+        visible_if={"backend":"OpenCV"}),
+     P("device_index","MVS device index","int",0,0,16,
+        tooltip="0-based theo enumeration order",
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("serial","MVS serial number","str","",
+        tooltip="Để trống để dùng device_index. Khuyến nghị dùng serial khi có nhiều cam.",
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("access_mode","Access mode","enum","exclusive",
+        choices=["exclusive","monitor","control"],
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("heartbeat_ms","Heartbeat (ms)","int",5000,500,60000,
+        tooltip="GigE heartbeat timeout",
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("continuous_grab","Continuous grab","bool",True,
+        tooltip="Thread chạy nền grab liên tục, pipeline lấy frame buffered <1ms. "
+                "Tắt nếu cần single-frame chính xác lúc PLC trigger.",
+        visible_if={"backend":"HikRobot/Do3think"}),
+     P("timeout_ms","Grab timeout (ms)","int",1000,10,30000)],
     proc_camera_acquire, "CogAcqFifoTool"),
 
   # ── PATTERN FIND ────────────────────────────────────────────────
-  ToolDef("patmax","PatMax","Pattern Find",
+  ToolDef("patmax","Search PatMax","Pattern Find",
     "Pattern matching nâng cao với xoay góc — CogPatMaxPatternAlignTool",
     "#16213e","🎯",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
      PortDef("x","number"),PortDef("y","number"),PortDef("angle","number"),
-     PortDef("scale","number"),PortDef("num_found","number")],
+     PortDef("scale","number"),PortDef("num_found","number"),
+     PortDef("objects","list")],
     [P("accept_threshold","Accept Threshold","float",0.5,0,1,step=0.01,
        tooltip="Ngưỡng điểm số chấp nhận (0-1)"),
      P("angle_range","Angle Range (°)","float",0,0,180,step=5,
        tooltip="Tìm kiếm trong ±angle_range độ. 0=không xoay"),
      P("angle_step","Angle Step (°)","float",5,1,45,step=1),
-     P("num_results","Max Results","int",1,1,20)],
+     P("num_results","Max Results","int",1,1,20),
+     P("coarse_downscale","Coarse downscale","enum","1",
+       choices=["1","2","4"],
+       tooltip="Speed-up: search ở 1/ds resolution. 2 ≈ 4× nhanh, 4 ≈ 16× nhanh. "
+               "Độ chính xác ±ds pixel"),
+     P("use_edge","Use edge channel","bool",True,
+       tooltip="Tắt để giảm ~30% thời gian khi pattern không phụ thuộc edges"),
+     P("use_sqdiff","Use SQDIFF channel","bool",True,
+       tooltip="Tắt để giảm ~30% thời gian khi pattern có texture rõ")],
     proc_patmax, "CogPatMaxPatternAlignTool"),
+
+  ToolDef("patmax_align","PatMax Align Tool","Pattern Find",
+    "PatMax Pattern Align — chọn Algorithm & Train Mode (CogPMAlignTool)",
+    "#16213e","🎯",
+    [PortDef("image","image")],
+    [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
+     PortDef("x","number"),PortDef("y","number"),PortDef("angle","number"),
+     PortDef("scale","number"),PortDef("num_found","number"),
+     PortDef("objects","list")],
+    [P("algorithm","Algorithm","enum","PatQuick",
+       choices=["PatMax","PatQuick","PatMax & PatQuick","PatFlex",
+                "PatMax - High Sensitivity","Perspective PatMax"],
+       tooltip="Thuật toán matching pattern"),
+     P("train_mode","Train Mode","enum","Image",
+       choices=["Image","Shape Models with Image","Shape Models with Transform"],
+       tooltip="Chế độ train pattern"),
+     P("accept_threshold","Accept Threshold","float",0.5,0,1,step=0.01,
+       tooltip="Ngưỡng điểm số chấp nhận (0-1)"),
+     P("angle_range","Angle Range (°)","float",0,0,180,step=5,
+       tooltip="Tìm kiếm trong ±angle_range độ. 0=không xoay"),
+     P("angle_step","Angle Step (°)","float",5,1,45,step=1),
+     P("num_results","Max Results","int",1,1,20),
+     P("coarse_downscale","Coarse downscale","enum","1",
+       choices=["1","2","4"],
+       tooltip="Speed-up: search ở 1/ds resolution. 2 ≈ 4× nhanh, 4 ≈ 16× nhanh. "
+               "Vị trí ±ds pixel; Perspective/PatFlex tự refine ở full-res")],
+    proc_patmax_align, "CogPMAlignTool"),
 
   ToolDef("patfind","PatFind","Pattern Find",
     "Pattern matching nhanh (NCC) — CogPMAlignTool","#16213e","🔍",

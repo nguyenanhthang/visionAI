@@ -22,6 +22,7 @@ from ui.properties_panel import PropertiesPanel
 from ui.results_panel import ResultsPanel
 from ui.image_viewer import ImageViewerPanel
 from ui.node_detail_dialog import NodeDetailDialog
+from core.plc import PLCManager
 
 
 # ── Worker ────────────────────────────────────────────────────────
@@ -95,6 +96,10 @@ class MainWindow(QMainWindow):
         self._worker_thread: Optional[QThread] = None
         self._is_running    = False
         self._detail_dialogs: dict = {}   # node_id → NodeDetailDialog
+
+        # PLC integration — persistent manager, shared with PLCDialog
+        self._plc_manager = PLCManager()
+        self._plc_dialog = None
 
         self._build_ui()
         self._build_menu()
@@ -272,6 +277,14 @@ class MainWindow(QMainWindow):
         act_yolo_label = yolo_m.addAction("✏ Label Images...")
         act_yolo_label.triggered.connect(self._open_yolo_studio)
 
+        tools_m = mb.addMenu("Tools")
+        act_plc = tools_m.addAction("🔌  PLC Connection…")
+        act_plc.setShortcut("Ctrl+P")
+        act_plc.triggered.connect(self._open_plc_dialog)
+        act_cam = tools_m.addAction("📷  Camera Setup…")
+        act_cam.setShortcut("Ctrl+Shift+C")
+        act_cam.triggered.connect(self._open_camera_dialog)
+
         help_m = mb.addMenu("Help")
         help_m.addAction("About").triggered.connect(self._about)
         help_m.addAction("Shortcuts").triggered.connect(self._shortcuts)
@@ -338,7 +351,7 @@ class MainWindow(QMainWindow):
             self._open_yolo_studio(initial_img)
             return
 
-        if node.tool.tool_id in ("patmax", "patfind"):
+        if node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
             from ui.patmax_dialog import PatMaxDialog
             dlg = PatMaxDialog(node, self._graph, self)
             dlg.run_requested.connect(self._on_detail_run)
@@ -407,16 +420,26 @@ class MainWindow(QMainWindow):
         self._img_viewer.refresh_node_list()
         self._img_viewer.refresh_current()
 
-        # Refresh any open detail dialogs
+        # Refresh any open detail dialogs (PatMaxDialog không có refresh_outputs)
         for nid, dlg in self._detail_dialogs.items():
-            if dlg.isVisible():
+            if dlg.isVisible() and hasattr(dlg, "refresh_outputs"):
                 dlg.refresh_outputs()
 
         self._finalize_run()
         self._set_status("PASS", "#39ff14")
+        # Per-node breakdown — giúp xác định node nào chậm
+        breakdown = sorted(
+            [(self._graph.nodes[nid].tool.name if nid in self._graph.nodes else nid,
+              r.get("elapsed_ms", 0.0))
+             for nid, r in results.items()],
+            key=lambda x: -x[1])[:3]
+        slow = "  |  " + ", ".join(f"{n}: {ms:.0f}ms" for n, ms in breakdown) if breakdown else ""
         self.statusBar().showMessage(
-            f"Pipeline done in {dur_ms:.1f} ms  —  {len(results)} nodes", 5000)
+            f"Pipeline done in {dur_ms:.1f} ms  —  {len(results)} nodes{slow}", 8000)
         QTimer.singleShot(5000, lambda: self._set_status("IDLE", "#64748b"))
+
+        # Đẩy kết quả về PLC (nếu đang connected)
+        self._send_result_to_plc(results)
 
     def _on_run_error(self, msg: str):
         self._finalize_run()
@@ -584,6 +607,57 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"✅ YOLO model added: {model_path}", 5000)
 
+    # ── PLC ───────────────────────────────────────────────────────
+    def _open_plc_dialog(self):
+        from ui.plc_dialog import PLCDialog
+        if self._plc_dialog and self._plc_dialog.isVisible():
+            self._plc_dialog.set_graph(self._graph)
+            self._plc_dialog.raise_()
+            self._plc_dialog.activateWindow()
+            return
+        self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
+        self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
+        self._plc_dialog.show()
+
+    def _open_camera_dialog(self):
+        from ui.camera_dialog import CameraSetupDialog
+        if getattr(self, "_cam_dialog", None) and self._cam_dialog.isVisible():
+            self._cam_dialog.raise_(); self._cam_dialog.activateWindow(); return
+        self._cam_dialog = CameraSetupDialog(self)
+        self._cam_dialog.show()
+
+    def _on_plc_trigger(self):
+        """PLC kích hoạt → chạy pipeline (chỉ khi đang idle)."""
+        if self._is_running:
+            self.statusBar().showMessage("PLC trigger ignored — pipeline already running", 3000)
+            return
+        self._start_run()
+
+    def _send_result_to_plc(self, results: dict):
+        """Gửi PASS/FAIL + dữ liệu mapping (length, area...) về PLC."""
+        if not self._plc_manager.is_connected:
+            return
+        passed = all(n.status not in ("fail", "error")
+                     for n in self._graph.nodes.values())
+        try:
+            self._plc_manager.write_result(passed=passed)
+        except Exception as e:
+            self.statusBar().showMessage(f"PLC write PASS/FAIL error: {e}", 5000)
+            return
+
+        mappings = self._plc_manager.config.data_mappings
+        if not mappings:
+            self.statusBar().showMessage(
+                f"→ PLC: {'PASS' if passed else 'FAIL'}", 3000)
+            return
+
+        report = self._plc_manager.write_data_mappings(results)
+        ok = sum(1 for r in report if "error" not in r)
+        err = len(report) - ok
+        self.statusBar().showMessage(
+            f"→ PLC: {'PASS' if passed else 'FAIL'}  "
+            f"({ok} values{', '+str(err)+' errors' if err else ''})", 4000)
+
     def _about(self):
         QMessageBox.about(self, "AOI Vision Pro",
             "<h2 style='color:#00d4ff;'>AOI Vision Pro v1.0</h2>"
@@ -620,4 +694,13 @@ class MainWindow(QMainWindow):
             self._stop_run()
         for dlg in list(self._detail_dialogs.values()):
             dlg.close()
+        try:
+            self._plc_manager.disconnect()
+        except Exception:
+            pass
+        try:
+            from core.camera import CameraRegistry
+            CameraRegistry.instance().close_all()
+        except Exception:
+            pass
         super().closeEvent(event)
