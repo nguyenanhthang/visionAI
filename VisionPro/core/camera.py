@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any
 
@@ -130,6 +131,13 @@ class MVSCamera(CameraDriver):
         self._buf = None        # ctypes buffer cho raw frame
         self._convert_buf = None  # ctypes buffer cho pixel-converted frame
         self._convert_buf_size = 0
+        # Continuous grab — thread giữ frame mới nhất, pipeline grab() trả về
+        # ngay lập tức thay vì chờ ~33ms cho khung tiếp theo.
+        self._grab_thread: Optional[threading.Thread] = None
+        self._grab_stop = threading.Event()
+        self._latest_frame: Optional[np.ndarray] = None
+        self._latest_lock = threading.Lock()
+        self._continuous = False
 
     @staticmethod
     def list_devices() -> List[Dict[str, Any]]:
@@ -246,6 +254,7 @@ class MVSCamera(CameraDriver):
             self.is_open = True
 
     def close(self) -> None:
+        self.stop_continuous()
         with self._lock:
             if self._cam is None:
                 self.is_open = False
@@ -267,21 +276,74 @@ class MVSCamera(CameraDriver):
             self._convert_buf = None
             self.is_open = False
 
-    def grab(self, timeout_ms: int = 1000) -> np.ndarray:
-        from ctypes import byref, cast, POINTER, c_ubyte, memset, sizeof
-        with self._lock:
-            if not self.is_open:
-                self.open()
-            _MvCamera, _const, hdr, pix = self._mvs
+    # ── Continuous grab ──
+    def start_continuous(self, fps: Optional[float] = None) -> None:
+        """Bắt đầu thread liên tục grab frame — giữ frame mới nhất trong buffer.
 
+        ``grab()`` sau đó trả về frame buffered ngay lập tức (<1ms) thay vì
+        chờ ~33ms cho khung kế tiếp. Khi PLC trigger pipeline, latency giảm
+        rõ rệt.
+        """
+        if self._continuous:
+            return
+        if not self.is_open:
+            self.open()
+        self._grab_stop.clear()
+        self._continuous = True
+        self._grab_thread = threading.Thread(
+            target=self._grab_loop, daemon=True, name="MVSGrab")
+        self._grab_thread.start()
+
+    def stop_continuous(self) -> None:
+        if not self._continuous:
+            return
+        self._grab_stop.set()
+        t = self._grab_thread
+        if t and t.is_alive():
+            t.join(timeout=2.0)
+        self._grab_thread = None
+        self._continuous = False
+        with self._latest_lock:
+            self._latest_frame = None
+
+    def _grab_loop(self) -> None:
+        """Background loop — không giữ self._lock lâu để main thread có thể
+        stop hoặc đổi param. Chỉ giữ lock quanh GetOneFrameTimeout."""
+        while not self._grab_stop.is_set():
+            try:
+                frame = self._grab_one_locked(timeout_ms=500)
+            except CameraError:
+                self._grab_stop.wait(0.05)
+                continue
+            with self._latest_lock:
+                self._latest_frame = frame
+
+    def grab(self, timeout_ms: int = 1000) -> np.ndarray:
+        # Nếu đang continuous-grab, trả frame buffered ngay (gần 0ms).
+        if self._continuous:
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < timeout_ms / 1000.0:
+                with self._latest_lock:
+                    if self._latest_frame is not None:
+                        return self._latest_frame  # already a copy from _convert
+                time.sleep(0.001)
+            raise CameraError("Continuous grab: no frame yet (camera offline?)")
+        if not self.is_open:
+            self.open()
+        return self._grab_one_locked(timeout_ms)
+
+    def _grab_one_locked(self, timeout_ms: int) -> np.ndarray:
+        """Thực sự gọi MV_CC_GetOneFrameTimeout. Caller có thể là grab() hoặc
+        background loop."""
+        from ctypes import byref, memset, sizeof
+        with self._lock:
+            _MvCamera, _const, hdr, pix = self._mvs
             frame_info = hdr.MV_FRAME_OUT_INFO_EX()
             memset(byref(frame_info), 0, sizeof(frame_info))
-
             ret = self._cam.MV_CC_GetOneFrameTimeout(
                 self._buf, self._payload_size, frame_info, timeout_ms)
             if ret != 0:
                 raise CameraError(f"MV_CC_GetOneFrameTimeout failed 0x{ret:x}")
-
             return self._convert_to_ndarray(frame_info, pix, hdr)
 
     # ── Camera parameter access ──

@@ -6,6 +6,7 @@ from __future__ import annotations
 import uuid
 import json
 import copy
+import time
 import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
 from core.tool_registry import TOOL_BY_ID, ToolDef, ParamDef
@@ -26,6 +27,7 @@ class NodeInstance:
         self.outputs: Dict[str, Any] = {}
         self.status: str = "idle"   # idle | running | pass | fail | error
         self.error_msg: str = ""
+        self.last_run_ms: float = 0.0   # wall-clock của lần process_fn gần nhất
 
     @property
     def tool(self) -> ToolDef:
@@ -161,6 +163,7 @@ class FlowGraph:
                 if port.name not in inputs:
                     inputs[port.name] = port.default
 
+            t0 = time.perf_counter()
             try:
                 out = node.tool.process_fn(inputs, node.params)
                 node.outputs = out if out else {}
@@ -172,8 +175,11 @@ class FlowGraph:
                 node.outputs = {}
                 node.status = "error"
                 node.error_msg = str(e)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            node.last_run_ms = elapsed_ms
 
-            results[nid] = {"status": node.status, "outputs": node.outputs}
+            results[nid] = {"status": node.status, "outputs": node.outputs,
+                            "elapsed_ms": elapsed_ms}
             if progress_cb:
                 progress_cb(int((i + 1) / total * 100))
 

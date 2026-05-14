@@ -427,8 +427,15 @@ class MainWindow(QMainWindow):
 
         self._finalize_run()
         self._set_status("PASS", "#39ff14")
+        # Per-node breakdown — giúp xác định node nào chậm
+        breakdown = sorted(
+            [(self._graph.nodes[nid].tool.name if nid in self._graph.nodes else nid,
+              r.get("elapsed_ms", 0.0))
+             for nid, r in results.items()],
+            key=lambda x: -x[1])[:3]
+        slow = "  |  " + ", ".join(f"{n}: {ms:.0f}ms" for n, ms in breakdown) if breakdown else ""
         self.statusBar().showMessage(
-            f"Pipeline done in {dur_ms:.1f} ms  —  {len(results)} nodes", 5000)
+            f"Pipeline done in {dur_ms:.1f} ms  —  {len(results)} nodes{slow}", 8000)
         QTimer.singleShot(5000, lambda: self._set_status("IDLE", "#64748b"))
 
         # Đẩy kết quả về PLC (nếu đang connected)

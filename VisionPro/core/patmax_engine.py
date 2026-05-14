@@ -405,6 +405,8 @@ def run_patmax_multi(image: np.ndarray,
                       scale_step: float = 0.1,
                       num_results_per_model: int = 1,
                       overlap_threshold: float = 0.5,
+                      coarse_downscale: int = 1,
+                      channels: Tuple[bool, bool, bool] = (True, True, True),
                       ) -> Tuple[List[PatMaxResult], np.ndarray]:
     """Search trên list models — gộp results, score map = max overlay."""
     all_results: List[PatMaxResult] = []
@@ -419,7 +421,9 @@ def run_patmax_multi(image: np.ndarray,
                                   scale_low=scale_low, scale_high=scale_high,
                                   scale_step=scale_step,
                                   num_results=num_results_per_model,
-                                  overlap_threshold=overlap_threshold)
+                                  overlap_threshold=overlap_threshold,
+                                  coarse_downscale=coarse_downscale,
+                                  channels=channels)
         all_results.extend(results)
         if score_acc is None:
             score_acc = sm.astype(np.float32) if sm is not None else None
@@ -486,40 +490,48 @@ def _match_template(gray_img: np.ndarray,
     if nW >= W - 2 or nH >= H - 2:
         return []
 
+    # Channels có thể tắt qua _channels = (ncc, edge, sq)
+    chan_ncc, chan_edge, chan_sq = t.get("_channels", (True, True, True))
+
     # cv2.matchTemplate hỗ trợ mask cho TM_CCOEFF_NORMED + TM_SQDIFF_NORMED:
     # mask phải cùng kích thước template, dtype uint8 hoặc float32 (8-bit OK).
     # Khi có mask, các pixel ngoài shape không tính vào correlation → loại bỏ
     # ảnh hưởng của 4 góc bbox (vốn không thuộc circle/ellipse/polygon).
+    if not chan_ncc:
+        return []   # NCC bắt buộc (làm cơ sở score)
     try:
         if mask_rot is not None:
             res_ncc = cv2.matchTemplate(gray_img, patch_rot,
                                         cv2.TM_CCOEFF_NORMED, mask=mask_rot)
         else:
             res_ncc = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_CCOEFF_NORMED)
-        # Mask matching đôi khi sinh NaN/Inf khi std≈0 trong vùng mask → dập
         res_ncc = np.nan_to_num(res_ncc, nan=0.0, posinf=0.0, neginf=0.0)
     except cv2.error:
         return []
 
-    img_e_f   = img_edges.astype(np.float32) / 255.0
-    templ_e_f = edge_rot_d.astype(np.float32) / 255.0
-    # Edge map: train đã zero edges ngoài mask → match không-mask cũng đúng
-    # và nhanh hơn ~30%. Bỏ mask cho channel này.
-    try:
-        res_edge = cv2.matchTemplate(img_e_f, templ_e_f, cv2.TM_CCOEFF_NORMED)
-        res_edge = np.nan_to_num(res_edge, nan=0.0, posinf=0.0, neginf=0.0)
-    except cv2.error:
+    if chan_edge:
+        img_e_f   = img_edges.astype(np.float32) / 255.0
+        templ_e_f = edge_rot_d.astype(np.float32) / 255.0
+        try:
+            res_edge = cv2.matchTemplate(img_e_f, templ_e_f, cv2.TM_CCOEFF_NORMED)
+            res_edge = np.nan_to_num(res_edge, nan=0.0, posinf=0.0, neginf=0.0)
+        except cv2.error:
+            res_edge = np.zeros_like(res_ncc)
+    else:
         res_edge = np.zeros_like(res_ncc)
 
-    try:
-        if mask_rot is not None:
-            res_sq = cv2.matchTemplate(gray_img, patch_rot,
-                                       cv2.TM_SQDIFF_NORMED, mask=mask_rot)
-        else:
-            res_sq = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_SQDIFF_NORMED)
-        res_sq = np.nan_to_num(res_sq, nan=1.0, posinf=1.0, neginf=1.0)
-        res_sq_inv = 1.0 - res_sq          # nhỏ = tốt → đảo
-    except cv2.error:
+    if chan_sq:
+        try:
+            if mask_rot is not None:
+                res_sq = cv2.matchTemplate(gray_img, patch_rot,
+                                           cv2.TM_SQDIFF_NORMED, mask=mask_rot)
+            else:
+                res_sq = cv2.matchTemplate(gray_img, patch_rot, cv2.TM_SQDIFF_NORMED)
+            res_sq = np.nan_to_num(res_sq, nan=1.0, posinf=1.0, neginf=1.0)
+            res_sq_inv = 1.0 - res_sq
+        except cv2.error:
+            res_sq_inv = np.zeros_like(res_ncc)
+    else:
         res_sq_inv = np.zeros_like(res_ncc)
 
     # Mask-mode matchTemplate đôi khi vượt [0,1] do numerical noise → clip.
@@ -529,6 +541,11 @@ def _match_template(gray_img: np.ndarray,
     # Weights configurable per template (algorithm-dependent).
     # Mặc định bám sát công thức cũ: 0.5 NCC + 0.3 edge + 0.2 SQDIFF.
     w_ncc, w_edge, w_sq = t.get("weights", (0.5, 0.3, 0.2))
+    if not chan_edge: w_edge = 0.0
+    if not chan_sq:   w_sq   = 0.0
+    w_sum = w_ncc + w_edge + w_sq
+    if w_sum > 0:
+        w_ncc, w_edge, w_sq = w_ncc / w_sum, w_edge / w_sum, w_sq / w_sum
     score_map  = (w_ncc * s_ncc_map
                   + w_edge * s_edge_map
                   + w_sq   * s_sq_map)
@@ -584,14 +601,35 @@ def run_patmax(image: np.ndarray,
                scale_step: float = 0.1,
                num_results: int = 1,
                overlap_threshold: float = 0.5,
+               coarse_downscale: int = 1,
+               channels: Tuple[bool, bool, bool] = (True, True, True),
                ) -> Tuple[List[PatMaxResult], np.ndarray]:
-
+    """
+    Optimization knobs:
+        coarse_downscale : 1 = full-res search (cũ);
+                           2 = search ở 1/2 res rồi map về full-res (≈4x nhanh);
+                           4 = search ở 1/4 (≈16x nhanh, độ chính xác giảm).
+                           Sau khi tìm peak coarse, vị trí được trả về ở
+                           full-res — KHÔNG refine. Phù hợp khi cần locate
+                           nhanh; sai số ±downscale pixel.
+        channels         : bật/tắt 3 channels matchTemplate (NCC, edge,
+                           SQDIFF). Tắt SQDIFF/edge giảm ~33% mỗi cái.
+    """
     if not model.is_valid():
         return [], _empty_vis(image)
 
     bgr      = image if len(image.shape)==3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    gray_img = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    H, W     = gray_img.shape
+    gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    H_full, W_full = gray_full.shape
+
+    # Pyramid downscale — tất cả match diễn ra ở gray_img/img_edges resolution
+    ds = max(1, int(coarse_downscale))
+    if ds > 1:
+        gray_img = cv2.resize(gray_full, (W_full // ds, H_full // ds),
+                               interpolation=cv2.INTER_AREA)
+    else:
+        gray_img = gray_full
+    H, W = gray_img.shape
 
     canny_lo = model.canny_low
     canny_hi = model.canny_high
@@ -602,25 +640,50 @@ def run_patmax(image: np.ndarray,
                        and model.precomputed_templates)
 
     if use_precomputed:
-        templates = model.precomputed_templates
-        print(f"[PatMax Search] using {len(templates)} precomputed templates  "
-              f"threshold={accept_threshold}")
+        base_templates = model.precomputed_templates
+        print(f"[PatMax Search] using {len(base_templates)} precomputed templates  "
+              f"threshold={accept_threshold}  ds={ds}")
     else:
         angles, scales = _build_search_grid(angle_low, angle_high, angle_step,
                                               scale_low, scale_high, scale_step)
-        templates = [_build_template(model.patch_gray, model.edge_image,
-                                       ang, sc, mask=model.mask)
-                     for sc in scales for ang in angles]
-        print(f"[PatMax Search] evaluate-DOF: {len(templates)} templates "
+        base_templates = [_build_template(model.patch_gray, model.edge_image,
+                                           ang, sc, mask=model.mask)
+                          for sc in scales for ang in angles]
+        print(f"[PatMax Search] evaluate-DOF: {len(base_templates)} templates "
               f"(angles={len(angles)} × scales={len(scales)})  "
-              f"threshold={accept_threshold}")
+              f"threshold={accept_threshold}  ds={ds}")
+
+    # Nếu pyramid > 1, downscale patch+edge của từng template để khớp gray_img
+    if ds > 1:
+        templates = []
+        for t in base_templates:
+            nW2 = max(4, t["nW"] // ds)
+            nH2 = max(4, t["nH"] // ds)
+            t2 = dict(t)
+            t2["patch"]    = cv2.resize(t["patch"],    (nW2, nH2), interpolation=cv2.INTER_AREA)
+            t2["edge_dil"] = cv2.resize(t["edge_dil"], (nW2, nH2), interpolation=cv2.INTER_AREA)
+            if "mask" in t and t["mask"] is not None:
+                t2["mask"] = cv2.resize(t["mask"], (nW2, nH2), interpolation=cv2.INTER_NEAREST)
+            t2["nW"] = nW2; t2["nH"] = nH2
+            templates.append(t2)
+    else:
+        templates = base_templates
+
+    # Truyền channels flag xuống _match_template qua key tạm
+    chan_ncc, chan_edge, chan_sq = channels
+    for t in templates:
+        t["_channels"] = (chan_ncc, chan_edge, chan_sq)
 
     candidates: List[Dict] = []
     score_map = np.zeros((H, W), dtype=np.float32)
     best_any = 0.0
 
-    # Oversample peaks per template — global NMS sau đó dedupe vị trí trùng
-    peaks_per_template = max(num_results * 4, 8)
+    # Oversample peaks per template — giảm xuống chỉ *2 khi num_results=1
+    # để tránh phí cho NMS không cần thiết.
+    if num_results <= 1:
+        peaks_per_template = 4
+    else:
+        peaks_per_template = max(num_results * 4, 8)
 
     for t in templates:
         results_t = _match_template(gray_img, img_edges, t, peaks_per_template)
@@ -636,6 +699,12 @@ def run_patmax(image: np.ndarray,
                 cx_i = min(int(result["cx"]), W - 1)
                 if score_map[cy_i, cx_i] < s_for_map:
                     score_map[cy_i, cx_i] = s_for_map
+
+            # Map về full-res coordinates nếu pyramid > 1
+            if ds > 1:
+                result["cx"] *= ds; result["cy"] *= ds
+                result["tx"] *= ds; result["ty"] *= ds
+                result["nW"] *= ds; result["nH"] *= ds
 
             if score >= accept_threshold:
                 candidates.append(result)
@@ -688,6 +757,9 @@ def run_patmax(image: np.ndarray,
 
     # Score map visualization (blur để đẹp hơn)
     sm_blurred = cv2.GaussianBlur(score_map, (15, 15), 0)
+    if ds > 1:
+        sm_blurred = cv2.resize(sm_blurred, (W_full, H_full),
+                                interpolation=cv2.INTER_LINEAR)
     sm_vis = _score_map_vis(bgr, sm_blurred)
 
     return results, sm_vis

@@ -137,6 +137,13 @@ def proc_camera_acquire(inputs, params):
             kwargs["access_mode"] = (params.get("access_mode") or "exclusive").lower()
             kwargs["heartbeat_ms"] = int(params.get("heartbeat_ms", 5000))
             cam = reg.get_or_open("mvs", **kwargs)
+            # Continuous grab: pipeline lấy frame buffered <1ms thay vì
+            # chờ ~33ms cho khung kế tiếp. Tắt khi cần single-frame chính
+            # xác lúc trigger (vd. PLC trigger camera đồng bộ).
+            if bool(params.get("continuous_grab", True)):
+                cam.start_continuous()
+            else:
+                cam.stop_continuous()
         else:
             cam = reg.get_or_open(
                 "opencv",
@@ -201,6 +208,14 @@ def proc_patmax(inputs, params):
     ot = float(getattr(ref, "overlap_threshold", 0.5) or 0.5)
     at = float(ref.accept_threshold or 0.5)
 
+    # Speed knobs
+    try:
+        ds = max(1, int(params.get("coarse_downscale", 1)))
+    except (TypeError, ValueError):
+        ds = 1
+    chans = (True, bool(params.get("use_edge", True)),
+                    bool(params.get("use_sqdiff", True)))
+
     if use_multi:
         results, score_map = run_patmax_multi(
             _bgr(img), [m for m in models_list if m.is_valid()],
@@ -209,6 +224,7 @@ def proc_patmax(inputs, params):
             scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
             num_results_per_model=nr,
             overlap_threshold=ot,
+            coarse_downscale=ds, channels=chans,
         )
         # Vẽ với model đầu tiên (origin reference) — multi-pattern share style
         model = ref
@@ -220,6 +236,7 @@ def proc_patmax(inputs, params):
             scale_low=sc_low,  scale_high=sc_high,  scale_step=sc_step,
             num_results=nr,
             overlap_threshold=ot,
+            coarse_downscale=ds, channels=chans,
         )
 
     vis = draw_patmax_results(_bgr(img), results, model)
@@ -1476,6 +1493,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("heartbeat_ms","Heartbeat (ms)","int",5000,500,60000,
         tooltip="GigE heartbeat timeout",
         visible_if={"backend":"HikRobot/Do3think"}),
+     P("continuous_grab","Continuous grab","bool",True,
+        tooltip="Thread chạy nền grab liên tục, pipeline lấy frame buffered <1ms. "
+                "Tắt nếu cần single-frame chính xác lúc PLC trigger.",
+        visible_if={"backend":"HikRobot/Do3think"}),
      P("timeout_ms","Grab timeout (ms)","int",1000,10,30000)],
     proc_camera_acquire, "CogAcqFifoTool"),
 
@@ -1493,7 +1514,15 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("angle_range","Angle Range (°)","float",0,0,180,step=5,
        tooltip="Tìm kiếm trong ±angle_range độ. 0=không xoay"),
      P("angle_step","Angle Step (°)","float",5,1,45,step=1),
-     P("num_results","Max Results","int",1,1,20)],
+     P("num_results","Max Results","int",1,1,20),
+     P("coarse_downscale","Coarse downscale","enum","1",
+       choices=["1","2","4"],
+       tooltip="Speed-up: search ở 1/ds resolution. 2 ≈ 4× nhanh, 4 ≈ 16× nhanh. "
+               "Độ chính xác ±ds pixel"),
+     P("use_edge","Use edge channel","bool",True,
+       tooltip="Tắt để giảm ~30% thời gian khi pattern không phụ thuộc edges"),
+     P("use_sqdiff","Use SQDIFF channel","bool",True,
+       tooltip="Tắt để giảm ~30% thời gian khi pattern có texture rõ")],
     proc_patmax, "CogPatMaxPatternAlignTool"),
 
   ToolDef("patmax_align","PatMax Align Tool","Pattern Find",
