@@ -101,6 +101,11 @@ class MainWindow(QMainWindow):
         self._plc_manager = PLCManager()
         self._plc_dialog = None
 
+        # SFC/MES integration — scanner + API GET + API POST
+        from core.sfc import SfcManager
+        self._sfc_manager = SfcManager()
+        self._sfc_dialog = None
+
         self._build_ui()
         self._build_menu()
         self._connect_signals()
@@ -281,6 +286,9 @@ class MainWindow(QMainWindow):
         act_plc = tools_m.addAction("🔌  PLC Connection…")
         act_plc.setShortcut("Ctrl+P")
         act_plc.triggered.connect(self._open_plc_dialog)
+        act_sfc = tools_m.addAction("🌐  SFC / MES Integration…")
+        act_sfc.setShortcut("Ctrl+Shift+S")
+        act_sfc.triggered.connect(self._open_sfc_dialog)
         act_cam = tools_m.addAction("📷  Camera Setup…")
         act_cam.setShortcut("Ctrl+Shift+C")
         act_cam.triggered.connect(self._open_camera_dialog)
@@ -618,6 +626,16 @@ class MainWindow(QMainWindow):
         self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
         self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
         self._plc_dialog.show()
+
+    def _open_sfc_dialog(self):
+        from ui.sfc_dialog import SfcDialog
+        if self._sfc_dialog and self._sfc_dialog.isVisible():
+            self._sfc_dialog.set_graph(self._graph)
+            self._sfc_dialog.raise_()
+            self._sfc_dialog.activateWindow()
+            return
+        self._sfc_dialog = SfcDialog(self._sfc_manager, self._graph, self)
+        self._sfc_dialog.show()
 
     def _open_camera_dialog(self):
         from ui.camera_dialog import CameraSetupDialog

@@ -1,0 +1,469 @@
+"""
+ui/sfc_dialog.py — Dialog cấu hình SFC/MES Integration
+
+Một dialog duy nhất, ba section (giống `PLCDialog`):
+1. Scanner — chọn COM port (auto-detect), baudrate, trigger, test scan.
+2. API GET — URL template với {SN}, headers, test request.
+3. API POST — URL, headers, body template JSON (placeholder
+   {SN}, {<node_id>.<port>} hoặc {<tool_id>.<port>}), test request.
+
+Settings persist qua QSettings, lưu cùng config app.
+"""
+from __future__ import annotations
+
+import json
+from typing import Optional
+
+from PySide6.QtCore import Qt, QSettings, Signal
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel,
+    QLineEdit, QComboBox, QSpinBox, QPushButton, QCheckBox,
+    QPlainTextEdit, QMessageBox, QWidget, QFrame, QSizePolicy,
+)
+from PySide6.QtGui import QFont
+
+from core.sfc import (
+    SfcManager, ScannerConfig, ApiGetConfig, ApiPostConfig,
+    list_serial_ports,
+)
+
+
+class SfcDialog(QDialog):
+    """Dialog cấu hình SFC. Snapshot cấu hình → SfcManager khi user nhấn Save."""
+
+    sn_scanned = Signal(str)   # phát ra mỗi khi scan thành công
+
+    def __init__(self, manager: SfcManager, graph=None,
+                 parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("SFC / MES Integration")
+        self.resize(820, 880)
+        self._mgr = manager
+        self._graph = graph
+        if graph is not None:
+            self._mgr.set_graph(graph)
+        self._build_ui()
+        self._load_settings()
+        self._refresh_ports()
+        self._refresh_node_picker()
+
+    def set_graph(self, graph) -> None:
+        self._graph = graph
+        self._mgr.set_graph(graph)
+        self._refresh_node_picker()
+
+    # ════════════════════════════════════════════════════════════════
+    #  UI build
+    # ════════════════════════════════════════════════════════════════
+    def _build_ui(self):
+        root = QVBoxLayout(self); root.setSpacing(8)
+
+        # ── 1. Scanner ────────────────────────────────────────────
+        gb_scan = QGroupBox("1.  Hand Scanner  (Serial / COM)")
+        g = QGridLayout(gb_scan)
+
+        self.cb_port = QComboBox()
+        self.cb_port.setMinimumWidth(280)
+        self.btn_refresh_ports = QPushButton("🔄  Refresh")
+        self.btn_refresh_ports.clicked.connect(self._refresh_ports)
+
+        self.sp_baud = QSpinBox(); self.sp_baud.setRange(300, 921600); self.sp_baud.setValue(9600)
+        self.cb_bytesize = QComboBox(); self.cb_bytesize.addItems(["5","6","7","8"]); self.cb_bytesize.setCurrentText("8")
+        self.cb_parity   = QComboBox(); self.cb_parity.addItems(["N","E","O","M","S"])
+        self.cb_stopbits = QComboBox(); self.cb_stopbits.addItems(["1","1.5","2"])
+        self.sp_timeout  = QSpinBox(); self.sp_timeout.setRange(10, 60000); self.sp_timeout.setValue(1000); self.sp_timeout.setSuffix(" ms")
+
+        self.le_trigger  = QLineEdit("02 F4 03")
+        self.le_trigger.setPlaceholderText("Hex bytes (vd 02 F4 03). Để trống nếu scanner auto-trigger.")
+        self.sp_readsize = QSpinBox(); self.sp_readsize.setRange(1, 4096); self.sp_readsize.setValue(128); self.sp_readsize.setSuffix(" bytes")
+        self.cb_encoding = QComboBox(); self.cb_encoding.addItems(["utf-8","ascii","latin-1","utf-16"])
+        self.sp_expected_len = QSpinBox(); self.sp_expected_len.setRange(0, 4096); self.sp_expected_len.setValue(0); self.sp_expected_len.setSpecialValueText("any")
+        self.le_contains = QLineEdit("")
+        self.le_contains.setPlaceholderText("(tuỳ chọn) data phải chứa chuỗi này")
+
+        row = 0
+        g.addWidget(QLabel("COM port:"), row, 0); g.addWidget(self.cb_port, row, 1, 1, 2); g.addWidget(self.btn_refresh_ports, row, 3); row += 1
+        g.addWidget(QLabel("Baudrate:"), row, 0); g.addWidget(self.sp_baud, row, 1)
+        g.addWidget(QLabel("Byte:"), row, 2); g.addWidget(self.cb_bytesize, row, 3); row += 1
+        g.addWidget(QLabel("Parity:"), row, 0); g.addWidget(self.cb_parity, row, 1)
+        g.addWidget(QLabel("Stop bits:"), row, 2); g.addWidget(self.cb_stopbits, row, 3); row += 1
+        g.addWidget(QLabel("Timeout:"), row, 0); g.addWidget(self.sp_timeout, row, 1)
+        g.addWidget(QLabel("Read size:"), row, 2); g.addWidget(self.sp_readsize, row, 3); row += 1
+        g.addWidget(QLabel("Trigger (hex):"), row, 0); g.addWidget(self.le_trigger, row, 1, 1, 3); row += 1
+        g.addWidget(QLabel("Encoding:"), row, 0); g.addWidget(self.cb_encoding, row, 1)
+        g.addWidget(QLabel("Expected len:"), row, 2); g.addWidget(self.sp_expected_len, row, 3); row += 1
+        g.addWidget(QLabel("Contains:"), row, 0); g.addWidget(self.le_contains, row, 1, 1, 3); row += 1
+
+        self.btn_scan_test = QPushButton("📟  Test Scan")
+        self.btn_scan_test.clicked.connect(self._on_scan_test)
+        self.lbl_last_sn = QLabel("Last SN: (chưa scan)")
+        self.lbl_last_sn.setStyleSheet("color:#39ff14; font-family:'Courier New'; font-size:11px;")
+        g.addWidget(self.btn_scan_test, row, 0, 1, 2)
+        g.addWidget(self.lbl_last_sn, row, 2, 1, 2); row += 1
+
+        root.addWidget(gb_scan)
+
+        # ── 2. API GET ────────────────────────────────────────────
+        gb_get = QGroupBox("2.  API GET  (lookup SN trên SFC)")
+        gg = QGridLayout(gb_get)
+        self.chk_get_enabled = QCheckBox("Enable API GET")
+        gg.addWidget(self.chk_get_enabled, 0, 0, 1, 4)
+
+        self.le_get_url = QLineEdit("")
+        self.le_get_url.setPlaceholderText(
+            "Vd: http://10.222.48.213:8888/v2/pass/mes/tsc/check/TSC-VN/TSC_VN1/OPLEUATTACHMENT?sn={SN}&station_id=OPLEUATTACHMENT")
+        gg.addWidget(QLabel("URL template:"), 1, 0)
+        gg.addWidget(self.le_get_url, 1, 1, 1, 3)
+
+        self.le_get_headers = QLineEdit("{}")
+        self.le_get_headers.setPlaceholderText('{"token":"abc","X-API-Key":"xxx"}')
+        gg.addWidget(QLabel("Headers (JSON):"), 2, 0)
+        gg.addWidget(self.le_get_headers, 2, 1, 1, 3)
+
+        self.sp_get_timeout = QSpinBox(); self.sp_get_timeout.setRange(100, 60000); self.sp_get_timeout.setValue(5000); self.sp_get_timeout.setSuffix(" ms")
+        self.sp_get_status  = QSpinBox(); self.sp_get_status.setRange(100, 599); self.sp_get_status.setValue(200)
+        gg.addWidget(QLabel("Timeout:"), 3, 0); gg.addWidget(self.sp_get_timeout, 3, 1)
+        gg.addWidget(QLabel("Expected status:"), 3, 2); gg.addWidget(self.sp_get_status, 3, 3)
+
+        self.le_get_expected = QLineEdit("")
+        self.le_get_expected.setPlaceholderText("(tuỳ chọn) response.text phải chứa chuỗi này → pass")
+        gg.addWidget(QLabel("Must contain:"), 4, 0)
+        gg.addWidget(self.le_get_expected, 4, 1, 1, 3)
+
+        self.chk_get_parse_json = QCheckBox("Parse JSON")
+        self.le_get_json_path   = QLineEdit("")
+        self.le_get_json_path.setPlaceholderText('Dot path, vd "data.token"')
+        gg.addWidget(self.chk_get_parse_json, 5, 0)
+        gg.addWidget(QLabel("JSON path:"), 5, 1); gg.addWidget(self.le_get_json_path, 5, 2, 1, 2)
+
+        self.btn_get_test = QPushButton("🌐  Test GET")
+        self.btn_get_test.clicked.connect(self._on_get_test)
+        gg.addWidget(self.btn_get_test, 6, 0, 1, 2)
+
+        self.txt_get_resp = QPlainTextEdit()
+        self.txt_get_resp.setReadOnly(True)
+        self.txt_get_resp.setMaximumHeight(80)
+        self.txt_get_resp.setStyleSheet("background:#0a0e1a; color:#94a3b8; font-family:'Courier New'; font-size:10px;")
+        self.txt_get_resp.setPlaceholderText("Response sẽ hiện ở đây sau khi Test GET")
+        gg.addWidget(self.txt_get_resp, 7, 0, 1, 4)
+        root.addWidget(gb_get)
+
+        # ── 3. API POST ───────────────────────────────────────────
+        gb_post = QGroupBox("3.  API POST  (gửi kết quả sau pipeline)")
+        gp = QGridLayout(gb_post)
+        self.chk_post_enabled = QCheckBox("Enable API POST")
+        gp.addWidget(self.chk_post_enabled, 0, 0, 1, 4)
+
+        self.le_post_url = QLineEdit("")
+        self.le_post_url.setPlaceholderText("Vd: http://10.222.48.213:8888/v2/sfc/result")
+        gp.addWidget(QLabel("URL:"), 1, 0)
+        gp.addWidget(self.le_post_url, 1, 1, 1, 3)
+
+        self.cb_post_method = QComboBox(); self.cb_post_method.addItems(["POST","PUT"])
+        self.sp_post_timeout = QSpinBox(); self.sp_post_timeout.setRange(100, 60000); self.sp_post_timeout.setValue(5000); self.sp_post_timeout.setSuffix(" ms")
+        self.sp_post_status  = QSpinBox(); self.sp_post_status.setRange(100, 599); self.sp_post_status.setValue(200)
+        gp.addWidget(QLabel("Method:"), 2, 0); gp.addWidget(self.cb_post_method, 2, 1)
+        gp.addWidget(QLabel("Timeout:"), 2, 2); gp.addWidget(self.sp_post_timeout, 2, 3)
+
+        self.le_post_headers = QLineEdit('{"Content-Type":"application/json"}')
+        self.le_post_headers.setPlaceholderText('Vd: {"Content-Type":"application/json","token":"abc"}')
+        gp.addWidget(QLabel("Headers (JSON):"), 3, 0)
+        gp.addWidget(self.le_post_headers, 3, 1, 1, 3)
+
+        gp.addWidget(QLabel("Expected status:"), 4, 0); gp.addWidget(self.sp_post_status, 4, 1)
+        self.le_post_expected = QLineEdit("")
+        self.le_post_expected.setPlaceholderText("(tuỳ chọn) response phải chứa chuỗi này")
+        gp.addWidget(QLabel("Must contain:"), 4, 2); gp.addWidget(self.le_post_expected, 4, 3)
+
+        # Body template — JSON editor + insert reference helper
+        hdr_body = QHBoxLayout()
+        hdr_body.addWidget(QLabel("Body template (JSON):"))
+        hdr_body.addStretch()
+        self.cb_node_pick = QComboBox(); self.cb_node_pick.setMinimumWidth(220)
+        self.cb_port_pick = QComboBox(); self.cb_port_pick.setMinimumWidth(140)
+        self.cb_node_pick.currentIndexChanged.connect(self._on_node_pick_changed)
+        self.btn_insert_ref = QPushButton("➕  Insert {ref}")
+        self.btn_insert_ref.clicked.connect(self._on_insert_ref)
+        hdr_body.addWidget(QLabel("Reference:")); hdr_body.addWidget(self.cb_node_pick)
+        hdr_body.addWidget(self.cb_port_pick); hdr_body.addWidget(self.btn_insert_ref)
+        gp.addLayout(hdr_body, 5, 0, 1, 4)
+
+        self.txt_post_body = QPlainTextEdit()
+        self.txt_post_body.setFont(QFont("Courier New", 10))
+        self.txt_post_body.setMinimumHeight(180)
+        self.txt_post_body.setPlaceholderText(
+            'Vd:\n'
+            '{\n'
+            '  "sn": "{SN}",\n'
+            '  "torque1": "{caliper1.width}",\n'
+            '  "result": "{judge.pass}",\n'
+            '  "stationName": "OPLEUATTACHMENT",\n'
+            '  "empNo": "E12345"\n'
+            '}\n\n'
+            "Placeholder hỗ trợ:\n"
+            "  {SN}                      — mã scan gần nhất\n"
+            "  {api_get.value}           — value extract từ API GET\n"
+            "  {<node_id>.<port>}        — output của node theo node_id\n"
+            "  {<tool_id>.<port>}        — output node đầu tiên có tool_id\n")
+        gp.addWidget(self.txt_post_body, 6, 0, 1, 4)
+
+        self.btn_post_test = QPushButton("📤  Test POST")
+        self.btn_post_test.clicked.connect(self._on_post_test)
+        self.btn_post_preview = QPushButton("👁  Preview body")
+        self.btn_post_preview.clicked.connect(self._on_post_preview)
+        gp.addWidget(self.btn_post_preview, 7, 0, 1, 2)
+        gp.addWidget(self.btn_post_test, 7, 2, 1, 2)
+
+        self.txt_post_resp = QPlainTextEdit()
+        self.txt_post_resp.setReadOnly(True)
+        self.txt_post_resp.setMaximumHeight(80)
+        self.txt_post_resp.setStyleSheet("background:#0a0e1a; color:#94a3b8; font-family:'Courier New'; font-size:10px;")
+        self.txt_post_resp.setPlaceholderText("Response sẽ hiện ở đây sau khi Test POST")
+        gp.addWidget(self.txt_post_resp, 8, 0, 1, 4)
+        root.addWidget(gb_post)
+
+        # ── Save / Close ──────────────────────────────────────────
+        bar = QHBoxLayout()
+        self.btn_save  = QPushButton("💾  Save")
+        self.btn_close = QPushButton("Close")
+        self.btn_save.clicked.connect(self._on_save)
+        self.btn_close.clicked.connect(self.close)
+        bar.addStretch(); bar.addWidget(self.btn_save); bar.addWidget(self.btn_close)
+        root.addLayout(bar)
+
+    # ════════════════════════════════════════════════════════════════
+    #  Helpers
+    # ════════════════════════════════════════════════════════════════
+    def _refresh_ports(self):
+        cur = self.cb_port.currentData() or self.cb_port.currentText()
+        self.cb_port.clear()
+        ports = list_serial_ports()
+        if not ports:
+            self.cb_port.addItem("(không phát hiện cổng — cắm scanner rồi Refresh)", "")
+        for dev, desc in ports:
+            self.cb_port.addItem(f"{dev}  —  {desc}", dev)
+        # Restore previous selection if still present
+        if cur:
+            for i in range(self.cb_port.count()):
+                if self.cb_port.itemData(i) == cur:
+                    self.cb_port.setCurrentIndex(i); break
+
+    def _refresh_node_picker(self):
+        self.cb_node_pick.blockSignals(True)
+        self.cb_node_pick.clear()
+        self.cb_node_pick.addItem("(builtin) SN — mã scan", "SN")
+        self.cb_node_pick.addItem("(builtin) api_get.value", "api_get.value")
+        self.cb_node_pick.addItem("(builtin) api_get.text", "api_get.text")
+        if self._graph is not None:
+            for nid, n in self._graph.nodes.items():
+                label = f"{n.tool.name}  [{nid}]"
+                self.cb_node_pick.addItem(label, nid)
+        self.cb_node_pick.blockSignals(False)
+        self._on_node_pick_changed()
+
+    def _on_node_pick_changed(self):
+        self.cb_port_pick.clear()
+        data = self.cb_node_pick.currentData() or ""
+        if data in ("SN", "api_get.value", "api_get.text"):
+            self.cb_port_pick.addItem("(no port)", "")
+            return
+        if self._graph and data in self._graph.nodes:
+            for p in self._graph.nodes[data].tool.outputs:
+                self.cb_port_pick.addItem(p.name, p.name)
+
+    def _on_insert_ref(self):
+        node_data = self.cb_node_pick.currentData() or ""
+        port_data = self.cb_port_pick.currentData() or ""
+        if node_data in ("SN", "api_get.value", "api_get.text"):
+            ref = "{" + node_data + "}"
+        else:
+            if not port_data:
+                return
+            ref = "{" + f"{node_data}.{port_data}" + "}"
+        cursor = self.txt_post_body.textCursor()
+        cursor.insertText(ref)
+
+    # ════════════════════════════════════════════════════════════════
+    #  Snapshot UI ↔ Manager
+    # ════════════════════════════════════════════════════════════════
+    def _gather_scanner(self) -> ScannerConfig:
+        return ScannerConfig(
+            port=self.cb_port.currentData() or self.cb_port.currentText().split(" ")[0] or "",
+            baudrate=int(self.sp_baud.value()),
+            bytesize=int(self.cb_bytesize.currentText()),
+            parity=self.cb_parity.currentText(),
+            stopbits=float(self.cb_stopbits.currentText()),
+            timeout_ms=int(self.sp_timeout.value()),
+            trigger_hex=self.le_trigger.text(),
+            read_size=int(self.sp_readsize.value()),
+            encoding=self.cb_encoding.currentText(),
+            strip_chars=self._mgr.scanner.strip_chars,    # not exposed
+            expected_length=int(self.sp_expected_len.value()),
+            contains=self.le_contains.text(),
+        )
+
+    def _gather_get(self) -> ApiGetConfig:
+        return ApiGetConfig(
+            enabled=self.chk_get_enabled.isChecked(),
+            url_template=self.le_get_url.text(),
+            headers_json=self.le_get_headers.text() or "{}",
+            timeout_ms=int(self.sp_get_timeout.value()),
+            expected_status=int(self.sp_get_status.value()),
+            expected_text=self.le_get_expected.text(),
+            parse_json=self.chk_get_parse_json.isChecked(),
+            json_path=self.le_get_json_path.text(),
+        )
+
+    def _gather_post(self) -> ApiPostConfig:
+        return ApiPostConfig(
+            enabled=self.chk_post_enabled.isChecked(),
+            url=self.le_post_url.text(),
+            method=self.cb_post_method.currentText(),
+            headers_json=self.le_post_headers.text() or "{}",
+            body_template=self.txt_post_body.toPlainText(),
+            timeout_ms=int(self.sp_post_timeout.value()),
+            expected_status=int(self.sp_post_status.value()),
+            expected_text=self.le_post_expected.text(),
+        )
+
+    def _apply_to_manager(self):
+        self._mgr.scanner = self._gather_scanner()
+        self._mgr.api_get_cfg = self._gather_get()
+        self._mgr.api_post_cfg = self._gather_post()
+
+    # ════════════════════════════════════════════════════════════════
+    #  Button handlers
+    # ════════════════════════════════════════════════════════════════
+    def _on_scan_test(self):
+        self._apply_to_manager()
+        sn, err = self._mgr.scan_once()
+        if err:
+            QMessageBox.warning(self, "Scan", f"Lỗi: {err}")
+            return
+        if not sn:
+            QMessageBox.information(self, "Scan", "Không nhận được data (timeout?)")
+            return
+        self.lbl_last_sn.setText(f"Last SN: {sn}")
+        self.sn_scanned.emit(sn)
+
+    def _on_get_test(self):
+        self._apply_to_manager()
+        text, ok, err = self._mgr.api_get()
+        if err:
+            self.txt_get_resp.setPlainText(f"[ERROR] {err}")
+            return
+        self.txt_get_resp.setPlainText(
+            f"[{'PASS' if ok else 'FAIL'}]\n{text}")
+
+    def _on_post_preview(self):
+        self._apply_to_manager()
+        body_str, missing = self._mgr.resolve_placeholders(
+            self._mgr.api_post_cfg.body_template)
+        msg = body_str
+        if missing:
+            msg += f"\n\n⚠ Placeholder không resolve: {missing}"
+        try:
+            parsed = json.loads(body_str)
+            pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+            msg = pretty + ("\n\n⚠ Missing: " + str(missing) if missing else "")
+        except Exception as e:
+            msg += f"\n\n⚠ JSON parse fail: {e}"
+        self.txt_post_resp.setPlainText("[PREVIEW BODY]\n" + msg)
+
+    def _on_post_test(self):
+        self._apply_to_manager()
+        text, ok, err = self._mgr.api_post()
+        if err:
+            self.txt_post_resp.setPlainText(f"[ERROR] {err}")
+            return
+        self.txt_post_resp.setPlainText(
+            f"[{'PASS' if ok else 'FAIL'}]\n{text}")
+
+    def _on_save(self):
+        self._apply_to_manager()
+        self._save_settings()
+        QMessageBox.information(self, "Saved", "Đã lưu cấu hình SFC.")
+
+    # ════════════════════════════════════════════════════════════════
+    #  Persistence — QSettings group "sfc"
+    # ════════════════════════════════════════════════════════════════
+    def _save_settings(self):
+        s = QSettings()
+        s.beginGroup("sfc")
+        s.setValue("scanner", json.dumps(self._mgr.scanner.to_dict()))
+        s.setValue("api_get", json.dumps(self._mgr.api_get_cfg.to_dict()))
+        s.setValue("api_post", json.dumps(self._mgr.api_post_cfg.to_dict()))
+        s.endGroup()
+
+    def _load_settings(self):
+        s = QSettings()
+        s.beginGroup("sfc")
+        try:
+            sc = json.loads(s.value("scanner", "") or "{}")
+            self._mgr.scanner = ScannerConfig(**{
+                **self._mgr.scanner.to_dict(), **sc})
+        except Exception:
+            pass
+        try:
+            gc = json.loads(s.value("api_get", "") or "{}")
+            self._mgr.api_get_cfg = ApiGetConfig(**{
+                **self._mgr.api_get_cfg.to_dict(), **gc})
+        except Exception:
+            pass
+        try:
+            pc = json.loads(s.value("api_post", "") or "{}")
+            self._mgr.api_post_cfg = ApiPostConfig(**{
+                **self._mgr.api_post_cfg.to_dict(), **pc})
+        except Exception:
+            pass
+        s.endGroup()
+        self._apply_manager_to_ui()
+
+    def _apply_manager_to_ui(self):
+        # Scanner
+        sc = self._mgr.scanner
+        if sc.port:
+            for i in range(self.cb_port.count()):
+                if self.cb_port.itemData(i) == sc.port:
+                    self.cb_port.setCurrentIndex(i); break
+            else:
+                self.cb_port.addItem(sc.port, sc.port)
+                self.cb_port.setCurrentIndex(self.cb_port.count() - 1)
+        self.sp_baud.setValue(sc.baudrate)
+        self.cb_bytesize.setCurrentText(str(sc.bytesize))
+        self.cb_parity.setCurrentText(sc.parity)
+        self.cb_stopbits.setCurrentText(str(int(sc.stopbits)) if sc.stopbits == int(sc.stopbits) else str(sc.stopbits))
+        self.sp_timeout.setValue(sc.timeout_ms)
+        self.le_trigger.setText(sc.trigger_hex)
+        self.sp_readsize.setValue(sc.read_size)
+        self.cb_encoding.setCurrentText(sc.encoding)
+        self.sp_expected_len.setValue(sc.expected_length)
+        self.le_contains.setText(sc.contains)
+        if self._mgr.last_sn:
+            self.lbl_last_sn.setText(f"Last SN: {self._mgr.last_sn}")
+        # API GET
+        g = self._mgr.api_get_cfg
+        self.chk_get_enabled.setChecked(g.enabled)
+        self.le_get_url.setText(g.url_template)
+        self.le_get_headers.setText(g.headers_json)
+        self.sp_get_timeout.setValue(g.timeout_ms)
+        self.sp_get_status.setValue(g.expected_status)
+        self.le_get_expected.setText(g.expected_text)
+        self.chk_get_parse_json.setChecked(g.parse_json)
+        self.le_get_json_path.setText(g.json_path)
+        # API POST
+        p = self._mgr.api_post_cfg
+        self.chk_post_enabled.setChecked(p.enabled)
+        self.le_post_url.setText(p.url)
+        self.cb_post_method.setCurrentText(p.method)
+        self.le_post_headers.setText(p.headers_json)
+        self.sp_post_timeout.setValue(p.timeout_ms)
+        self.sp_post_status.setValue(p.expected_status)
+        self.le_post_expected.setText(p.expected_text)
+        self.txt_post_body.setPlainText(p.body_template)
+
+    def closeEvent(self, event):
+        # Lưu auto khi đóng
+        self._apply_to_manager()
+        self._save_settings()
+        super().closeEvent(event)
