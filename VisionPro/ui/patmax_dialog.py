@@ -1069,13 +1069,14 @@ class PatMaxDialog(QDialog):
             refs = self._extras()
             if self._editing_ref_idx < len(refs):
                 rx0, ry0 = self._model.train_roi[0], self._model.train_roi[1]
+                # Lưu pattern-local; spinbox hiển thị image coords
                 refs[self._editing_ref_idx]["x"] = float(ox) - float(rx0)
                 refs[self._editing_ref_idx]["y"] = float(oy) - float(ry0)
-                # Sync spinboxes của ref panel (block để khỏi loop)
+                # Sync spinboxes (IMAGE coords) — block để khỏi loop
                 self._ref_field_updating = True
                 try:
-                    self._ref_x.setValue(refs[self._editing_ref_idx]["x"])
-                    self._ref_y.setValue(refs[self._editing_ref_idx]["y"])
+                    self._ref_x.setValue(float(ox))
+                    self._ref_y.setValue(float(oy))
                 finally:
                     self._ref_field_updating = False
                 self._refresh_ref_list_item(self._editing_ref_idx)
@@ -1303,6 +1304,17 @@ class PatMaxDialog(QDialog):
                             + f"  |  precomputed {n} shape templates")
                 except Exception as e:
                     print(f"[PatMax Align] precompute on train failed: {e}")
+
+            # Auto-add Ref 1 tại origin chính nếu chưa có ref nào
+            if self._model and self._model.is_valid() \
+                    and not getattr(self._model, "extra_refs", None):
+                self._model.extra_refs = [{
+                    "name":  "Ref 1",
+                    "x":     float(self._model.origin_x),
+                    "y":     float(self._model.origin_y),
+                    "angle": 0.0,
+                }]
+                self._node.params["_patmax_model"] = self._model
 
             # Refresh extra-refs list (giữ qua retrain)
             if hasattr(self, "_ref_list"):
@@ -1701,17 +1713,27 @@ class PatMaxDialog(QDialog):
         for w in (self._ref_name, self._ref_x, self._ref_y, self._ref_angle):
             w.setEnabled(enabled)
 
+    def _roi_origin_xy(self) -> Tuple[float, float]:
+        """ROI top-left (image coords) — dùng để convert pattern-local ↔ image."""
+        if self._model and self._model.train_roi:
+            return (float(self._model.train_roi[0]),
+                    float(self._model.train_roi[1]))
+        return (0.0, 0.0)
+
     def _refresh_references_list(self):
         if not hasattr(self, "_ref_list"):
             return
         prev_row = self._ref_list.currentRow()
+        rx0, ry0 = self._roi_origin_xy()
         self._ref_list.blockSignals(True)
         self._ref_list.clear()
         for i, ref in enumerate(self._extras()):
             name = str(ref.get("name", f"Ref {i+1}"))
-            x = float(ref.get("x", 0.0)); y = float(ref.get("y", 0.0))
+            # Hiển thị image coords để khớp với label trên canvas
+            ix = rx0 + float(ref.get("x", 0.0))
+            iy = ry0 + float(ref.get("y", 0.0))
             ang = float(ref.get("angle", 0.0))
-            txt = f"{name}   ({x:.1f}, {y:.1f})"
+            txt = f"{name}   ({ix:.1f}, {iy:.1f})"
             if abs(ang) > 0.01:
                 txt += f"   {ang:+.1f}°"
             self._ref_list.addItem(QListWidgetItem(txt))
@@ -1731,11 +1753,12 @@ class PatMaxDialog(QDialog):
         item = self._ref_list.item(row)
         if item is None:
             return
-        x = float(refs[row].get("x", 0.0))
-        y = float(refs[row].get("y", 0.0))
+        rx0, ry0 = self._roi_origin_xy()
+        ix = rx0 + float(refs[row].get("x", 0.0))
+        iy = ry0 + float(refs[row].get("y", 0.0))
         ang = float(refs[row].get("angle", 0.0))
         nm = str(refs[row].get("name", f"Ref {row+1}"))
-        txt = f"{nm}   ({x:.1f}, {y:.1f})"
+        txt = f"{nm}   ({ix:.1f}, {iy:.1f})"
         if abs(ang) > 0.01:
             txt += f"   {ang:+.1f}°"
         self._ref_list.blockSignals(True)
@@ -1794,11 +1817,13 @@ class PatMaxDialog(QDialog):
                 self._exit_ref_edit_mode()
             return
         ref = refs[row]
+        rx0, ry0 = self._roi_origin_xy()
         self._ref_field_updating = True
         try:
             self._ref_name.setText(str(ref.get("name", f"Ref {row+1}")))
-            self._ref_x.setValue(float(ref.get("x", 0.0)))
-            self._ref_y.setValue(float(ref.get("y", 0.0)))
+            # Spinbox hiển thị IMAGE coords (khớp với label trên canvas)
+            self._ref_x.setValue(rx0 + float(ref.get("x", 0.0)))
+            self._ref_y.setValue(ry0 + float(ref.get("y", 0.0)))
             self._ref_angle.setValue(float(ref.get("angle", 0.0)))
         finally:
             self._ref_field_updating = False
@@ -1818,10 +1843,12 @@ class PatMaxDialog(QDialog):
         refs = self._extras()
         if row < 0 or row >= len(refs):
             return
+        rx0, ry0 = self._roi_origin_xy()
         refs[row]["name"]  = (self._ref_name.text() or f"Ref {row+1}").strip() \
                               or f"Ref {row+1}"
-        refs[row]["x"]     = float(self._ref_x.value())
-        refs[row]["y"]     = float(self._ref_y.value())
+        # Spinbox đang ở IMAGE coords → trừ ROI để lưu pattern-local
+        refs[row]["x"]     = float(self._ref_x.value()) - rx0
+        refs[row]["y"]     = float(self._ref_y.value()) - ry0
         refs[row]["angle"] = float(self._ref_angle.value())
         self._node.params["_patmax_model"] = self._model
         self._refresh_ref_list_item(row)
