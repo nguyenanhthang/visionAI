@@ -494,6 +494,7 @@ def proc_caliper(inputs, params):
 
     gray = _gray(img); vis = _bgr(img.copy())
     s = _draw_scale(vis)
+    show_labels = bool(params.get("show_labels", False))
 
     # ROI line từ params
     x1 = params.get("x1", img.shape[1]//4)
@@ -564,8 +565,9 @@ def proc_caliper(inputs, params):
         col = (0,255,80) if idx==0 else (255,180,0)
         cv2.circle(vis,(ex,ey),_t(6,s),col,_t(2,s))
         cv2.line(vis,(ex+perp_x,ey+perp_y),(ex-perp_x,ey-perp_y),col,_t(2,s))
-        cv2.putText(vis,f"E{idx+1}:{pos:.1f}",(ex+int(8*s),ey-int(8*s)),
-                    cv2.FONT_HERSHEY_SIMPLEX,_fs(0.45,s),col,_t(1,s))
+        if show_labels:
+            cv2.putText(vis,f"E{idx+1}:{pos:.1f}",(ex+int(8*s),ey-int(8*s)),
+                        cv2.FONT_HERSHEY_SIMPLEX,_fs(0.45,s),col,_t(1,s))
         edge_positions.append(float(pos))
 
     e1 = edge_positions[0] if len(edge_positions)>0 else 0.0
@@ -659,6 +661,7 @@ def proc_blob(inputs, params):
 
     vis = _bgr(img.copy())
     s = _draw_scale(vis)
+    show_labels = bool(params.get("show_labels", False))
     blobs = []; centroids = []; total_area = 0.0
 
     for cnt in contours:
@@ -701,8 +704,9 @@ def proc_blob(inputs, params):
         cv2.drawContours(vis,[cnt],-1,(0,200,255),_t(2,s))
         cv2.drawContours(vis,[box],-1,(255,180,0),_t(1,s))
         cv2.circle(vis,(int(cx),int(cy)),_t(4,s),(0,255,80),-1)
-        cv2.putText(vis,f"{area_mm:.1f}mm²",(int(cx)+int(6*s),int(cy)-int(6*s)),
-                    cv2.FONT_HERSHEY_SIMPLEX,_fs(0.45,s),(0,200,255),_t(1,s))
+        if show_labels:
+            cv2.putText(vis,f"{area_mm:.1f}mm²",(int(cx)+int(6*s),int(cy)-int(6*s)),
+                        cv2.FONT_HERSHEY_SIMPLEX,_fs(0.45,s),(0,200,255),_t(1,s))
 
     min_cnt = params.get("min_count", 1)
     max_cnt = params.get("max_count", 1000)
@@ -768,6 +772,7 @@ def proc_find_circle(inputs, params):
                 "radius":0.0,"pass":False}
     gray=_gray(img); vis=_bgr(img.copy())
     s = _draw_scale(vis)
+    show_labels = bool(params.get("show_labels", False))
     blurred=cv2.GaussianBlur(gray,(9,9),2)
     circles=cv2.HoughCircles(blurred,cv2.HOUGH_GRADIENT,
         params.get("dp",1.2),params.get("min_dist",30),
@@ -783,9 +788,10 @@ def proc_find_circle(inputs, params):
         cv2.circle(vis,(int(cx),int(cy)),_t(3,s),(0,220,80),-1)
         cv2.line(vis,(int(cx),int(cy)),(int(cx+radius),int(cy)),(100,200,255),_t(1,s))
         px2mm=params.get("pixel_to_mm",1.0)
-        cv2.putText(vis,f"R={radius*px2mm:.3f}mm cx={cx:.1f} cy={cy:.1f}",
-                    (int(cx-radius),max(0,int(cy-radius)-int(8*s))),
-                    cv2.FONT_HERSHEY_SIMPLEX,_fs(0.55,s),(0,220,80),_t(2,s))
+        if show_labels:
+            cv2.putText(vis,f"R={radius*px2mm:.3f}mm cx={cx:.1f} cy={cy:.1f}",
+                        (int(cx-radius),max(0,int(cy-radius)-int(8*s))),
+                        cv2.FONT_HERSHEY_SIMPLEX,_fs(0.55,s),(0,220,80),_t(2,s))
     min_r=params.get("min_r_check",0.0); max_r=params.get("max_r_check",9999.0)
     is_pass=found and (min_r<=radius*params.get("pixel_to_mm",1.0)<=max_r)
     print(f"[FindCircle] {'PASS' if is_pass else ('FAIL' if found else 'NOT FOUND')} r={radius:.2f}px")
@@ -813,11 +819,13 @@ def proc_color_picker(inputs, params):
                min(180,H+tol),min(255,S+tol),min(255,V+tol)]
     vis=bgr.copy()
     s = _draw_scale(vis)
+    show_labels = bool(params.get("show_labels", False))
     cv2.circle(vis,(x,y),_t(10,s),(0,255,255),_t(2,s))
     sw_x1=x+int(12*s); sw_y1=y-int(20*s); sw_x2=x+int(42*s); sw_y2=y+int(10*s)
     cv2.rectangle(vis,(sw_x1,sw_y1),(sw_x2,sw_y2),(B,G,R),-1)
     cv2.rectangle(vis,(sw_x1,sw_y1),(sw_x2,sw_y2),(255,255,255),_t(1,s))
-    cv2.putText(vis,f"H{H} S{S} V{V}",(x+int(46*s),y),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,255,255),_t(1,s))
+    if show_labels:
+        cv2.putText(vis,f"H{H} S{S} V{V}",(x+int(46*s),y),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,255,255),_t(1,s))
     return {"image":vis,"color_hsv":color_hsv,"h":H,"s":S,"v":V,"r":R,"g":G,"b":B}
 
 def proc_color_segment(inputs, params):
@@ -965,11 +973,13 @@ def proc_distance_point(inputs, params):
     dist=math.hypot(x2-x1,y2-y1)*params.get("pixel_to_mm",1.0)
     vis=_bgr(img.copy()) if img is not None else np.zeros((200,400,3),dtype=np.uint8)
     s = _draw_scale(vis)
+    show_labels = bool(params.get("show_labels", False))
     cv2.line(vis,(int(x1),int(y1)),(int(x2),int(y2)),(0,220,255),_t(2,s))
     cv2.circle(vis,(int(x1),int(y1)),_t(5,s),(0,200,255),-1)
     cv2.circle(vis,(int(x2),int(y2)),_t(5,s),(0,200,255),-1)
     mx,my=int((x1+x2)/2),int((y1+y2)/2)
-    cv2.putText(vis,f"{dist:.3f}mm",(mx,my-int(10*s)),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.6,s),(0,220,255),_t(2,s))
+    if show_labels:
+        cv2.putText(vis,f"{dist:.3f}mm",(mx,my-int(10*s)),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.6,s),(0,220,255),_t(2,s))
     is_pass=params.get("min_dist",0.0)<=dist<=params.get("max_dist",9999.0)
     print(f"[Distance] {dist:.3f}mm {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"distance":dist,"pass":is_pass}
@@ -999,6 +1009,7 @@ def proc_area(inputs, params):
     if mask is None and img is not None: mask=_gray(img)
     vis=_bgr(img.copy() if img is not None else np.zeros((100,100,3),dtype=np.uint8))
     s = _draw_scale(vis)
+    show_labels = bool(params.get("show_labels", False))
     scale=params.get("pixel_to_mm2",1.0); areas=[]
     if contours:
         for c in contours:
@@ -1007,7 +1018,8 @@ def proc_area(inputs, params):
             if M2["m00"]>0:
                 ccx=int(M2["m10"]/M2["m00"]); ccy=int(M2["m01"]/M2["m00"])
                 cv2.drawContours(vis,[c],-1,(0,200,255),_t(2,s))
-                cv2.putText(vis,f"{a_mm:.2f}",(ccx,ccy),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,200,255),_t(1,s))
+                if show_labels:
+                    cv2.putText(vis,f"{a_mm:.2f}",(ccx,ccy),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,200,255),_t(1,s))
     elif mask is not None:
         cnts,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
         for c in cnts:
@@ -1015,7 +1027,8 @@ def proc_area(inputs, params):
             M2=cv2.moments(c)
             if M2["m00"]>0:
                 ccx=int(M2["m10"]/M2["m00"]); ccy=int(M2["m01"]/M2["m00"])
-                cv2.putText(vis,f"{a_mm:.1f}",(ccx,ccy),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,200,255),_t(1,s))
+                if show_labels:
+                    cv2.putText(vis,f"{a_mm:.1f}",(ccx,ccy),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,200,255),_t(1,s))
     total=sum(areas)
     is_pass=params.get("min_area",0.0)<=total<=params.get("max_area",1e9)
     print(f"[Area] total={total:.3f}mm² count={len(areas)} {'PASS' if is_pass else 'FAIL'}")
@@ -1409,6 +1422,7 @@ def proc_yolo_detect(inputs, params):
         results = model.predict(_bgr(img), **kw)
         vis = _bgr(img.copy())
         s = _draw_scale(vis)
+        show_labels = bool(params.get("show_labels", False))
         detections = []
 
         for result in results:
@@ -1428,9 +1442,10 @@ def proc_yolo_detect(inputs, params):
                     overlay = vis.copy()
                     cv2.fillPoly(overlay, [pts], col)
                     cv2.addWeighted(vis, 0.7, overlay, 0.3, 0, vis)
-                    cv2.putText(vis, f"{cls_name} {float(conf_val):.2f}",
-                                (cx, cy-int(10*s)), cv2.FONT_HERSHEY_SIMPLEX,
-                                _fs(0.6, s), col, _t(2, s))
+                    if show_labels:
+                        cv2.putText(vis, f"{cls_name} {float(conf_val):.2f}",
+                                    (cx, cy-int(10*s)), cv2.FONT_HERSHEY_SIMPLEX,
+                                    _fs(0.6, s), col, _t(2, s))
                     detections.append({"class": cls_name, "cls_id": int(cls_id),
                                        "conf": float(conf_val), "cx": cx, "cy": cy})
             # Bounding boxes
@@ -1443,9 +1458,10 @@ def proc_yolo_detect(inputs, params):
                               (220,80,220),(0,220,220),(255,80,80)]
                     col = colors[int(cls_id) % len(colors)]
                     cv2.rectangle(vis, (x1,y1), (x2,y2), col, _t(2, s))
-                    cv2.putText(vis, f"{cls_name} {float(conf_val):.2f}",
-                                (x1, y1-int(8*s)), cv2.FONT_HERSHEY_SIMPLEX,
-                                _fs(0.6, s), col, _t(2, s))
+                    if show_labels:
+                        cv2.putText(vis, f"{cls_name} {float(conf_val):.2f}",
+                                    (x1, y1-int(8*s)), cv2.FONT_HERSHEY_SIMPLEX,
+                                    _fs(0.6, s), col, _t(2, s))
                     cx = (x1+x2)//2; cy = (y1+y2)//2
                     detections.append({"class": cls_name, "cls_id": int(cls_id),
                                        "conf": float(conf_val), "cx": cx, "cy": cy,
@@ -1628,7 +1644,9 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Ngưỡng cường độ gradient để nhận cạnh"),
      P("pixel_to_mm","Pixel → mm","float",1.0,0.0001,1000,step=0.0001),
      P("min_width","Min Width (mm)","float",0.0,0,10000),
-     P("max_width","Max Width (mm)","float",9999.0,0,10000)],
+     P("max_width","Max Width (mm)","float",9999.0,0,10000),
+     P("show_labels","Display: show labels on image","bool",False,
+       tooltip="Bật để vẽ label edge (E1:42.5 …) lên ảnh output. Mặc định tắt — số đo vẫn được log ra console.")],
     proc_caliper, "CogCaliperTool"),
 
   ToolDef("caliper_multi","Caliper Multi-Edge","Caliper",
@@ -1665,7 +1683,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("max_elongation","Max Elongation","float",1000.0,0,10000),
      P("pixel_to_mm2","px²→mm²","float",1.0,0.0001,1e6,step=0.0001),
      P("min_count","Min Count","int",1,0,10000),
-     P("max_count","Max Count","int",1000,0,10000)],
+     P("max_count","Max Count","int",1000,0,10000),
+     P("show_labels","Display: show labels on image","bool",False,
+       tooltip="Bật để vẽ label area (mm²) cạnh từng blob lên ảnh output. Mặc định tắt — vẫn được log ra console.")],
     proc_blob, "CogBlobTool"),
 
   # ── EDGE / LINE / CIRCLE ────────────────────────────────────────
@@ -1694,7 +1714,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("max_radius","Max Radius (px)","int",300,0,5000),
      P("pixel_to_mm","Pixel→mm","float",1.0,0.0001,1000,step=0.0001),
      P("min_r_check","Min Radius (mm)","float",0.0,0,10000),
-     P("max_r_check","Max Radius (mm)","float",9999.0,0,10000)],
+     P("max_r_check","Max Radius (mm)","float",9999.0,0,10000),
+     P("show_labels","Display: show labels on image","bool",False,
+       tooltip="Bật để vẽ label 'R=…mm cx=… cy=…' lên ảnh output. Mặc định tắt — vẫn được log.")],
     proc_find_circle, "CogFindCircleTool"),
 
   # ── COLOR ───────────────────────────────────────────────────────
@@ -1706,7 +1728,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      PortDef("r","number"),PortDef("g","number"),PortDef("b","number")],
     [P("pick_x","Pick X","int",0,0,8192,tooltip="Double-click node → click ảnh để lấy màu"),
      P("pick_y","Pick Y","int",0,0,8192),
-     P("tolerance","HSV Tolerance","int",20,0,100)],
+     P("tolerance","HSV Tolerance","int",20,0,100),
+     P("show_labels","Display: show labels on image","bool",False,
+       tooltip="Bật để vẽ label 'H S V' cạnh điểm picked lên ảnh output. Mặc định tắt.")],
     proc_color_picker, "CogColorTool"),
 
   ToolDef("color_segment","Color Segmentation","Color Analysis",
@@ -1766,7 +1790,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("x2","X2","int",100,0,8192),P("y2","Y2","int",0,0,8192),
      P("pixel_to_mm","Pixel→mm","float",1.0,0.0001,1000,step=0.0001),
      P("min_dist","Min (mm)","float",0.0,0,100000),
-     P("max_dist","Max (mm)","float",9999.0,0,100000)],
+     P("max_dist","Max (mm)","float",9999.0,0,100000),
+     P("show_labels","Display: show labels on image","bool",False,
+       tooltip="Bật để vẽ label '…mm' giữa 2 điểm lên ảnh output. Mặc định tắt.")],
     proc_distance_point, "CogDistancePointPointTool"),
 
   ToolDef("angle_lines","Angle Line-Line","Measurement",
@@ -1788,7 +1814,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      PortDef("count","number"),PortDef("pass","bool")],
     [P("pixel_to_mm2","px²→mm²","float",1.0,0.0001,1e6,step=0.0001),
      P("min_area","Min Area (mm²)","float",0,0,1e9),
-     P("max_area","Max Area (mm²)","float",1e9,0,1e9)],
+     P("max_area","Max Area (mm²)","float",1e9,0,1e9),
+     P("show_labels","Display: show labels on image","bool",False,
+       tooltip="Bật để vẽ label area cạnh từng contour lên ảnh output. Mặc định tắt.")],
     proc_area, "CogMeasureRectangleTool"),
 
   # ── SURFACE INSPECTION ──────────────────────────────────────────
@@ -1980,7 +2008,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("imgsz","Image Size","int",640,32,4096,step=32),
      P("max_det","Max Detections","int",300,1,1000),
      P("min_count","Min Objects (PASS)","int",1,0,1000),
-     P("max_count","Max Objects (PASS)","int",9999,0,10000)],
+     P("max_count","Max Objects (PASS)","int",9999,0,10000),
+     P("show_labels","Display: show labels on image","bool",False,
+       tooltip="Bật để vẽ '{class} {conf}' cạnh từng detection lên ảnh output. Mặc định tắt — kết quả vẫn có trong log & detections port.")],
     proc_yolo_detect,"ultralytics YOLO"),
 
 ]
