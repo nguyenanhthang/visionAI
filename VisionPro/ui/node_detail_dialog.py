@@ -1604,9 +1604,10 @@ class NodeDetailDialog(QDialog):
                 f"border:1px solid rgb({r2},{g2},{b2});")
             self._pixel_bar.show()
 
-        # Image — ưu tiên `display_image` (có overlay) để panel hiển thị;
-        # fall back về `image` (clean) nếu tool không xuất display_image.
-        img = node.outputs.get("display_image")
+        # Image — ưu tiên `_display_image` (overlay; key private, không phải
+        # port → không lộ ra UI / không truyền cho downstream). Fall back
+        # `image` clean nếu tool không xuất visualization.
+        img = node.outputs.get("_display_image")
         if img is None or not isinstance(img, np.ndarray):
             img = node.outputs.get("image")
         if img is not None and isinstance(img, np.ndarray):

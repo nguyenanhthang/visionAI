@@ -1372,7 +1372,8 @@ class PatMaxDialog(QDialog):
             node.outputs["found"]     = n > 0
             node.outputs["num_found"] = n
             # `image` = ảnh nguồn clean (cho downstream xử lý);
-            # `display_image` = ảnh + overlay (cho panel hiển thị).
+            # `_display_image` = ảnh + overlay (private key, cho panel hiển thị
+            # — không lộ ra port).
             if self._current_image is not None:
                 _src = self._current_image
                 if len(_src.shape) == 2:
@@ -1383,7 +1384,7 @@ class PatMaxDialog(QDialog):
                 node.outputs["image"] = _src
             else:
                 node.outputs["image"] = result_vis
-            node.outputs["display_image"] = result_vis
+            node.outputs["_display_image"] = result_vis
             if n > 0:
                 best = results[0]
                 # x, y = toạ độ điểm tham chiếu (yellow) — chính là output chính
