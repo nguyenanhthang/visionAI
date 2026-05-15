@@ -1083,25 +1083,21 @@ def proc_gaussian_blur(inputs, params):
 
 def proc_crop(inputs, params):
     """
-    Crop ROI — single hoặc multi.
+    Crop ROI:
+    - Mỗi port x/y/w/h: nếu CÓ giá trị từ upstream → ưu tiên dùng;
+      port nào KHÔNG kết nối thì fall back về params / _drawn_roi.
+    - Cho phép half-connect: ví dụ PatMax chỉ cung cấp x/y (không w/h) →
+      x/y track theo PatMax, w/h lấy từ Width/Height params.
 
-    Single mode (default):
-      - Mỗi port x/y/w/h: nếu CÓ giá trị từ upstream → ưu tiên dùng;
-        port nào KHÔNG kết nối thì fall back về params / _drawn_roi.
-      - Cho phép half-connect: ví dụ PatMax chỉ cung cấp x/y (không w/h) →
-        x/y track theo PatMax, w/h lấy từ Width/Height params.
-
-    Multi-ROI mode (multi_roi=True):
-      - Lưu nhiều ROI trong params["_drawn_rois"] (list of [x,y,w,h]).
-      - ROI đầu tiên là **anchor**. Khi port x/y kết nối, anchor.x/y nhận
-        giá trị từ port; các ROI khác dịch chuyển cùng delta để giữ
-        nguyên offset tương đối với anchor.
-      - port w/h (nếu kết nối) chỉ áp cho anchor.
+    Output:
+      - `image`     : ẢNH GỐC + bounding box overlay vẽ ở vùng ROI
+                       (để node panel & downstream display thấy được vị trí
+                        ROI trong ảnh gốc).
+      - `roi_image` : ảnh đã cắt (cho downstream tool xử lý vùng ROI).
     """
     img = inputs.get("image")
     if img is None:
-        return {"image": None, "roi_image": None, "roi_images": [],
-                "rois": [], "count": 0,
+        return {"image": None, "roi_image": None,
                 "x": 0, "y": 0, "w": 0, "h": 0}
 
     ih, iw = img.shape[:2]
@@ -1111,74 +1107,33 @@ def proc_crop(inputs, params):
     port_w = inputs.get("w")
     port_h = inputs.get("h")
 
-    multi = bool(params.get("multi_roi", False))
-
-    # ── Resolve danh sách ROI từ params ──────────────────────────
-    if multi:
-        rois_raw = params.get("_drawn_rois") or []
-        rois = []
-        for r in rois_raw:
-            if isinstance(r, (list, tuple)) and len(r) >= 4:
-                rois.append([int(r[0]), int(r[1]), int(r[2]), int(r[3])])
-        if not rois:
-            drawn = params.get("_drawn_roi")
-            if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
-                rois = [[int(v) for v in drawn]]
-            else:
-                rois = [[int(params.get("x", 0)),
-                         int(params.get("y", 0)),
-                         int(params.get("crop_w", iw)),
-                         int(params.get("crop_h", ih))]]
-        manual_src = "MULTI ROI"
+    # Default từ _drawn_roi (vẽ tay) hoặc params spinbox
+    drawn = params.get("_drawn_roi")
+    if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
+        dx, dy, dw, dh = [int(v) for v in drawn]
+        manual_src = "MANUAL ROI"
     else:
-        drawn = params.get("_drawn_roi")
-        if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
-            dx, dy, dw, dh = [int(v) for v in drawn]
-            manual_src = "MANUAL ROI"
-        else:
-            if not params.get("_crop_initialized"):
-                params["x"] = 0
-                params["y"] = 0
-                params["crop_w"] = iw
-                params["crop_h"] = ih
-                params["_crop_initialized"] = True
-            dx = int(params.get("x", 0))
-            dy = int(params.get("y", 0))
-            dw = int(params.get("crop_w", iw))
-            dh = int(params.get("crop_h", ih))
-            manual_src = "PARAMS"
-        rois = [[dx, dy, dw, dh]]
+        if not params.get("_crop_initialized"):
+            params["x"] = 0
+            params["y"] = 0
+            params["crop_w"] = iw
+            params["crop_h"] = ih
+            params["_crop_initialized"] = True
+        dx = int(params.get("x", 0))
+        dy = int(params.get("y", 0))
+        dw = int(params.get("crop_w", iw))
+        dh = int(params.get("crop_h", ih))
+        manual_src = "PARAMS"
 
-    # ── Apply port override + anchor shift ───────────────────────
+    # Per-port override
+    x  = int(float(port_x)) if port_x is not None else dx
+    y  = int(float(port_y)) if port_y is not None else dy
+    cw = int(float(port_w)) if port_w is not None else dw
+    ch = int(float(port_h)) if port_h is not None else dh
+
     tracked_ports = [n for n, v in [("x", port_x), ("y", port_y),
                                      ("w", port_w), ("h", port_h)]
                      if v is not None]
-    ax0, ay0, aw0, ah0 = rois[0]
-    new_ax = int(float(port_x)) if port_x is not None else ax0
-    new_ay = int(float(port_y)) if port_y is not None else ay0
-    new_aw = int(float(port_w)) if port_w is not None else aw0
-    new_ah = int(float(port_h)) if port_h is not None else ah0
-    dx_shift = new_ax - ax0
-    dy_shift = new_ay - ay0
-
-    resolved = []
-    for i, (rx, ry, rw, rh) in enumerate(rois):
-        if i == 0:
-            resolved.append((new_ax, new_ay, new_aw, new_ah))
-        else:
-            resolved.append((rx + dx_shift, ry + dy_shift, rw, rh))
-
-    # ── Clamp + crop từng ROI ────────────────────────────────────
-    clamped = []
-    crops = []
-    for (x, y, w, h) in resolved:
-        x = max(0, min(int(x), iw - 1))
-        y = max(0, min(int(y), ih - 1))
-        w = max(1, min(int(w), iw - x))
-        h = max(1, min(int(h), ih - y))
-        clamped.append((x, y, w, h))
-        crops.append(img[y:y + h, x:x + w].copy())
-
     if not tracked_ports:
         mode_label = manual_src
     elif len(tracked_ports) == 4:
@@ -1186,49 +1141,37 @@ def proc_crop(inputs, params):
     else:
         mode_label = "TRACKED " + "".join(tracked_ports)
 
-    fx, fy, fw, fh = clamped[0]
+    # Clamp
+    x  = max(0, min(x,  iw - 1))
+    y  = max(0, min(y,  ih - 1))
+    cw = max(1, min(cw, iw - x))
+    ch = max(1, min(ch, ih - y))
 
-    # Persist clamped positions back to params khi không TRACKED qua port.
+    # Persist giá trị thực tế (đã clamp) ngược vào params khi không TRACKED.
     if not tracked_ports:
-        if multi:
-            params["_drawn_rois"] = [list(r) for r in clamped]
-        else:
-            params["x"] = fx
-            params["y"] = fy
-            params["crop_w"] = fw
-            params["crop_h"] = fh
+        params["x"] = x
+        params["y"] = y
+        params["crop_w"] = cw
+        params["crop_h"] = ch
 
-    if multi:
-        # Overlay tất cả ROI lên ảnh nguồn để downstream/Display xem được.
-        vis = _bgr(img.copy())
-        s = _draw_scale(vis)
-        col_anchor = (0, 255, 180) if tracked_ports else (0, 212, 255)
-        col_other = (255, 180, 0)
-        for i, (x, y, w, h) in enumerate(clamped):
-            col = col_anchor if i == 0 else col_other
-            cv2.rectangle(vis, (x, y), (x + w, y + h), col, _t(2, s))
-            tag = f"#{i+1}{' (anchor)' if i == 0 and tracked_ports else ''}"
-            cv2.putText(vis, tag,
-                        (x + _t(4, s), y + int(16 * s)),
-                        cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s),
-                        col, _t(1, s), cv2.LINE_AA)
-        for i, (x, y, w, h) in enumerate(clamped):
-            tag = "anchor" if (i == 0 and tracked_ports) else f"#{i+1}"
-            print(f"[Crop][Multi] {mode_label} {tag}: ({x},{y}) {w}x{h}")
-        return {"image": vis, "roi_image": crops[0],
-                "roi_images": crops,
-                "rois": [list(r) for r in clamped],
-                "count": len(crops),
-                "x": fx, "y": fy, "w": fw, "h": fh}
+    # Crop ảnh thực sự — cho downstream qua port `roi_image`
+    roi = img[y:y + ch, x:x + cw].copy()
 
-    # ── Single-ROI: behaviour cũ (output image = vùng đã cắt) ────
-    vis_roi = _bgr(crops[0].copy())
-    print(f"[Crop] {mode_label} ({fx},{fy}) {fw}x{fh}")
-    return {"image": vis_roi, "roi_image": crops[0],
-            "roi_images": [crops[0]],
-            "rois": [[fx, fy, fw, fh]],
-            "count": 1,
-            "x": fx, "y": fy, "w": fw, "h": fh}
+    # `image` output = ẢNH GỐC + bounding box overlay (cho display)
+    vis = _bgr(img.copy())
+    s = _draw_scale(vis)
+    col = (0, 255, 180) if tracked_ports else (0, 212, 255)
+    cv2.rectangle(vis, (x, y), (x + cw, y + ch), col, _t(2, s))
+    label = f"ROI ({x},{y}) {cw}x{ch}"
+    cv2.putText(vis, label,
+                (x + _t(4, s), max(y - _t(6, s), int(16 * s))),
+                cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), col,
+                _t(2, s), cv2.LINE_AA)
+
+    print(f"[Crop] {mode_label} ({x},{y}) {cw}x{ch}")
+
+    return {"image": vis, "roi_image": roi,
+            "x": x, "y": y, "w": cw, "h": ch}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1890,8 +1833,8 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   ToolDef("crop_roi","Crop ROI","Image Processing",
     "Cắt vùng ROI — nhận x/y/w/h từ PatMax để tracking. "
-    "Bật Multi-ROI để vẽ nhiều ROI; ROI đầu là anchor, các ROI khác "
-    "di chuyển theo khi anchor (x,y) được liên kết từ upstream.",
+    "Output `image` = ảnh gốc + bbox overlay; `roi_image` = vùng đã cắt "
+    "(dùng cho downstream tool xử lý ROI).",
     "#2c3e50","✂",
     [PortDef("image","image"),
      PortDef("x","number",required=False,default=None),
@@ -1899,17 +1842,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      PortDef("w","number",required=False,default=None),
      PortDef("h","number",required=False,default=None)],
     [PortDef("image","image"),PortDef("roi_image","image"),
-     PortDef("roi_images","list"),PortDef("rois","list"),
-     PortDef("count","number"),
      PortDef("x","number"),PortDef("y","number"),
      PortDef("w","number"),PortDef("h","number")],
-    [P("multi_roi","Multi-ROI","bool",False,
-       tooltip="Bật để vẽ nhiều ROI. ROI #1 là anchor — khi port x/y "
-               "kết nối, các ROI khác sẽ di chuyển theo anchor."),
-     P("x","X","int",0,0,8192,visible_if={"multi_roi":False}),
-     P("y","Y","int",0,0,8192,visible_if={"multi_roi":False}),
-     P("crop_w","Width","int",320,1,8192,visible_if={"multi_roi":False}),
-     P("crop_h","Height","int",240,1,8192,visible_if={"multi_roi":False})],
+    [P("x","X","int",0,0,8192),P("y","Y","int",0,0,8192),
+     P("crop_w","Width","int",320,1,8192),P("crop_h","Height","int",240,1,8192)],
     proc_crop, ""),
 
   ToolDef("threshold","Threshold","Image Processing",
