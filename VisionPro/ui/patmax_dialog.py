@@ -58,6 +58,9 @@ class PatMaxDialog(QDialog):
         self._roi_mode: str = node.params.get("_patmax_roi_mode", "single")
         # Multi-pattern models (chỉ dùng khi roi_mode == "multi_pattern")
         self._models: List[PatMaxModel] = node.params.get("_patmax_models") or []
+        # Edit-mode cho extra refs: -1 = đang chỉnh origin chính,
+        # >=0 = đang chỉnh extra_refs[idx] (canvas marker tạm thành ref đó)
+        self._editing_ref_idx: int = -1
 
         self.setWindowTitle(f"🎯  PatMax Pattern Align Tool  —  {node.tool.name}")
         self.setMinimumSize(1100, 720)
@@ -145,9 +148,6 @@ class PatMaxDialog(QDialog):
         sl.addWidget(btn_save); sl.addWidget(btn_load)
         ll.addWidget(savload)
 
-        # References panel — danh sách tham chiếu đã tạo (chọn để chỉnh)
-        ll.addWidget(self._build_references_panel())
-
         # Result table
         ll.addWidget(QLabel("RESULTS"))
         self._result_table = ResultTable()
@@ -198,6 +198,7 @@ class PatMaxDialog(QDialog):
         self._img_label = InteractiveImageLabel(mode="roi")
         self._img_label.roi_changed.connect(self._on_roi_drawn)
         self._img_label.origin_changed.connect(self._on_origin_dragged)
+        self._img_label.origin_angle_changed.connect(self._on_origin_angle_dragged)
         self._img_label.shape_drawn.connect(self._on_shape_drawn)
         self._img_label.shapes_changed.connect(self._on_shapes_changed)
         self._img_label.setMinimumSize(600, 400)
@@ -500,6 +501,10 @@ class PatMaxDialog(QDialog):
             "color:#64748b; font-size:11px; font-family:'Courier New';")
         self._train_status.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._train_status)
+
+        # Extra reference points panel — gộp vào Train tab
+        lay.addWidget(self._build_references_panel())
+
         lay.addStretch()
         return scroll
 
@@ -861,6 +866,9 @@ class PatMaxDialog(QDialog):
 
     def _on_roi_drawn(self, x, y, w, h):
         self._current_roi = (x, y, w, h)
+        # Vẽ ROI mới → thoát ref edit-mode để khỏi đè marker
+        if self._editing_ref_idx >= 0:
+            self._exit_ref_edit_mode()
         self._img_status.setText(
             f"ROI đã vẽ: ({x},{y})  {w}×{h} px  ({self._current_shape})  "
             f"—  Nhấn ⚙ Train Pattern")
@@ -970,6 +978,9 @@ class PatMaxDialog(QDialog):
             self._origin_updating = False
 
     def _on_origin_preset_changed(self, idx: int):
+        # User chỉnh origin chính → thoát ref edit-mode để khỏi nhầm marker
+        if self._editing_ref_idx >= 0:
+            self._exit_ref_edit_mode()
         if self._preset_offset(idx) is not None:
             self._apply_origin_preset_to_roi()
         # Nếu Custom → không reset, để user kéo/nhập tay
@@ -977,6 +988,9 @@ class PatMaxDialog(QDialog):
     def _on_origin_spin_changed(self, _val):
         if self._origin_updating:
             return
+        # User gõ X/Y vào origin chính → thoát ref edit-mode
+        if self._editing_ref_idx >= 0:
+            self._exit_ref_edit_mode()
         ox = self._sp_origin_x.value()
         oy = self._sp_origin_y.value()
         self._origin_updating = True
@@ -1046,7 +1060,27 @@ class PatMaxDialog(QDialog):
         self._set_view("image")
 
     def _on_origin_dragged(self, ox: float, oy: float):
-        """Callback khi user kéo origin trên canvas."""
+        """Callback khi user kéo origin marker trên canvas.
+        Route: đang chỉnh extra ref idx ≥ 0 → update ref đó (pattern-local
+        coords); else → update origin chính của pattern (image coords).
+        """
+        # Edit-mode: đang chỉnh extra ref
+        if self._editing_ref_idx >= 0 and self._model and self._model.train_roi:
+            refs = self._extras()
+            if self._editing_ref_idx < len(refs):
+                rx0, ry0 = self._model.train_roi[0], self._model.train_roi[1]
+                refs[self._editing_ref_idx]["x"] = float(ox) - float(rx0)
+                refs[self._editing_ref_idx]["y"] = float(oy) - float(ry0)
+                # Sync spinboxes của ref panel (block để khỏi loop)
+                self._ref_field_updating = True
+                try:
+                    self._ref_x.setValue(refs[self._editing_ref_idx]["x"])
+                    self._ref_y.setValue(refs[self._editing_ref_idx]["y"])
+                finally:
+                    self._ref_field_updating = False
+                self._refresh_ref_list_item(self._editing_ref_idx)
+            return
+        # Default: kéo origin chính của pattern
         self._origin_updating = True
         try:
             self._sp_origin_x.setValue(float(ox))
@@ -1055,6 +1089,22 @@ class PatMaxDialog(QDialog):
                 self._origin_combo.setCurrentIndex(7)
         finally:
             self._origin_updating = False
+
+    def _on_origin_angle_dragged(self, angle: float):
+        """Callback khi user xoay marker trên canvas. Chỉ áp khi đang
+        chỉnh extra ref (origin chính của pattern không xoay)."""
+        if self._editing_ref_idx < 0:
+            return
+        refs = self._extras()
+        if self._editing_ref_idx >= len(refs):
+            return
+        refs[self._editing_ref_idx]["angle"] = float(angle)
+        self._ref_field_updating = True
+        try:
+            self._ref_angle.setValue(float(angle))
+        finally:
+            self._ref_field_updating = False
+        self._refresh_ref_list_item(self._editing_ref_idx)
 
     def _train(self):
         if self._current_image is None:
@@ -1100,6 +1150,11 @@ class PatMaxDialog(QDialog):
         self._btn_train.setEnabled(False)
         self._train_status.setText("Training...")
         self._train_status.setStyleSheet("color:#ffd700; font-size:11px;")
+
+        # Thoát ref edit-mode trước khi retrain (marker sẽ set lại sau train)
+        if self._editing_ref_idx >= 0:
+            self._editing_ref_idx = -1
+            self._set_extra_ref_fields_enabled(False)
 
         # Lưu extra_refs từ model cũ để giữ qua retrain
         prev_extra_refs = list(getattr(self._model, "extra_refs", []) or []) \
@@ -1524,6 +1579,8 @@ class PatMaxDialog(QDialog):
                 self._status_chip.setText(f"● LOADED  hash:{model.model_hash}")
                 self._status_chip.setStyleSheet(
                     "color:#00d4ff; font-size:12px; font-weight:700; background:transparent;")
+                # Reset ref edit-mode (marker đã set về origin chính ở trên)
+                self._editing_ref_idx = -1
                 # Refresh extra-refs list (load từ file)
                 if hasattr(self, "_ref_list"):
                     self._refresh_references_list()
@@ -1666,10 +1723,75 @@ class PatMaxDialog(QDialog):
         else:
             self._set_extra_ref_fields_enabled(False)
 
+    def _refresh_ref_list_item(self, row: int):
+        """Cập nhật text 1 row trong list (không reset selection)."""
+        refs = self._extras()
+        if row < 0 or row >= len(refs) or not hasattr(self, "_ref_list"):
+            return
+        item = self._ref_list.item(row)
+        if item is None:
+            return
+        x = float(refs[row].get("x", 0.0))
+        y = float(refs[row].get("y", 0.0))
+        ang = float(refs[row].get("angle", 0.0))
+        nm = str(refs[row].get("name", f"Ref {row+1}"))
+        txt = f"{nm}   ({x:.1f}, {y:.1f})"
+        if abs(ang) > 0.01:
+            txt += f"   {ang:+.1f}°"
+        self._ref_list.blockSignals(True)
+        item.setText(txt)
+        self._ref_list.blockSignals(False)
+
+    def _enter_ref_edit_mode(self, row: int):
+        """Đưa canvas marker về vị trí + angle của ref idx=row để kéo trực tiếp."""
+        refs = self._extras()
+        if row < 0 or row >= len(refs):
+            return
+        if self._model is None or not self._model.train_roi:
+            return
+        self._editing_ref_idx = row
+        rx0, ry0 = self._model.train_roi[0], self._model.train_roi[1]
+        ox = float(rx0) + float(refs[row].get("x", 0.0))
+        oy = float(ry0) + float(refs[row].get("y", 0.0))
+        ang = float(refs[row].get("angle", 0.0))
+        # Block origin spinbox signals — chúng chỉ áp cho origin chính
+        self._origin_updating = True
+        try:
+            self._img_label.set_origin(ox, oy)
+            self._img_label.set_origin_angle(ang)
+        finally:
+            self._origin_updating = False
+
+    def _exit_ref_edit_mode(self):
+        """Thoát edit-mode: marker canvas quay về origin chính của pattern."""
+        if self._editing_ref_idx < 0:
+            return
+        self._editing_ref_idx = -1
+        if self._model and self._model.train_roi:
+            rx, ry = self._model.train_roi[0], self._model.train_roi[1]
+            ox = float(rx) + float(self._model.origin_x)
+            oy = float(ry) + float(self._model.origin_y)
+            self._origin_updating = True
+            try:
+                self._img_label.set_origin(ox, oy)
+                self._img_label.set_origin_angle(0.0)
+            finally:
+                self._origin_updating = False
+        # Bỏ selection trên list
+        if hasattr(self, "_ref_list"):
+            self._ref_list.blockSignals(True)
+            self._ref_list.clearSelection()
+            self._ref_list.setCurrentRow(-1)
+            self._ref_list.blockSignals(False)
+        self._set_extra_ref_fields_enabled(False)
+
     def _on_extra_ref_selected(self, row: int):
         refs = self._extras()
         if row < 0 or row >= len(refs):
             self._set_extra_ref_fields_enabled(False)
+            # Thoát edit-mode khi không có ref nào được chọn
+            if self._editing_ref_idx >= 0:
+                self._exit_ref_edit_mode()
             return
         ref = refs[row]
         self._ref_field_updating = True
@@ -1681,10 +1803,13 @@ class PatMaxDialog(QDialog):
         finally:
             self._ref_field_updating = False
         self._set_extra_ref_fields_enabled(True)
+        # Vào edit-mode: canvas marker thành ref này (kéo / xoay được)
+        self._enter_ref_edit_mode(row)
         if hasattr(self, "_img_status"):
             name = self._ref_name.text() or f"Ref {row+1}"
             self._img_status.setText(
-                f"✏ Đang chỉnh '{name}' — sửa Name/X/Y/Angle bên dưới")
+                f"✏ Đang chỉnh '{name}' — kéo marker XY trên ảnh "
+                f"hoặc sửa spinbox bên dưới")
 
     def _on_extra_ref_field_changed(self, *_):
         if self._ref_field_updating:
@@ -1698,18 +1823,19 @@ class PatMaxDialog(QDialog):
         refs[row]["x"]     = float(self._ref_x.value())
         refs[row]["y"]     = float(self._ref_y.value())
         refs[row]["angle"] = float(self._ref_angle.value())
-        # Sync model in node.params (cùng instance — chỉ để đảm bảo)
         self._node.params["_patmax_model"] = self._model
-        # Refresh list label (giữ nguyên row)
-        self._ref_list.blockSignals(True)
-        item = self._ref_list.item(row)
-        if item is not None:
-            x = refs[row]["x"]; y = refs[row]["y"]; ang = refs[row]["angle"]
-            txt = f"{refs[row]['name']}   ({x:.1f}, {y:.1f})"
-            if abs(ang) > 0.01:
-                txt += f"   {ang:+.1f}°"
-            item.setText(txt)
-        self._ref_list.blockSignals(False)
+        self._refresh_ref_list_item(row)
+        # Nếu đang edit-mode chính ref này → sync canvas marker
+        if self._editing_ref_idx == row and self._model and self._model.train_roi:
+            rx0, ry0 = self._model.train_roi[0], self._model.train_roi[1]
+            ox = float(rx0) + refs[row]["x"]
+            oy = float(ry0) + refs[row]["y"]
+            self._origin_updating = True
+            try:
+                self._img_label.set_origin(ox, oy)
+                self._img_label.set_origin_angle(refs[row]["angle"])
+            finally:
+                self._origin_updating = False
 
     def _on_add_reference(self):
         if self._model is None or not self._model.is_valid():
@@ -1725,11 +1851,12 @@ class PatMaxDialog(QDialog):
         refs.append({"name": f"Ref {idx}", "x": cx, "y": cy, "angle": 0.0})
         self._node.params["_patmax_model"] = self._model
         self._refresh_references_list()
+        # Auto-select ref vừa thêm → vào edit-mode
         self._ref_list.setCurrentRow(len(refs) - 1)
         if hasattr(self, "_img_status"):
             self._img_status.setText(
-                f"✔ Đã thêm điểm tham chiếu 'Ref {idx}'  "
-                f"(tổng {len(refs)}). Sửa Name/X/Y/Angle để chỉnh.")
+                f"✔ Đã thêm 'Ref {idx}' ở tâm pattern  (tổng {len(refs)}). "
+                f"Kéo marker XY trên ảnh để chỉnh vị trí.")
 
     def _on_delete_reference(self):
         row = self._ref_list.currentRow()
@@ -1746,6 +1873,8 @@ class PatMaxDialog(QDialog):
             return
         del refs[row]
         self._node.params["_patmax_model"] = self._model
+        # Thoát edit-mode (sẽ về origin chính)
+        self._exit_ref_edit_mode()
         self._refresh_references_list()
         if hasattr(self, "_img_status"):
             self._img_status.setText(f"🗑 Đã xoá '{name}'.")
