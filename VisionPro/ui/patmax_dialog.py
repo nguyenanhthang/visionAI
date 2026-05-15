@@ -8,7 +8,6 @@ Cognex VisionPro style:
   - Lưu/Load model file .patmax
 """
 from __future__ import annotations
-import copy
 from typing import Optional, List, Tuple, Dict
 import numpy as np
 
@@ -19,8 +18,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                 QSpinBox, QDoubleSpinBox, QCheckBox,
                                 QComboBox, QSlider, QTableWidget,
                                 QTableWidgetItem, QHeaderView, QLineEdit,
-                                QProgressBar, QListWidget, QListWidgetItem,
-                                QInputDialog)
+                                QProgressBar, QListWidget, QListWidgetItem)
 from PySide6.QtCore import Qt, Signal, QRect, QPoint, QSize, QTimer, QThread
 from PySide6.QtGui import (QPixmap, QImage, QFont, QColor, QPainter,
                             QPen, QBrush, QCursor, QMouseEvent)
@@ -60,8 +58,6 @@ class PatMaxDialog(QDialog):
         self._roi_mode: str = node.params.get("_patmax_roi_mode", "single")
         # Multi-pattern models (chỉ dùng khi roi_mode == "multi_pattern")
         self._models: List[PatMaxModel] = node.params.get("_patmax_models") or []
-        # References — danh sách tham chiếu đã lưu (lưu vào node.params để bền)
-        self._references: List[Dict] = node.params.get("_patmax_references") or []
 
         self.setWindowTitle(f"🎯  PatMax Pattern Align Tool  —  {node.tool.name}")
         self.setMinimumSize(1100, 720)
@@ -1105,6 +1101,10 @@ class PatMaxDialog(QDialog):
         self._train_status.setText("Training...")
         self._train_status.setStyleSheet("color:#ffd700; font-size:11px;")
 
+        # Lưu extra_refs từ model cũ để giữ qua retrain
+        prev_extra_refs = list(getattr(self._model, "extra_refs", []) or []) \
+            if self._model else []
+
         try:
             tm = "create" if self._train_mode_combo.currentIndex() == 1 else "evaluate"
             ang_low_t  = self._sp_ang_low.value()  if self._chk_angle.isChecked() else 0.0
@@ -1128,6 +1128,7 @@ class PatMaxDialog(QDialog):
                     raise RuntimeError("Multi-region train trả về None.")
                 model.accept_threshold = self._sp_threshold.value()
                 model.num_results = self._sp_num_results.value()
+                model.extra_refs = list(prev_extra_refs)  # giữ qua retrain
                 self._model = model
                 self._models = [model]
                 self._node.params["_patmax_model"] = model
@@ -1162,6 +1163,8 @@ class PatMaxDialog(QDialog):
                 for m in models:
                     m.accept_threshold = self._sp_threshold.value()
                     m.num_results = self._sp_num_results.value()
+                # Giữ extra_refs cho model đầu (origin reference cho draw)
+                models[0].extra_refs = list(prev_extra_refs)
                 self._models = models
                 self._model = models[0]
                 # Lưu list vào node.params (proc_patmax sẽ phát hiện và dùng run_patmax_multi)
@@ -1207,6 +1210,7 @@ class PatMaxDialog(QDialog):
                 )
                 model.accept_threshold = self._sp_threshold.value()
                 model.num_results = self._sp_num_results.value()
+                model.extra_refs = list(prev_extra_refs)  # giữ qua retrain
                 self._model = model
                 self._models = [model]
                 self._node.params["_patmax_model"] = model
@@ -1244,6 +1248,10 @@ class PatMaxDialog(QDialog):
                             + f"  |  precomputed {n} shape templates")
                 except Exception as e:
                     print(f"[PatMax Align] precompute on train failed: {e}")
+
+            # Refresh extra-refs list (giữ qua retrain)
+            if hasattr(self, "_ref_list"):
+                self._refresh_references_list()
 
             self.model_trained.emit()
 
@@ -1516,6 +1524,9 @@ class PatMaxDialog(QDialog):
                 self._status_chip.setText(f"● LOADED  hash:{model.model_hash}")
                 self._status_chip.setStyleSheet(
                     "color:#00d4ff; font-size:12px; font-weight:700; background:transparent;")
+                # Refresh extra-refs list (load từ file)
+                if hasattr(self, "_ref_list"):
+                    self._refresh_references_list()
                 self._set_view("edges")
                 QMessageBox.information(self, "Load",
                     f"Model loaded OK\n"
@@ -1525,266 +1536,219 @@ class PatMaxDialog(QDialog):
                 QMessageBox.critical(self, "Error", "Cannot load model or model invalid.")
 
     # ════════════════════════════════════════════════════════════════
-    #  References (tham chiếu) — tạo / xem / chọn để chỉnh
+    #  Extra reference points — nhiều điểm tham chiếu XY trên 1 pattern
     # ════════════════════════════════════════════════════════════════
     def _build_references_panel(self) -> QWidget:
-        """Panel quản lý tham chiếu (reference patterns đã train).
-        ➕ Add    — lưu model hiện tại thành 1 reference mới
-        💾 Update — ghi đè reference đang chọn bằng model hiện tại
-        ✏ Rename — đổi tên reference đang chọn
-        🗑 Delete — xoá reference đang chọn
-        Click vào reference → load lại để chỉnh sửa.
+        """Panel quản lý các điểm tham chiếu XY bổ sung trên cùng 1 pattern.
+        - List các điểm đã tạo (Name, X, Y, Angle)
+        - Click vào item → spinboxes load & cho chỉnh trực tiếp
+        - ➕ Add    — tạo điểm mới (mặc định ở tâm pattern)
+        - 🗑 Delete — xoá điểm đang chọn
+        Toạ độ X, Y là pattern-local (gốc 0,0 = góc trên-trái ROI).
+        Khi search: mỗi điểm tự transform theo angle/scale của result.
         """
-        grp = QGroupBox("REFERENCES  (Tham chiếu)")
+        grp = QGroupBox("EXTRA REFERENCE POINTS  (Tham chiếu bổ sung)")
         g = QVBoxLayout(grp)
         g.setContentsMargins(8, 22, 8, 8); g.setSpacing(6)
 
         self._ref_list = QListWidget()
-        self._ref_list.setFixedHeight(110)
+        self._ref_list.setFixedHeight(90)
         self._ref_list.setStyleSheet(
             "QListWidget{background:#0d1220;color:#e2e8f0;"
             "border:1px solid #1e2d45;border-radius:4px;font-size:11px;}"
             "QListWidget::item{padding:3px 6px;}"
             "QListWidget::item:selected{background:#1a2236;color:#00d4ff;}")
-        self._ref_list.itemClicked.connect(self._on_reference_clicked)
+        self._ref_list.currentRowChanged.connect(self._on_extra_ref_selected)
         g.addWidget(self._ref_list)
 
+        # Editing fields cho ref đang chọn
+        self._ref_field_updating = False  # guard chống loop signal
+        sp_style = ("QDoubleSpinBox{background:#0a0e1a;border:1px solid #1e2d45;"
+                    "color:#e2e8f0;padding:2px 4px;border-radius:3px;}")
+        le_style = ("QLineEdit{background:#0a0e1a;border:1px solid #1e2d45;"
+                    "color:#e2e8f0;padding:2px 4px;border-radius:3px;}")
+
+        # Name row
+        name_row = QWidget(); nr = QHBoxLayout(name_row)
+        nr.setContentsMargins(0, 0, 0, 0); nr.setSpacing(6)
+        lbl_n = QLabel("Name:"); lbl_n.setStyleSheet("color:#94a3b8; font-size:11px;")
+        lbl_n.setMinimumWidth(46)
+        self._ref_name = QLineEdit()
+        self._ref_name.setStyleSheet(le_style)
+        self._ref_name.textChanged.connect(self._on_extra_ref_field_changed)
+        nr.addWidget(lbl_n); nr.addWidget(self._ref_name, 1)
+        g.addWidget(name_row)
+
+        # X / Y row
+        xy_row = QWidget(); xyr = QHBoxLayout(xy_row)
+        xyr.setContentsMargins(0, 0, 0, 0); xyr.setSpacing(6)
+        lbl_x = QLabel("X:"); lbl_x.setStyleSheet("color:#94a3b8; font-size:11px;")
+        self._ref_x = QDoubleSpinBox()
+        self._ref_x.setRange(-99999.0, 99999.0); self._ref_x.setDecimals(2)
+        self._ref_x.setSingleStep(1.0); self._ref_x.setStyleSheet(sp_style)
+        self._ref_x.valueChanged.connect(self._on_extra_ref_field_changed)
+        lbl_y = QLabel("Y:"); lbl_y.setStyleSheet("color:#94a3b8; font-size:11px;")
+        self._ref_y = QDoubleSpinBox()
+        self._ref_y.setRange(-99999.0, 99999.0); self._ref_y.setDecimals(2)
+        self._ref_y.setSingleStep(1.0); self._ref_y.setStyleSheet(sp_style)
+        self._ref_y.valueChanged.connect(self._on_extra_ref_field_changed)
+        xyr.addWidget(lbl_x); xyr.addWidget(self._ref_x, 1)
+        xyr.addSpacing(4)
+        xyr.addWidget(lbl_y); xyr.addWidget(self._ref_y, 1)
+        g.addWidget(xy_row)
+
+        # Angle row
+        ang_row = QWidget(); ar = QHBoxLayout(ang_row)
+        ar.setContentsMargins(0, 0, 0, 0); ar.setSpacing(6)
+        lbl_a = QLabel("Angle:"); lbl_a.setStyleSheet("color:#94a3b8; font-size:11px;")
+        lbl_a.setMinimumWidth(46)
+        self._ref_angle = QDoubleSpinBox()
+        self._ref_angle.setRange(-360.0, 360.0); self._ref_angle.setDecimals(2)
+        self._ref_angle.setSingleStep(1.0); self._ref_angle.setSuffix(" °")
+        self._ref_angle.setStyleSheet(sp_style)
+        self._ref_angle.valueChanged.connect(self._on_extra_ref_field_changed)
+        ar.addWidget(lbl_a); ar.addWidget(self._ref_angle, 1)
+        g.addWidget(ang_row)
+
+        # Buttons
         btn_row = QWidget(); br = QHBoxLayout(btn_row)
         br.setContentsMargins(0, 0, 0, 0); br.setSpacing(4)
         btn_add = QPushButton("➕ Add")
-        btn_upd = QPushButton("💾 Update")
-        btn_ren = QPushButton("✏ Rename")
         btn_del = QPushButton("🗑 Delete")
         btn_style = (
             "QPushButton{background:#111827;border:1px solid #1e2d45;"
             "border-radius:3px;color:#94a3b8;font-size:10px;padding:0 6px;}"
             "QPushButton:hover{color:#e2e8f0;border-color:#00d4ff;}")
-        for b in (btn_add, btn_upd, btn_ren, btn_del):
-            b.setFixedHeight(24)
-            b.setStyleSheet(btn_style)
+        for b in (btn_add, btn_del):
+            b.setFixedHeight(24); b.setStyleSheet(btn_style)
             br.addWidget(b)
         btn_add.clicked.connect(self._on_add_reference)
-        btn_upd.clicked.connect(self._on_update_reference)
-        btn_ren.clicked.connect(self._on_rename_reference)
         btn_del.clicked.connect(self._on_delete_reference)
         g.addWidget(btn_row)
 
+        # Initial state
+        self._set_extra_ref_fields_enabled(False)
         self._refresh_references_list()
         return grp
+
+    # ── Helpers ────────────────────────────────────────────────────
+    def _extras(self) -> List[Dict]:
+        """Trả list extra_refs trong model hiện tại (tạo nếu chưa có)."""
+        if self._model is None:
+            return []
+        if not isinstance(getattr(self._model, "extra_refs", None), list):
+            self._model.extra_refs = []
+        return self._model.extra_refs
+
+    def _set_extra_ref_fields_enabled(self, enabled: bool):
+        for w in (self._ref_name, self._ref_x, self._ref_y, self._ref_angle):
+            w.setEnabled(enabled)
 
     def _refresh_references_list(self):
         if not hasattr(self, "_ref_list"):
             return
+        prev_row = self._ref_list.currentRow()
         self._ref_list.blockSignals(True)
         self._ref_list.clear()
-        for i, ref in enumerate(self._references):
-            name = ref.get("name", f"Reference {i+1}")
-            mode = ref.get("roi_mode", "single")
-            suffix = {"single": "",
-                      "multi_region": "  [multi-region]",
-                      "multi_pattern": "  [multi-pattern]"}.get(mode, "")
-            self._ref_list.addItem(QListWidgetItem(f"{name}{suffix}"))
+        for i, ref in enumerate(self._extras()):
+            name = str(ref.get("name", f"Ref {i+1}"))
+            x = float(ref.get("x", 0.0)); y = float(ref.get("y", 0.0))
+            ang = float(ref.get("angle", 0.0))
+            txt = f"{name}   ({x:.1f}, {y:.1f})"
+            if abs(ang) > 0.01:
+                txt += f"   {ang:+.1f}°"
+            self._ref_list.addItem(QListWidgetItem(txt))
         self._ref_list.blockSignals(False)
+        # Khôi phục selection nếu hợp lệ
+        n = self._ref_list.count()
+        if 0 <= prev_row < n:
+            self._ref_list.setCurrentRow(prev_row)
+        else:
+            self._set_extra_ref_fields_enabled(False)
 
-    def _serialize_current_as_ref(self, name: str) -> Dict:
-        return {
-            "name": name,
-            "model":    copy.deepcopy(self._model)  if self._model  else None,
-            "models":   copy.deepcopy(self._models) if self._models else [],
-            "roi_mode": self._roi_mode,
-        }
+    def _on_extra_ref_selected(self, row: int):
+        refs = self._extras()
+        if row < 0 or row >= len(refs):
+            self._set_extra_ref_fields_enabled(False)
+            return
+        ref = refs[row]
+        self._ref_field_updating = True
+        try:
+            self._ref_name.setText(str(ref.get("name", f"Ref {row+1}")))
+            self._ref_x.setValue(float(ref.get("x", 0.0)))
+            self._ref_y.setValue(float(ref.get("y", 0.0)))
+            self._ref_angle.setValue(float(ref.get("angle", 0.0)))
+        finally:
+            self._ref_field_updating = False
+        self._set_extra_ref_fields_enabled(True)
+        if hasattr(self, "_img_status"):
+            name = self._ref_name.text() or f"Ref {row+1}"
+            self._img_status.setText(
+                f"✏ Đang chỉnh '{name}' — sửa Name/X/Y/Angle bên dưới")
+
+    def _on_extra_ref_field_changed(self, *_):
+        if self._ref_field_updating:
+            return
+        row = self._ref_list.currentRow()
+        refs = self._extras()
+        if row < 0 or row >= len(refs):
+            return
+        refs[row]["name"]  = (self._ref_name.text() or f"Ref {row+1}").strip() \
+                              or f"Ref {row+1}"
+        refs[row]["x"]     = float(self._ref_x.value())
+        refs[row]["y"]     = float(self._ref_y.value())
+        refs[row]["angle"] = float(self._ref_angle.value())
+        # Sync model in node.params (cùng instance — chỉ để đảm bảo)
+        self._node.params["_patmax_model"] = self._model
+        # Refresh list label (giữ nguyên row)
+        self._ref_list.blockSignals(True)
+        item = self._ref_list.item(row)
+        if item is not None:
+            x = refs[row]["x"]; y = refs[row]["y"]; ang = refs[row]["angle"]
+            txt = f"{refs[row]['name']}   ({x:.1f}, {y:.1f})"
+            if abs(ang) > 0.01:
+                txt += f"   {ang:+.1f}°"
+            item.setText(txt)
+        self._ref_list.blockSignals(False)
 
     def _on_add_reference(self):
         if self._model is None or not self._model.is_valid():
-            QMessageBox.warning(self, "Add Reference",
-                                "Train model trước khi tạo tham chiếu.")
+            QMessageBox.warning(
+                self, "Add Reference",
+                "Train model trước khi thêm điểm tham chiếu.")
             return
-        default = f"Reference {len(self._references)+1}"
-        name, ok = QInputDialog.getText(
-            self, "Add Reference", "Tên tham chiếu:", text=default)
-        if not ok:
-            return
-        name = (name or default).strip() or default
-        self._references.append(self._serialize_current_as_ref(name))
-        self._node.params["_patmax_references"] = self._references
+        refs = self._extras()
+        # Mặc định đặt ở tâm pattern
+        cx = float(self._model.pattern_w) / 2.0
+        cy = float(self._model.pattern_h) / 2.0
+        idx = len(refs) + 1
+        refs.append({"name": f"Ref {idx}", "x": cx, "y": cy, "angle": 0.0})
+        self._node.params["_patmax_model"] = self._model
         self._refresh_references_list()
-        self._ref_list.setCurrentRow(len(self._references) - 1)
+        self._ref_list.setCurrentRow(len(refs) - 1)
         if hasattr(self, "_img_status"):
             self._img_status.setText(
-                f"✔ Đã lưu tham chiếu '{name}'  "
-                f"(tổng {len(self._references)})")
-
-    def _on_update_reference(self):
-        row = self._ref_list.currentRow()
-        if row < 0 or row >= len(self._references):
-            QMessageBox.warning(self, "Update Reference",
-                                "Chọn tham chiếu trong list trước.")
-            return
-        if self._model is None or not self._model.is_valid():
-            QMessageBox.warning(self, "Update Reference",
-                                "Chưa có model để cập nhật.")
-            return
-        name = self._references[row].get("name", f"Reference {row+1}")
-        self._references[row] = self._serialize_current_as_ref(name)
-        self._node.params["_patmax_references"] = self._references
-        self._refresh_references_list()
-        self._ref_list.setCurrentRow(row)
-        if hasattr(self, "_img_status"):
-            self._img_status.setText(f"✔ Tham chiếu '{name}' đã cập nhật.")
-
-    def _on_rename_reference(self):
-        row = self._ref_list.currentRow()
-        if row < 0 or row >= len(self._references):
-            QMessageBox.warning(self, "Rename", "Chọn tham chiếu trước.")
-            return
-        cur = self._references[row].get("name", "")
-        name, ok = QInputDialog.getText(
-            self, "Rename Reference", "Tên mới:", text=cur)
-        if not ok:
-            return
-        name = (name or cur).strip() or cur
-        self._references[row]["name"] = name
-        self._node.params["_patmax_references"] = self._references
-        self._refresh_references_list()
-        self._ref_list.setCurrentRow(row)
+                f"✔ Đã thêm điểm tham chiếu 'Ref {idx}'  "
+                f"(tổng {len(refs)}). Sửa Name/X/Y/Angle để chỉnh.")
 
     def _on_delete_reference(self):
         row = self._ref_list.currentRow()
-        if row < 0 or row >= len(self._references):
-            QMessageBox.warning(self, "Delete", "Chọn tham chiếu trước.")
+        refs = self._extras()
+        if row < 0 or row >= len(refs):
+            QMessageBox.warning(self, "Delete", "Chọn điểm tham chiếu trước.")
             return
-        name = self._references[row].get("name", f"Reference {row+1}")
+        name = refs[row].get("name", f"Ref {row+1}")
         ret = QMessageBox.question(
             self, "Delete Reference",
-            f"Xoá tham chiếu '{name}'?",
+            f"Xoá điểm tham chiếu '{name}'?",
             QMessageBox.Yes | QMessageBox.No)
         if ret != QMessageBox.Yes:
             return
-        del self._references[row]
-        self._node.params["_patmax_references"] = self._references
+        del refs[row]
+        self._node.params["_patmax_model"] = self._model
         self._refresh_references_list()
         if hasattr(self, "_img_status"):
-            self._img_status.setText(f"🗑 Đã xoá tham chiếu '{name}'.")
-
-    def _on_reference_clicked(self, item: QListWidgetItem):
-        row = self._ref_list.row(item)
-        if row < 0 or row >= len(self._references):
-            return
-        self._load_reference(self._references[row])
-
-    def _load_reference(self, ref: Dict):
-        """Restore state từ reference: model, ROI, origin, shape, mode.
-        Cho phép chỉnh sửa và Train lại — deep-copy để không ảnh hưởng ref gốc.
-        """
-        name  = ref.get("name", "Reference")
-        model = ref.get("model")
-        models = ref.get("models") or []
-        roi_mode = ref.get("roi_mode", "single")
-        if model is None:
-            QMessageBox.warning(self, "Load Reference",
-                                f"Tham chiếu '{name}' không có model.")
-            return
-        # Deep-copy để edit không ảnh hưởng ref đã lưu trong list
-        self._model  = copy.deepcopy(model)
-        self._models = copy.deepcopy(models) if models else [self._model]
-        self._roi_mode = roi_mode
-
-        # Sync node.params
-        self._node.params["_patmax_model"] = self._model
-        if roi_mode == "multi_pattern" and self._models:
-            self._node.params["_patmax_models"] = self._models
-        else:
-            self._node.params.pop("_patmax_models", None)
-        self._node.params["_patmax_roi_mode"] = roi_mode
-
-        # Sync ROI mode combo (block signals — handler dưới đây tự xử)
-        if hasattr(self, "_roi_mode_combo"):
-            self._roi_mode_combo.blockSignals(True)
-            self._roi_mode_combo.setCurrentIndex(
-                {"single": 0, "multi_region": 1, "multi_pattern": 2}
-                .get(roi_mode, 0))
-            self._roi_mode_combo.blockSignals(False)
-        is_multi = (roi_mode != "single")
-        if hasattr(self, "_shape_list_lbl"):
-            self._shape_list_lbl.setVisible(is_multi)
-        if hasattr(self, "_btn_clear_shapes"):
-            self._btn_clear_shapes.setVisible(is_multi)
-        if hasattr(self, "_img_label"):
-            self._img_label.set_multi_shape(is_multi)
-            self._img_label.clear_shapes()
-
-        # Model preview + status
-        self._model_preview.update_model(self._model)
-        self._status_chip.setText(f"● LOADED  '{name}'")
-        self._status_chip.setStyleSheet(
-            "color:#00d4ff; font-size:12px; font-weight:700; background:transparent;")
-
-        # Restore Settings tab spinboxes từ model
-        self._load_settings_from_model()
-
-        # Restore Canny spinboxes nếu có
-        try:
-            if hasattr(self, "_canny_low"):
-                self._canny_low.setValue(int(getattr(self._model, "canny_low", 50)))
-            if hasattr(self, "_canny_high"):
-                self._canny_high.setValue(int(getattr(self._model, "canny_high", 150)))
-        except Exception:
-            pass
-
-        # Restore Train Mode combo
-        try:
-            tm = getattr(self._model, "train_mode", "evaluate") or "evaluate"
-            if hasattr(self, "_train_mode_combo"):
-                self._train_mode_combo.setCurrentIndex(1 if tm == "create" else 0)
-        except Exception:
-            pass
-
-        # Restore canvas shapes/ROI/origin
-        if roi_mode == "multi_pattern" and self._models:
-            shapes = []
-            for mm in self._models:
-                if mm.shape_data and mm.shape_type:
-                    e = {"type": mm.shape_type}; e.update(mm.shape_data)
-                    shapes.append(e)
-            if shapes:
-                QTimer.singleShot(50, lambda L=shapes: self._img_label.set_shapes(L))
-                self._on_shapes_changed(shapes)
-        elif roi_mode == "multi_region" and self._model.shape_type == "multi":
-            regions = (self._model.shape_data or {}).get("regions") or []
-            if regions:
-                QTimer.singleShot(50,
-                    lambda r=list(regions): self._img_label.set_shapes(r))
-                self._on_shapes_changed(regions)
-        else:
-            if self._model.train_roi:
-                x, y, w2, h2 = self._model.train_roi
-                st = getattr(self._model, "shape_type", "rect") or "rect"
-                sd = getattr(self._model, "shape_data", None)
-                self._current_shape = st
-                self._current_shape_data = dict(sd) if sd else None
-                self._current_roi = tuple(self._model.train_roi)
-                shape_idx = {"rect":0,"circle":1,"ellipse":2,"polygon":3}.get(st, 0)
-                self._shape_combo.blockSignals(True)
-                self._shape_combo.setCurrentIndex(shape_idx)
-                self._shape_combo.blockSignals(False)
-                self._img_label.set_shape_mode(st)
-                if sd:
-                    QTimer.singleShot(50,
-                        lambda s=st, d=dict(sd): self._img_label.set_shape_data(s, d))
-                else:
-                    QTimer.singleShot(50,
-                        lambda: self._img_label.set_rect_from_params(x, y, w2, h2))
-                ox = x + float(self._model.origin_x)
-                oy = y + float(self._model.origin_y)
-                QTimer.singleShot(70,
-                    lambda a=ox, b=oy: self._set_origin(a, b, from_user=False))
-                QTimer.singleShot(80,
-                    lambda: self._origin_combo.setCurrentIndex(7))
-
-        self._set_view("edges")
-        if hasattr(self, "_img_status"):
-            self._img_status.setText(
-                f"✔ Đã tải tham chiếu '{name}' — có thể chỉnh ROI/params rồi Train lại")
+            self._img_status.setText(f"🗑 Đã xoá '{name}'.")
 
     def _run_pipeline_node(self):
         """Chạy pipeline node PatMax (dùng model đã train)."""
