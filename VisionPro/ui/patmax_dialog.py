@@ -611,6 +611,22 @@ class PatMaxDialog(QDialog):
         self._sp_sr_w = self._mk_spin("W",  0, 0, 8192, srg)
         self._sp_sr_h = self._mk_spin("H",  0, 0, 8192, srg)
         lay.addWidget(sr_grp)
+
+        # Display — show/hide reference overlay trên ảnh output pipeline
+        disp_grp = QGroupBox("Display")
+        dg = QVBoxLayout(disp_grp); dg.setContentsMargins(8, 12, 8, 8); dg.setSpacing(4)
+        self._chk_show_ref = QCheckBox("Show reference overlay (origin, X/Y axes, bbox)")
+        self._chk_show_ref.setChecked(
+            bool(self._node.params.get("show_reference", True)))
+        self._chk_show_ref.setStyleSheet("color:#e2e8f0; font-size:11px;")
+        self._chk_show_ref.stateChanged.connect(self._on_show_ref_toggled)
+        dg.addWidget(self._chk_show_ref)
+        hint_disp = QLabel(
+            "Tắt để pipeline trả về ảnh gốc không có marker tham chiếu.")
+        hint_disp.setStyleSheet("color:#94a3b8; font-size:10px;")
+        hint_disp.setWordWrap(True)
+        dg.addWidget(hint_disp)
+        lay.addWidget(disp_grp)
         lay.addStretch()
 
         outer = QWidget(); ol = QVBoxLayout(outer)
@@ -676,6 +692,11 @@ class PatMaxDialog(QDialog):
         m.overlap_threshold = float(self._sp_overlap.value())
         # Đảm bảo node.params có reference tới model (cùng instance, an toàn)
         self._node.params["_patmax_model"] = m
+
+    def _on_show_ref_toggled(self, state: int):
+        """Lưu trạng thái show/hide overlay vào node.params để proc_patmax*
+        đọc khi render ảnh output pipeline."""
+        self._node.params["show_reference"] = bool(state)
 
     def _on_train_display_changed(self, idx: int):
         """idx=0 → chỉ Canny; idx=1 → chỉ Train Mode (1 trong 2).
