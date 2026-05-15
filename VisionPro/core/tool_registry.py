@@ -208,7 +208,9 @@ def proc_patmax(inputs, params):
                  and isinstance(models_list, list)
                  and any(m.is_valid() for m in models_list))
 
-    show_ref = bool(params.get("show_reference", True))
+    show_ref  = bool(params.get("show_reference", True))
+    show_xy   = bool(params.get("show_xy",   show_ref))
+    show_bbox = bool(params.get("show_bbox", show_ref))
 
     if not use_multi and not model.is_valid():
         vis = _empty_vis(_bgr(img))
@@ -260,7 +262,8 @@ def proc_patmax(inputs, params):
             coarse_downscale=ds, channels=chans,
         )
 
-    vis = draw_patmax_results(_bgr(img), results, model, show_reference=show_ref)
+    vis = draw_patmax_results(_bgr(img), results, model,
+                                show_xy=show_xy, show_bbox=show_bbox)
 
     objects = [
         {"x": r.origin_x, "y": r.origin_y, "score": r.score,
@@ -327,7 +330,9 @@ def proc_patmax_align(inputs, params):
                 "num_found": 0, "objects": []}
 
     model: PatMaxModel = params.get("_patmax_model") or PatMaxModel()
-    show_ref = bool(params.get("show_reference", True))
+    show_ref  = bool(params.get("show_reference", True))
+    show_xy   = bool(params.get("show_xy",   show_ref))
+    show_bbox = bool(params.get("show_bbox", show_ref))
     if not model.is_valid():
         vis = _empty_vis(_bgr(img))
         return {"image": vis, "found": False, "score": 0.0,
@@ -364,7 +369,8 @@ def proc_patmax_align(inputs, params):
         coarse_downscale=ds,
         build_score_map=False,   # production: skip heatmap (caller discards)
     )
-    vis = draw_patmax_results(_bgr(img), results, model, show_reference=show_ref)
+    vis = draw_patmax_results(_bgr(img), results, model,
+                                show_xy=show_xy, show_bbox=show_bbox)
     objects = [
         {"x": r.origin_x, "y": r.origin_y, "score": r.score,
          "angle": r.angle, "scale": r.scale,
@@ -406,7 +412,9 @@ def proc_patfind(inputs, params):
                 "x": 0.0, "y": 0.0, "num_found": 0}
 
     model: PatMaxModel = params.get("_patmax_model") or PatMaxModel()
-    show_ref = bool(params.get("show_reference", True))
+    show_ref  = bool(params.get("show_reference", True))
+    show_xy   = bool(params.get("show_xy",   show_ref))
+    show_bbox = bool(params.get("show_bbox", show_ref))
     if not model.is_valid():
         vis = _empty_vis(_bgr(img))
         print("[PatFind] No model — double-click node to train")
@@ -421,7 +429,8 @@ def proc_patfind(inputs, params):
         scale_low=1.0,  scale_high=1.0,  scale_step=0.1,
         num_results=params.get("num_results", model.num_results),
     )
-    vis = draw_patmax_results(_bgr(img), results, model, show_reference=show_ref)
+    vis = draw_patmax_results(_bgr(img), results, model,
+                                show_xy=show_xy, show_bbox=show_bbox)
     if results:
         r = results[0]
         return {"image": vis, "found": True, "score": r.score,
@@ -1600,9 +1609,10 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Tắt để giảm ~30% thời gian khi pattern không phụ thuộc edges"),
      P("use_sqdiff","Use SQDIFF channel","bool",True,
        tooltip="Tắt để giảm ~30% thời gian khi pattern có texture rõ"),
-     P("show_reference","Show reference overlay","bool",True,
-       tooltip="Hiện/ẩn marker tham chiếu (origin, X/Y axes, bbox, score) "
-               "trên ảnh output. Tắt để xem ảnh gốc nguyên bản.")],
+     P("show_xy","Show X,Y reference","bool",True,
+       tooltip="Hiện origin marker + X/Y axes + label '(x,y)' trên ảnh output."),
+     P("show_bbox","Show bounding box","bool",True,
+       tooltip="Hiện rotated bounding box + score label trên ảnh output.")],
     proc_patmax, "CogPatMaxPatternAlignTool"),
 
   ToolDef("patmax_align","PatMax Align Tool","Pattern Find",
@@ -1630,9 +1640,10 @@ TOOL_REGISTRY: List[ToolDef] = [
        choices=["1","2","4"],
        tooltip="Speed-up: search ở 1/ds resolution. 2 ≈ 4× nhanh, 4 ≈ 16× nhanh. "
                "Vị trí ±ds pixel; Perspective/PatFlex tự refine ở full-res"),
-     P("show_reference","Show reference overlay","bool",True,
-       tooltip="Hiện/ẩn marker tham chiếu (origin, X/Y axes, bbox, score) "
-               "trên ảnh output. Tắt để xem ảnh gốc nguyên bản.")],
+     P("show_xy","Show X,Y reference","bool",True,
+       tooltip="Hiện origin marker + X/Y axes + label '(x,y)' trên ảnh output."),
+     P("show_bbox","Show bounding box","bool",True,
+       tooltip="Hiện rotated bounding box + score label trên ảnh output.")],
     proc_patmax_align, "CogPMAlignTool"),
 
   ToolDef("patfind","PatFind","Pattern Find",
@@ -1641,8 +1652,10 @@ TOOL_REGISTRY: List[ToolDef] = [
     [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
      PortDef("x","number"),PortDef("y","number"),PortDef("num_found","number")],
     [P("accept_threshold","Accept Threshold","float",0.5,0,1,step=0.01),
-     P("show_reference","Show reference overlay","bool",True,
-       tooltip="Hiện/ẩn marker tham chiếu trên ảnh output.")],
+     P("show_xy","Show X,Y reference","bool",True,
+       tooltip="Hiện origin marker + X/Y axes + label '(x,y)' trên ảnh output."),
+     P("show_bbox","Show bounding box","bool",True,
+       tooltip="Hiện rotated bounding box + score label trên ảnh output.")],
     proc_patfind, "CogPMAlignTool"),
 
   # ── FIXTURE ─────────────────────────────────────────────────────

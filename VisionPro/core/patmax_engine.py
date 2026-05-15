@@ -824,15 +824,24 @@ def _empty_vis(image: np.ndarray) -> np.ndarray:
 def draw_patmax_results(image: np.ndarray,
                          results: List[PatMaxResult],
                          model: Optional[PatMaxModel] = None,
-                         show_reference: bool = True) -> np.ndarray:
+                         show_reference: bool = True,
+                         show_xy: Optional[bool] = None,
+                         show_bbox: Optional[bool] = None) -> np.ndarray:
     """Render k\u1ebft qu\u1ea3 PatMax l\u00ean \u1ea3nh.
 
-    show_reference=False \u2192 tr\u1ea3 v\u1ec1 \u1ea3nh g\u1ed1c (BGR) kh\u00f4ng v\u1ebd overlay n\u00e0o,
-    d\u00f9ng cho user mu\u1ed1n \u1ea9n c\u00e1c marker tham chi\u1ebfu.
+    show_xy=False    \u2192 \u1ea9n origin marker, X/Y axes, label "O (x,y)".
+    show_bbox=False  \u2192 \u1ea9n rotated bounding box v\u00e0 score label.
+    show_reference   \u2192 master toggle (legacy). Khi show_xy/show_bbox
+                       kh\u00f4ng truy\u1ec1n v\u00e0o, m\u1eb7c \u0111\u1ecbnh = show_reference.
     """
     vis = image.copy() if len(image.shape)==3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    if not show_reference:
-        print(f"[PatMax] {len(results)} result(s) (reference hidden)")
+    # Resolve toggles: show_xy / show_bbox ri\u00eang l\u1ebb override show_reference
+    if show_xy is None:
+        show_xy = show_reference
+    if show_bbox is None:
+        show_bbox = show_reference
+    if not show_xy and not show_bbox:
+        print(f"[PatMax] {len(results)} result(s) (overlay hidden)")
         return vis
     s = _draw_scale(vis)
 
@@ -856,8 +865,8 @@ def draw_patmax_results(image: np.ndarray,
             continue
         col = (0,220,80) if r.score >= 0.7 else (0,200,160) if r.score >= 0.5 else (0,150,220)
 
-        # Rotated bounding box
-        if r.corners and len(r.corners) == 4:
+        # Rotated bounding box (toggle: show_bbox)
+        if show_bbox and r.corners and len(r.corners) == 4:
             pts = np.array(r.corners, dtype=np.int32)
             cv2.polylines(vis, [pts], True, col, _t(2, s))
 
@@ -872,53 +881,53 @@ def draw_patmax_results(image: np.ndarray,
             ox = float(r.x); oy = float(r.y)
         ox_i = int(round(ox)); oy_i = int(round(oy))
 
-        # Marker origin: v\u00f2ng (theo score) + X v\u00e0ng \u0111\u00e8 l\u00ean + cyan dot t\u00e2m
-        r_o  = _t(11, s)
-        r_d  = _t(3, s)
-        arm  = _t(9, s)
-        cv2.circle(vis, (ox_i, oy_i), r_o, col, _t(2, s), cv2.LINE_AA)
-        cv2.line(vis, (ox_i - arm, oy_i - arm), (ox_i + arm, oy_i + arm),
-                 COL_OMARK, _t(2, s), cv2.LINE_AA)
-        cv2.line(vis, (ox_i - arm, oy_i + arm), (ox_i + arm, oy_i - arm),
-                 COL_OMARK, _t(2, s), cv2.LINE_AA)
-        cv2.circle(vis, (ox_i, oy_i), r_d, COL_CYAN, -1, cv2.LINE_AA)
+        if show_xy:
+            # Marker origin: v\u00f2ng (theo score) + X v\u00e0ng \u0111\u00e8 l\u00ean + cyan dot t\u00e2m
+            r_o  = _t(11, s)
+            r_d  = _t(3, s)
+            arm  = _t(9, s)
+            cv2.circle(vis, (ox_i, oy_i), r_o, col, _t(2, s), cv2.LINE_AA)
+            cv2.line(vis, (ox_i - arm, oy_i - arm), (ox_i + arm, oy_i + arm),
+                     COL_OMARK, _t(2, s), cv2.LINE_AA)
+            cv2.line(vis, (ox_i - arm, oy_i + arm), (ox_i + arm, oy_i - arm),
+                     COL_OMARK, _t(2, s), cv2.LINE_AA)
+            cv2.circle(vis, (ox_i, oy_i), r_d, COL_CYAN, -1, cv2.LINE_AA)
 
-        # \u2500\u2500 H\u1ec7 tr\u1ee5c XY t\u1ea1i origin, xoay theo r.angle \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        # Convention: image-space, Y\u2193; r.angle theo math (CCW d\u01b0\u01a1ng), gi\u1ed1ng
-        # angle arrow yellow \u0111\u00e3 d\u00f9ng. -r.angle \u0111\u1ec3 map v\u00e0o image-space.
-        axis_len = max(_t(40, s), int(min(r.width, r.height) * 0.40))
-        rad = math.radians(-r.angle)
-        cax = math.cos(rad); sax = math.sin(rad)
-        # X axis (\u0111\u1ecf): d\u1ecdc theo angle
-        x_end = (int(ox_i + cax * axis_len), int(oy_i + sax * axis_len))
-        cv2.arrowedLine(vis, (ox_i, oy_i), x_end, COL_X, _t(2, s),
-                        cv2.LINE_AA, tipLength=0.18)
-        cv2.putText(vis, "X", (x_end[0] + _t(4, s), x_end[1] + _t(4, s)),
-                    cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_X, _t(2, s),
-                    cv2.LINE_AA)
-        # Y axis (xanh l\u00e1): 90\u00b0 clockwise so v\u1edbi X trong image-space (Y\u2193)
-        y_end = (int(ox_i - sax * axis_len), int(oy_i + cax * axis_len))
-        cv2.arrowedLine(vis, (ox_i, oy_i), y_end, COL_Y, _t(2, s),
-                        cv2.LINE_AA, tipLength=0.18)
-        cv2.putText(vis, "Y", (y_end[0] + _t(4, s), y_end[1] + _t(4, s)),
-                    cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_Y, _t(2, s),
-                    cv2.LINE_AA)
+            # \u2500\u2500 H\u1ec7 tr\u1ee5c XY t\u1ea1i origin, xoay theo r.angle \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+            axis_len = max(_t(40, s), int(min(r.width, r.height) * 0.40))
+            rad = math.radians(-r.angle)
+            cax = math.cos(rad); sax = math.sin(rad)
+            # X axis (\u0111\u1ecf): d\u1ecdc theo angle
+            x_end = (int(ox_i + cax * axis_len), int(oy_i + sax * axis_len))
+            cv2.arrowedLine(vis, (ox_i, oy_i), x_end, COL_X, _t(2, s),
+                            cv2.LINE_AA, tipLength=0.18)
+            cv2.putText(vis, "X", (x_end[0] + _t(4, s), x_end[1] + _t(4, s)),
+                        cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_X, _t(2, s),
+                        cv2.LINE_AA)
+            # Y axis (xanh l\u00e1): 90\u00b0 clockwise so v\u1edbi X trong image-space (Y\u2193)
+            y_end = (int(ox_i - sax * axis_len), int(oy_i + cax * axis_len))
+            cv2.arrowedLine(vis, (ox_i, oy_i), y_end, COL_Y, _t(2, s),
+                            cv2.LINE_AA, tipLength=0.18)
+            cv2.putText(vis, "Y", (y_end[0] + _t(4, s), y_end[1] + _t(4, s)),
+                        cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_Y, _t(2, s),
+                        cv2.LINE_AA)
 
-        # Label "O (x.x, y.y)  +angle" \u2014 cyan, ph\u00eda tr\u00ean-ph\u1ea3i origin
-        ol_txt = f"O ({ox:.1f},{oy:.1f})"
-        if abs(r.angle) > 0.05:
-            ol_txt += f"  {r.angle:+.1f}deg"
-        cv2.putText(vis, ol_txt,
-                    (ox_i + int(14 * s), oy_i - int(10 * s)),
-                    cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_CYAN,
-                    _t(2, s), cv2.LINE_AA)
+            # Label "O (x.x, y.y)  +angle" \u2014 cyan, ph\u00eda tr\u00ean-ph\u1ea3i origin
+            ol_txt = f"O ({ox:.1f},{oy:.1f})"
+            if abs(r.angle) > 0.05:
+                ol_txt += f"  {r.angle:+.1f}deg"
+            cv2.putText(vis, ol_txt,
+                        (ox_i + int(14 * s), oy_i - int(10 * s)),
+                        cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_CYAN,
+                        _t(2, s), cv2.LINE_AA)
 
-        # Label score \u1edf g\u00f3c bbox
-        lx = max(0, int(r.x - r.width/2))
-        ly = max(int(16 * s), int(r.y - r.height/2) - int(8 * s))
-        label = f"#{i+1} {r.score:.3f}"
-        cv2.putText(vis, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
-                    _fs(0.55, s), col, _t(2, s))
+        if show_bbox:
+            # Label score \u1edf g\u00f3c bbox
+            lx = max(0, int(r.x - r.width/2))
+            ly = max(int(16 * s), int(r.y - r.height/2) - int(8 * s))
+            label = f"#{i+1} {r.score:.3f}"
+            cv2.putText(vis, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                        _fs(0.55, s), col, _t(2, s))
 
     # Summary text \u0111\u01b0\u1ee3c log ra console; kh\u00f4ng v\u1ebd l\u00ean \u1ea3nh.
     print(f"[PatMax] {len(results)} result(s)")
