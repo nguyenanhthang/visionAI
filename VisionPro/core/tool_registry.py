@@ -213,8 +213,10 @@ def proc_patmax(inputs, params):
     show_bbox = bool(params.get("show_bbox", show_ref))
 
     if not use_multi and not model.is_valid():
+        clean = _bgr(img.copy())
         vis = _empty_vis(_bgr(img))
-        return {"image": vis, "found": False, "score": 0.0,
+        return {"image": clean, "display_image": vis,
+                "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
 
     ref = models_list[0] if use_multi else model
@@ -262,7 +264,8 @@ def proc_patmax(inputs, params):
             coarse_downscale=ds, channels=chans,
         )
 
-    vis = draw_patmax_results(_bgr(img), results, model,
+    clean = _bgr(img.copy())
+    vis = draw_patmax_results(clean, results, model,
                                 show_xy=show_xy, show_bbox=show_bbox)
 
     objects = [
@@ -274,12 +277,14 @@ def proc_patmax(inputs, params):
     ]
     if results:
         r = results[0]
-        out = {"image": vis, "found": True, "score": r.score,
+        out = {"image": clean, "display_image": vis,
+               "found": True, "score": r.score,
                "x": r.origin_x, "y": r.origin_y,
                "angle": r.angle, "scale": r.scale,
                "num_found": len(results), "objects": objects}
     else:
-        out = {"image": vis, "found": False, "score": 0.0,
+        out = {"image": clean, "display_image": vis,
+               "found": False, "score": 0.0,
                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                "num_found": 0, "objects": []}
     # Extra terminals: [{"object": int, "field": str, "name": str}, ...]
@@ -325,7 +330,9 @@ def proc_patmax_align(inputs, params):
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
     if not _is_gray_image(img):
-        return {"image": _bgr(img), "found": False, "score": 0.0,
+        clean = _bgr(img)
+        return {"image": clean, "display_image": clean,
+                "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
 
@@ -334,8 +341,10 @@ def proc_patmax_align(inputs, params):
     show_xy   = bool(params.get("show_xy",   show_ref))
     show_bbox = bool(params.get("show_bbox", show_ref))
     if not model.is_valid():
+        clean = _bgr(img.copy())
         vis = _empty_vis(_bgr(img))
-        return {"image": vis, "found": False, "score": 0.0,
+        return {"image": clean, "display_image": vis,
+                "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
 
@@ -369,7 +378,8 @@ def proc_patmax_align(inputs, params):
         coarse_downscale=ds,
         build_score_map=False,   # production: skip heatmap (caller discards)
     )
-    vis = draw_patmax_results(_bgr(img), results, model,
+    clean = _bgr(img.copy())
+    vis = draw_patmax_results(clean, results, model,
                                 show_xy=show_xy, show_bbox=show_bbox)
     objects = [
         {"x": r.origin_x, "y": r.origin_y, "score": r.score,
@@ -380,12 +390,14 @@ def proc_patmax_align(inputs, params):
     ]
     if results:
         r = results[0]
-        out = {"image": vis, "found": True, "score": r.score,
+        out = {"image": clean, "display_image": vis,
+               "found": True, "score": r.score,
                "x": r.origin_x, "y": r.origin_y,
                "angle": r.angle, "scale": r.scale,
                "num_found": len(results), "objects": objects}
     else:
-        out = {"image": vis, "found": False, "score": 0.0,
+        out = {"image": clean, "display_image": vis,
+               "found": False, "score": 0.0,
                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                "num_found": 0, "objects": []}
     for term in (params.get("_extra_terminals") or []):
@@ -416,9 +428,11 @@ def proc_patfind(inputs, params):
     show_xy   = bool(params.get("show_xy",   show_ref))
     show_bbox = bool(params.get("show_bbox", show_ref))
     if not model.is_valid():
+        clean = _bgr(img.copy())
         vis = _empty_vis(_bgr(img))
         print("[PatFind] No model — double-click node to train")
-        return {"image": vis, "found": False, "score": 0.0,
+        return {"image": clean, "display_image": vis,
+                "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "num_found": 0}
 
     # PatFind: no rotation, no scale change
@@ -429,13 +443,16 @@ def proc_patfind(inputs, params):
         scale_low=1.0,  scale_high=1.0,  scale_step=0.1,
         num_results=params.get("num_results", model.num_results),
     )
-    vis = draw_patmax_results(_bgr(img), results, model,
+    clean = _bgr(img.copy())
+    vis = draw_patmax_results(clean, results, model,
                                 show_xy=show_xy, show_bbox=show_bbox)
     if results:
         r = results[0]
-        return {"image": vis, "found": True, "score": r.score,
+        return {"image": clean, "display_image": vis,
+                "found": True, "score": r.score,
                 "x": r.x, "y": r.y, "num_found": len(results)}
-    return {"image": vis, "found": False, "score": 0.0,
+    return {"image": clean, "display_image": vis,
+            "found": False, "score": 0.0,
             "x": 0.0, "y": 0.0, "num_found": 0}
 
 
@@ -1110,7 +1127,7 @@ def proc_crop(inputs, params):
     """
     img = inputs.get("image")
     if img is None:
-        return {"image": None, "roi_image": None,
+        return {"image": None, "display_image": None, "roi_image": None,
                 "x": 0, "y": 0, "w": 0, "h": 0}
 
     ih, iw = img.shape[:2]
@@ -1167,18 +1184,22 @@ def proc_crop(inputs, params):
         params["crop_w"] = cw
         params["crop_h"] = ch
 
-    # Crop ảnh thực sự — cho downstream qua port `roi_image`
+    # Crop ảnh thực sự (clean — không có overlay) — cho downstream qua `roi_image`
     roi = img[y:y + ch, x:x + cw].copy()
 
-    # `image` output = ẢNH GỐC + bounding box overlay (cho display)
-    vis = _bgr(img.copy())
-    s = _draw_scale(vis)
+    # `image` output = ảnh GỐC pass-through (clean, không vẽ gì) —
+    #                  để downstream xử lý trên ảnh sạch.
+    # `display_image` output = ảnh GỐC + bounding box overlay —
+    #                          cho node panel hiển thị vị trí ROI.
+    clean = _bgr(img.copy())
+    disp = clean.copy()
+    s = _draw_scale(disp)
     col = (0, 255, 180) if tracked_ports else (0, 212, 255)
-    cv2.rectangle(vis, (x, y), (x + cw, y + ch), col, _t(2, s))
+    cv2.rectangle(disp, (x, y), (x + cw, y + ch), col, _t(2, s))
 
     print(f"[Crop] {mode_label} ({x},{y}) {cw}x{ch}")
 
-    return {"image": vis, "roi_image": roi,
+    return {"image": clean, "display_image": disp, "roi_image": roi,
             "x": x, "y": y, "w": cw, "h": ch}
 
 
@@ -1545,7 +1566,8 @@ TOOL_REGISTRY: List[ToolDef] = [
     "Pattern matching nâng cao với xoay góc — CogPatMaxPatternAlignTool",
     "#16213e","🎯",
     [PortDef("image","image")],
-    [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
+    [PortDef("image","image"),PortDef("display_image","image"),
+     PortDef("found","bool"),PortDef("score","number"),
      PortDef("x","number"),PortDef("y","number"),PortDef("angle","number"),
      PortDef("scale","number"),PortDef("num_found","number"),
      PortDef("objects","list")],
@@ -1573,7 +1595,8 @@ TOOL_REGISTRY: List[ToolDef] = [
     "PatMax Pattern Align — chọn Algorithm & Train Mode (CogPMAlignTool)",
     "#16213e","🎯",
     [PortDef("image","image")],
-    [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
+    [PortDef("image","image"),PortDef("display_image","image"),
+     PortDef("found","bool"),PortDef("score","number"),
      PortDef("x","number"),PortDef("y","number"),PortDef("angle","number"),
      PortDef("scale","number"),PortDef("num_found","number"),
      PortDef("objects","list")],
@@ -1603,7 +1626,8 @@ TOOL_REGISTRY: List[ToolDef] = [
   ToolDef("patfind","PatFind","Pattern Find",
     "Pattern matching nhanh (NCC) — CogPMAlignTool","#16213e","🔍",
     [PortDef("image","image")],
-    [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
+    [PortDef("image","image"),PortDef("display_image","image"),
+     PortDef("found","bool"),PortDef("score","number"),
      PortDef("x","number"),PortDef("y","number"),PortDef("num_found","number")],
     [P("accept_threshold","Accept Threshold","float",0.5,0,1,step=0.01),
      P("show_xy","Show X,Y reference","bool",True,
@@ -1855,16 +1879,18 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_image_convert, "CogImageConvertTool"),
 
   ToolDef("crop_roi","Crop ROI","Image Processing",
-    "Cắt vùng ROI — nhận x/y/w/h từ PatMax để tracking. "
-    "Output `image` = ảnh gốc + bbox overlay; `roi_image` = vùng đã cắt "
-    "(dùng cho downstream tool xử lý ROI).",
+    "Cắt vùng ROI — nhận x/y/w/h từ PatMax để tracking.\n"
+    "• image         = ảnh gốc pass-through (clean, dùng cho processing chain).\n"
+    "• display_image = ảnh gốc + bbox overlay (cho panel hiển thị).\n"
+    "• roi_image     = vùng đã cắt từ ảnh gốc (clean, không vướng overlay upstream).",
     "#2c3e50","✂",
     [PortDef("image","image"),
      PortDef("x","number",required=False,default=None),
      PortDef("y","number",required=False,default=None),
      PortDef("w","number",required=False,default=None),
      PortDef("h","number",required=False,default=None)],
-    [PortDef("image","image"),PortDef("roi_image","image"),
+    [PortDef("image","image"),PortDef("display_image","image"),
+     PortDef("roi_image","image"),
      PortDef("x","number"),PortDef("y","number"),
      PortDef("w","number"),PortDef("h","number")],
     [P("x","X","int",0,0,8192),P("y","Y","int",0,0,8192),
