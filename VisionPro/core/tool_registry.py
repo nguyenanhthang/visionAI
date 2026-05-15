@@ -1162,11 +1162,6 @@ def proc_crop(inputs, params):
     s = _draw_scale(vis)
     col = (0, 255, 180) if tracked_ports else (0, 212, 255)
     cv2.rectangle(vis, (x, y), (x + cw, y + ch), col, _t(2, s))
-    label = f"ROI ({x},{y}) {cw}x{ch}"
-    cv2.putText(vis, label,
-                (x + _t(4, s), max(y - _t(6, s), int(16 * s))),
-                cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), col,
-                _t(2, s), cv2.LINE_AA)
 
     print(f"[Crop] {mode_label} ({x},{y}) {cw}x{ch}")
 
