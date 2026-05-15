@@ -537,14 +537,22 @@ class ImageViewerPanel(QWidget):
         active_overlays = [nid for nid, on in self._selected_overlays.items()
                             if on and nid in self._graph.nodes]
 
+        def _vis_of(n):
+            """Pick the annotated frame to render for node `n`:
+            `_display_image` (private overlay) first, fall back to `image`
+            (clean port). `or` is unsafe on numpy arrays — use is-None."""
+            v = n.outputs.get("_display_image")
+            if v is None:
+                v = n.outputs.get("image")
+            return v
+
         if active_overlays:
             # Composite mode: base = ảnh gốc Acquire, overlay = các tool đã tick.
             # Tool annotation lấy từ `_display_image` (ảnh + overlay) thay vì
             # port `image` (đã đổi sang clean pass-through).
             base = self._find_acquire_root_image()
             if base is None:
-                img = (node.outputs.get("_display_image")
-                       or node.outputs.get("image"))
+                img = _vis_of(node)
             else:
                 import cv2
                 comp = base.copy()
@@ -553,16 +561,14 @@ class ImageViewerPanel(QWidget):
                 for nid in active_overlays:
                     n = self._graph.nodes[nid]
                     before = self._node_input_image(n)
-                    after  = (n.outputs.get("_display_image")
-                              or n.outputs.get("image"))
+                    after  = _vis_of(n)
                     if before is not None and after is not None:
                         comp = self._overlay_diff(comp, before, after)
                 img = comp
         else:
             # Mode bình thường: hiển thị output của node đang chọn — ưu tiên
             # `_display_image` (có overlay) rồi fall back `image` clean.
-            img = (node.outputs.get("_display_image")
-                   or node.outputs.get("image"))
+            img = _vis_of(node)
 
         if img is not None and isinstance(img, np.ndarray):
             h, w = img.shape[:2]
