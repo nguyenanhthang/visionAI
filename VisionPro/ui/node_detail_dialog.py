@@ -1182,20 +1182,53 @@ class NodeDetailDialog(QDialog):
 
         if tool.tool_id == "crop_roi":
             self._roi_port_connected = self._check_roi_ports_connected()
-            if self._roi_port_connected:
+            multi_roi = bool(node.params.get("multi_roi", False))
+
+            if multi_roi:
+                # Multi-ROI: luôn cho phép vẽ (kể cả khi port kết nối) — các
+                # ROI tiếp theo sẽ tracking theo anchor (ROI #1) qua port x/y.
+                mode_str = "roi"
+                if self._roi_port_connected:
+                    self._mode_hint.setText(
+                        "🔗  Multi-ROI — Port x/y kết nối: ROI #1 là anchor. "
+                        "Kéo chuột vẽ thêm ROI; chúng sẽ di chuyển theo anchor. "
+                        "Click ROI để chọn, Del để xoá.")
+                else:
+                    self._mode_hint.setText(
+                        "✏  Multi-ROI — Kéo chuột vẽ nhiều ROI. "
+                        "Click ROI để chọn, Del để xoá. Kết nối port x/y để "
+                        "tracking theo anchor (ROI #1).")
+                self._mode_hint.show()
+                self._img_label = InteractiveImageLabel(mode=mode_str)
+                self._img_label.set_multi_shape(True)
+                self._img_label.set_next_shape_type("rect")
+                self._img_label.shapes_changed.connect(self._on_crop_shapes_changed)
+                # Restore từ _drawn_rois
+                rois = node.params.get("_drawn_rois") or []
+                if not rois and node.params.get("_drawn_roi"):
+                    rois = [list(node.params["_drawn_roi"])]
+                if rois:
+                    shapes = [{"type": "rect",
+                                "x": int(r[0]), "y": int(r[1]),
+                                "w": int(r[2]), "h": int(r[3])}
+                              for r in rois if len(r) >= 4]
+                    QTimer.singleShot(120,
+                        lambda s=shapes: self._img_label.set_shapes(s))
+            elif self._roi_port_connected:
                 # Port đang kết nối → readonly, hiển thị rect từ port
                 mode_str = "readonly"
                 self._mode_hint.setText(
                     "🔗  Port x/y/w/h đang được kết nối — ROI tự động theo upstream tool.")
+                self._mode_hint.show()
+                self._img_label = InteractiveImageLabel(mode=mode_str)
             else:
-                # Không kết nối → vẽ thủ công
+                # Single-ROI vẽ thủ công
                 mode_str = "roi"
                 self._mode_hint.setText(
                     "✏  Kéo chuột trên ảnh để vẽ vùng ROI thủ công  "
                     "—  kết nối port x/y/w/h để tracking tự động.")
-            self._mode_hint.show()
-            self._img_label = InteractiveImageLabel(mode=mode_str)
-            if mode_str == "roi":
+                self._mode_hint.show()
+                self._img_label = InteractiveImageLabel(mode=mode_str)
                 self._img_label.roi_changed.connect(self._on_roi_changed)
                 # Init rect từ _drawn_roi hoặc params
                 drawn = node.params.get("_drawn_roi")
@@ -1405,6 +1438,15 @@ class NodeDetailDialog(QDialog):
                 if hasattr(ed, "setValue"):
                     ed.blockSignals(True); ed.setValue(val); ed.blockSignals(False)
 
+    def _on_crop_shapes_changed(self, shapes):
+        """Multi-ROI: đồng bộ list shapes (rect) → node.params['_drawn_rois']."""
+        rois = []
+        for s in shapes or []:
+            if s.get("type") == "rect" and "x" in s and "y" in s:
+                rois.append([int(s["x"]), int(s["y"]),
+                              int(s["w"]), int(s["h"])])
+        self._node.params["_drawn_rois"] = rois
+
     def _on_reset_crop_image(self):
         """Reset Crop ROI về full ảnh nguồn — xoá _drawn_roi + set
         x=y=0, w/h = kích thước input image."""
@@ -1425,11 +1467,15 @@ class NodeDetailDialog(QDialog):
             return
         h, w = src_img.shape[:2]
         node.params.pop("_drawn_roi", None)
+        node.params.pop("_drawn_rois", None)
         node.params["x"]      = 0
         node.params["y"]      = 0
         node.params["crop_w"] = int(w)
         node.params["crop_h"] = int(h)
         node.params["_crop_initialized"] = True
+        # Clear shapes trên label (chỉ áp dụng khi đang multi)
+        if bool(node.params.get("multi_roi", False)):
+            self._img_label.clear_shapes()
         # Sync spinbox
         for name, val in [("x", 0), ("y", 0), ("crop_w", w), ("crop_h", h)]:
             pr = getattr(self, "_param_rows", {}).get(name)
@@ -1514,6 +1560,20 @@ class NodeDetailDialog(QDialog):
         if any(getattr(p, "visible_if", None) and name in p.visible_if
                 for p in node.tool.params):
             QTimer.singleShot(0, self._rebuild_params_tab)
+        # Crop ROI: toggle multi_roi → cần đổi mode label (single ↔ multi).
+        # Reload mode bằng cách hint user reopen dialog (tránh teardown widget
+        # đang phát signal). Soft-switch _multi để vẽ thử ngay được.
+        if node.tool.tool_id == "crop_roi" and name == "multi_roi":
+            try:
+                self._img_label.set_multi_shape(bool(value))
+                if bool(value):
+                    self._img_label.set_next_shape_type("rect")
+            except Exception:
+                pass
+            if hasattr(self, "_mode_hint"):
+                self._mode_hint.setText(
+                    "ℹ Đã đổi chế độ Multi-ROI. Đóng & mở lại dialog để áp "
+                    "dụng đầy đủ (mode hint / port behaviour).")
 
     def _rebuild_params_tab(self):
         """Rebuild Params tab — dùng khi visible_if của param khác đổi.
@@ -1618,7 +1678,14 @@ class NodeDetailDialog(QDialog):
 
             # crop_roi: hiển thị rect
             if node.tool.tool_id == "crop_roi":
-                if self._roi_port_connected:
+                multi_roi = bool(node.params.get("multi_roi", False))
+                if multi_roi:
+                    # Multi: KHÔNG update _shapes từ output (sẽ ghi đè vị trí
+                    # đã vẽ bằng vị trí post-shift). proc_crop đã overlay ROI
+                    # thực tế lên ảnh output → user thấy runtime positions ở
+                    # ảnh; còn handles editable vẫn ở vị trí gốc đã vẽ.
+                    pass
+                elif self._roi_port_connected:
                     # Lấy giá trị thực từ output (sau khi proc_crop chạy)
                     ox = node.outputs.get("x", 0); oy = node.outputs.get("y", 0)
                     ow = node.outputs.get("w", 0); oh = node.outputs.get("h", 0)
