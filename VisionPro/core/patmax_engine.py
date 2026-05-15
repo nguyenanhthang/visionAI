@@ -823,8 +823,17 @@ def _empty_vis(image: np.ndarray) -> np.ndarray:
 
 def draw_patmax_results(image: np.ndarray,
                          results: List[PatMaxResult],
-                         model: Optional[PatMaxModel] = None) -> np.ndarray:
+                         model: Optional[PatMaxModel] = None,
+                         show_reference: bool = True) -> np.ndarray:
+    """Render k\u1ebft qu\u1ea3 PatMax l\u00ean \u1ea3nh.
+
+    show_reference=False \u2192 tr\u1ea3 v\u1ec1 \u1ea3nh g\u1ed1c (BGR) kh\u00f4ng v\u1ebd overlay n\u00e0o,
+    d\u00f9ng cho user mu\u1ed1n \u1ea9n c\u00e1c marker tham chi\u1ebfu.
+    """
     vis = image.copy() if len(image.shape)==3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if not show_reference:
+        print(f"[PatMax] {len(results)} result(s) (reference hidden)")
+        return vis
     s = _draw_scale(vis)
 
     # Origin offset t\u1eeb t\u00e2m pattern (to\u1ea1 \u0111\u1ed9 pattern, c\u00f3 th\u1ec3 \u00e2m ho\u1eb7c >w/h)
@@ -836,6 +845,12 @@ def draw_patmax_results(image: np.ndarray,
         pdy = float(model.origin_y) - ph / 2.0
         has_origin = True
 
+    # Style \u2014 match PatMaxDialog preview (BGR)
+    COL_X     = (70, 70, 255)     # \u0111\u1ecf
+    COL_Y     = (100, 220, 80)    # xanh l\u00e1
+    COL_CYAN  = (255, 212, 0)     # cyan
+    COL_OMARK = (0, 215, 255)     # v\u00e0ng (X marker t\u1ea1i origin)
+
     for i, r in enumerate(results):
         if not r.found:
             continue
@@ -846,7 +861,7 @@ def draw_patmax_results(image: np.ndarray,
             pts = np.array(r.corners, dtype=np.int32)
             cv2.polylines(vis, [pts], True, col, _t(2, s))
 
-        # T\u00ednh origin (transformed) \u2014 \u0111\u00e2y l\u00e0 MARKER CH\u00cdNH (tham chi\u1ebfu)
+        # T\u00ednh origin (transformed)
         if has_origin:
             rad_o = math.radians(-r.angle)
             ca = math.cos(rad_o); sa = math.sin(rad_o)
@@ -857,37 +872,53 @@ def draw_patmax_results(image: np.ndarray,
             ox = float(r.x); oy = float(r.y)
         ox_i = int(round(ox)); oy_i = int(round(oy))
 
-        # Marker tham chi\u1ebfu: v\u00f2ng xanh (theo score) + X v\u00e0ng \u0111\u00e8 l\u00ean \u2014 g\u1ed9p 1 v\u1ecb tr\u00ed
-        sz   = max(_t(14, s), int(min(r.width, r.height) * 0.18))
+        # Marker origin: v\u00f2ng (theo score) + X v\u00e0ng \u0111\u00e8 l\u00ean + cyan dot t\u00e2m
         r_o  = _t(11, s)
         r_d  = _t(3, s)
         arm  = _t(9, s)
         cv2.circle(vis, (ox_i, oy_i), r_o, col, _t(2, s), cv2.LINE_AA)
-        cv2.circle(vis, (ox_i, oy_i), r_d, col, -1, cv2.LINE_AA)
-        o_col = (0, 215, 255)   # v\u00e0ng (BGR)
         cv2.line(vis, (ox_i - arm, oy_i - arm), (ox_i + arm, oy_i + arm),
-                 o_col, _t(2, s), cv2.LINE_AA)
+                 COL_OMARK, _t(2, s), cv2.LINE_AA)
         cv2.line(vis, (ox_i - arm, oy_i + arm), (ox_i + arm, oy_i - arm),
-                 o_col, _t(2, s), cv2.LINE_AA)
+                 COL_OMARK, _t(2, s), cv2.LINE_AA)
+        cv2.circle(vis, (ox_i, oy_i), r_d, COL_CYAN, -1, cv2.LINE_AA)
 
-        # Angle arrow \u2014 ph\u00e1t t\u1eeb marker (origin)
-        if abs(r.angle) > 0.5:
-            rad = math.radians(-r.angle)
-            ex  = int(ox_i + math.cos(rad) * sz * 2)
-            ey  = int(oy_i + math.sin(rad) * sz * 2)
-            cv2.arrowedLine(vis, (ox_i, oy_i), (ex, ey),
-                             (255, 210, 0), _t(2, s), tipLength=0.3)
+        # \u2500\u2500 H\u1ec7 tr\u1ee5c XY t\u1ea1i origin, xoay theo r.angle \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # Convention: image-space, Y\u2193; r.angle theo math (CCW d\u01b0\u01a1ng), gi\u1ed1ng
+        # angle arrow yellow \u0111\u00e3 d\u00f9ng. -r.angle \u0111\u1ec3 map v\u00e0o image-space.
+        axis_len = max(_t(40, s), int(min(r.width, r.height) * 0.40))
+        rad = math.radians(-r.angle)
+        cax = math.cos(rad); sax = math.sin(rad)
+        # X axis (\u0111\u1ecf): d\u1ecdc theo angle
+        x_end = (int(ox_i + cax * axis_len), int(oy_i + sax * axis_len))
+        cv2.arrowedLine(vis, (ox_i, oy_i), x_end, COL_X, _t(2, s),
+                        cv2.LINE_AA, tipLength=0.18)
+        cv2.putText(vis, "X", (x_end[0] + _t(4, s), x_end[1] + _t(4, s)),
+                    cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_X, _t(2, s),
+                    cv2.LINE_AA)
+        # Y axis (xanh l\u00e1): 90\u00b0 clockwise so v\u1edbi X trong image-space (Y\u2193)
+        y_end = (int(ox_i - sax * axis_len), int(oy_i + cax * axis_len))
+        cv2.arrowedLine(vis, (ox_i, oy_i), y_end, COL_Y, _t(2, s),
+                        cv2.LINE_AA, tipLength=0.18)
+        cv2.putText(vis, "Y", (y_end[0] + _t(4, s), y_end[1] + _t(4, s)),
+                    cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_Y, _t(2, s),
+                    cv2.LINE_AA)
 
-        # Label: score + to\u1ea1 \u0111\u1ed9 origin
+        # Label "O (x.x, y.y)  +angle" \u2014 cyan, ph\u00eda tr\u00ean-ph\u1ea3i origin
+        ol_txt = f"O ({ox:.1f},{oy:.1f})"
+        if abs(r.angle) > 0.05:
+            ol_txt += f"  {r.angle:+.1f}deg"
+        cv2.putText(vis, ol_txt,
+                    (ox_i + int(14 * s), oy_i - int(10 * s)),
+                    cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_CYAN,
+                    _t(2, s), cv2.LINE_AA)
+
+        # Label score \u1edf g\u00f3c bbox
         lx = max(0, int(r.x - r.width/2))
         ly = max(int(16 * s), int(r.y - r.height/2) - int(8 * s))
         label = f"#{i+1} {r.score:.3f}"
-        if abs(r.angle) > 0.5:
-            label += f" {r.angle:+.1f}deg"   # cv2.putText kh\u00f4ng h\u1ed7 tr\u1ee3 Unicode \u00b0
-        cv2.putText(vis, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, _fs(0.55, s), col, _t(2, s))
-        cv2.putText(vis, f"({ox:.0f},{oy:.0f})",
-                    (ox_i + int(14 * s), oy_i + int(18 * s)),
-                    cv2.FONT_HERSHEY_SIMPLEX, _fs(0.45, s), o_col, _t(1, s), cv2.LINE_AA)
+        cv2.putText(vis, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                    _fs(0.55, s), col, _t(2, s))
 
     # Summary text \u0111\u01b0\u1ee3c log ra console; kh\u00f4ng v\u1ebd l\u00ean \u1ea3nh.
     print(f"[PatMax] {len(results)} result(s)")
