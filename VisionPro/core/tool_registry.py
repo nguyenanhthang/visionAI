@@ -1503,6 +1503,251 @@ def proc_yolo_detect(inputs, params):
         return {"image": vis, "detections": [], "count": 0, "pass": False}
 
 
+# ═══════════════════════════════════════════════════════════════
+#  COMMUNICATION TOOLS — Serial scanner, HTTP GET, HTTP POST
+# ═══════════════════════════════════════════════════════════════
+
+def _parse_hex_bytes(s: str) -> bytes:
+    """Parse '02 F4 03' / '0x02,0xF4,0x03' / '02f403' → bytes. Empty → b''."""
+    if not s:
+        return b""
+    cleaned = s.replace(",", " ").replace("0x", "").replace("0X", "")
+    parts = cleaned.split()
+    if len(parts) == 1:
+        h = parts[0]
+        if len(h) % 2 != 0:
+            raise ValueError(f"Hex string length must be even: {s!r}")
+        return bytes.fromhex(h)
+    return bytes(int(p, 16) for p in parts)
+
+
+def proc_serial_scan(inputs, params):
+    """Đọc Barcode/QR/DataMatrix từ máy scan kết nối qua cổng COM (serial).
+
+    Hành vi giống chương trình mẫu:
+      - Mở cổng (nếu chưa mở) → ghi `trigger_bytes` (vd. 02 F4 03 = STX TRIG ETX
+        cho scanner Honeywell/Symbol) → readline → đóng cổng.
+      - Trả `data` (chuỗi đã decode) + `success` + `length`.
+      - Có thể chốt độ dài bằng `expected_length` (>0) → fail nếu không khớp.
+    """
+    trigger_in = inputs.get("trigger", True)
+    if trigger_in is False:
+        return {"data": "", "success": False, "length": 0, "pass": False}
+
+    port      = str(params.get("port", "COM1"))
+    baudrate  = int(params.get("baudrate", 9600))
+    bytesize  = int(params.get("bytesize", 8))
+    parity    = str(params.get("parity", "N"))
+    stopbits  = float(params.get("stopbits", 1))
+    timeout_s = float(params.get("timeout_ms", 1000)) / 1000.0
+    trigger_hex = str(params.get("trigger_hex", "02 F4 03"))
+    read_size = int(params.get("read_size", 100))
+    encoding  = str(params.get("encoding", "utf-8"))
+    strip_chars = str(params.get("strip_chars", "\r\n\x02\x03"))
+    expected_len = int(params.get("expected_length", 0))
+    contains_text = str(params.get("contains", ""))
+
+    try:
+        import serial
+    except ImportError:
+        msg = "pyserial chưa cài — pip install pyserial"
+        print(f"[SerialScan] {msg}")
+        return {"data": "", "success": False, "length": 0, "pass": False,
+                "error": msg}
+
+    parity_map = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN,
+                  "O": serial.PARITY_ODD, "M": serial.PARITY_MARK,
+                  "S": serial.PARITY_SPACE}
+    stopbits_map = {1: serial.STOPBITS_ONE, 1.5: serial.STOPBITS_ONE_POINT_FIVE,
+                    2: serial.STOPBITS_TWO}
+
+    ser = None
+    try:
+        trigger_bytes = _parse_hex_bytes(trigger_hex)
+        ser = serial.Serial(
+            port=port, baudrate=baudrate,
+            bytesize=bytesize,
+            parity=parity_map.get(parity.upper(), serial.PARITY_NONE),
+            stopbits=stopbits_map.get(stopbits, serial.STOPBITS_ONE),
+            timeout=timeout_s,
+        )
+        if trigger_bytes:
+            ser.write(trigger_bytes)
+        raw = ser.read(read_size)
+        if not raw:
+            raw = ser.readline()
+        text = raw.decode(encoding, errors="replace").strip(strip_chars)
+        is_pass = bool(text)
+        if expected_len > 0:
+            is_pass = is_pass and (len(text) == expected_len)
+        if contains_text:
+            is_pass = is_pass and (contains_text in text)
+        print(f"[SerialScan] {port}@{baudrate} → {text!r} "
+              f"({'PASS' if is_pass else 'FAIL'})")
+        return {"data": text, "success": bool(text),
+                "length": len(text), "pass": is_pass, "error": ""}
+    except Exception as e:
+        print(f"[SerialScan] Error: {e}")
+        return {"data": "", "success": False, "length": 0, "pass": False,
+                "error": str(e)}
+    finally:
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:
+                pass
+
+
+def _parse_json_dict(s: str) -> dict:
+    """Parse JSON dict from str. Empty / invalid → {}."""
+    if not s or not s.strip():
+        return {}
+    import json
+    try:
+        v = json.loads(s)
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
+def _format_template(template: str, inputs: dict) -> str:
+    """Substitute {port_name} placeholders trong template bằng inputs.
+    Không dùng str.format vì user có thể có '{' '}' không phải placeholder."""
+    out = template
+    for k, v in (inputs or {}).items():
+        if v is None:
+            continue
+        out = out.replace("{" + str(k) + "}", str(v))
+    return out
+
+
+def proc_api_get(inputs, params):
+    """HTTP GET — fetch dữ liệu từ API để so sánh / lookup.
+
+    URL = `url_base` + (input `query` hoặc params `query_default`) + `url_suffix`.
+    Headers từ params `headers_json` (JSON dict) — vd token: {"token":"xxx"}.
+    Pass = (status == expected_status) AND (response chứa `expected_text` nếu set).
+    """
+    url_base   = str(params.get("url_base", ""))
+    url_suffix = str(params.get("url_suffix", ""))
+    query      = inputs.get("query", params.get("query_default", "")) or ""
+    headers    = _parse_json_dict(str(params.get("headers_json", "")))
+    timeout_s  = float(params.get("timeout_ms", 5000)) / 1000.0
+    expected_status = int(params.get("expected_status", 200))
+    expected_text   = str(params.get("expected_text", ""))
+    parse_json      = bool(params.get("parse_json", False))
+    json_path       = str(params.get("json_path", ""))   # vd "data.token"
+
+    url = f"{url_base}{query}{url_suffix}"
+
+    try:
+        import requests
+    except ImportError:
+        msg = "requests chưa cài — pip install requests"
+        print(f"[ApiGet] {msg}")
+        return {"response_text": "", "response_json": None, "value": "",
+                "status_code": 0, "success": False, "pass": False, "error": msg}
+
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout_s)
+        text = r.text
+        status = r.status_code
+        js = None
+        value = ""
+        if parse_json:
+            try:
+                js = r.json()
+                if json_path:
+                    cur = js
+                    for k in json_path.split("."):
+                        if isinstance(cur, dict) and k in cur:
+                            cur = cur[k]
+                        else:
+                            cur = None
+                            break
+                    value = "" if cur is None else str(cur)
+            except Exception:
+                js = None
+        success = (status == expected_status)
+        is_pass = success and (
+            (expected_text in text) if expected_text else True)
+        print(f"[ApiGet] {url} → {status} "
+              f"({'PASS' if is_pass else 'FAIL'}) text={text[:80]!r}")
+        return {"response_text": text, "response_json": js, "value": value,
+                "status_code": status, "success": success,
+                "pass": is_pass, "error": ""}
+    except Exception as e:
+        print(f"[ApiGet] Error: {e}")
+        return {"response_text": "", "response_json": None, "value": "",
+                "status_code": 0, "success": False, "pass": False,
+                "error": str(e)}
+
+
+def proc_api_post(inputs, params):
+    """HTTP POST — gửi JSON body lên API và phản hồi request.
+
+    Body lấy từ `body_template` (chuỗi JSON). Trong template có thể chèn
+    placeholder `{field1}`, `{field2}`, ... để substitute giá trị từ các
+    input port `field1..field8` (kết nối từ tool khác — vd PatMax score,
+    Caliper width, judge result, …).
+
+    Vd template:
+        {"sn":"{field1}", "torque":{field2}, "result":"{field3}",
+         "stationName":"OP1", "empNo":"E12345"}
+    """
+    url     = str(params.get("url", ""))
+    method  = str(params.get("method", "POST")).upper()
+    headers = _parse_json_dict(str(params.get("headers_json", "")))
+    body_template = str(params.get("body_template", "{}"))
+    timeout_s = float(params.get("timeout_ms", 5000)) / 1000.0
+    expected_status = int(params.get("expected_status", 200))
+    expected_text   = str(params.get("expected_text", ""))
+
+    if not url:
+        return {"response_text": "", "status_code": 0,
+                "success": False, "pass": False,
+                "error": "URL trống"}
+
+    try:
+        import requests
+    except ImportError:
+        msg = "requests chưa cài — pip install requests"
+        print(f"[ApiPost] {msg}")
+        return {"response_text": "", "status_code": 0,
+                "success": False, "pass": False, "error": msg}
+
+    # Substitute {fieldN}, {input_port_name} placeholders trong body
+    body_str = _format_template(body_template, inputs)
+    import json as _json
+    try:
+        body = _json.loads(body_str)
+    except Exception as e:
+        msg = f"body_template không phải JSON hợp lệ sau substitute: {e}"
+        print(f"[ApiPost] {msg}\n  body={body_str!r}")
+        return {"response_text": "", "status_code": 0,
+                "success": False, "pass": False, "error": msg}
+
+    try:
+        if method == "PUT":
+            r = requests.put(url, json=body, headers=headers, timeout=timeout_s)
+        else:
+            r = requests.post(url, json=body, headers=headers, timeout=timeout_s)
+        text = r.text
+        status = r.status_code
+        success = (status == expected_status)
+        is_pass = success and (
+            (expected_text in text) if expected_text else True)
+        print(f"[ApiPost] {method} {url} status={status} "
+              f"({'PASS' if is_pass else 'FAIL'}) body={body!r} "
+              f"resp={text[:80]!r}")
+        return {"response_text": text, "status_code": status,
+                "success": success, "pass": is_pass, "error": ""}
+    except Exception as e:
+        print(f"[ApiPost] Error: {e}")
+        return {"response_text": "", "status_code": 0,
+                "success": False, "pass": False, "error": str(e)}
+
+
 TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
@@ -2034,6 +2279,95 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Bật để vẽ '{class} {conf}' cạnh từng detection lên ảnh output. Mặc định tắt — kết quả vẫn có trong log & detections port.")],
     proc_yolo_detect,"ultralytics YOLO"),
 
+  # ── COMMUNICATION ──────────────────────────────────────────────
+  ToolDef("serial_scan","Serial Scanner","Communication",
+    "Đọc Barcode/QR/DataMatrix từ máy scan qua cổng COM (serial). "
+    "Trigger gửi byte (vd 02 F4 03), readline trả nội dung scan.",
+    "#3d0c5a","📟",
+    [PortDef("trigger","bool",required=False,default=True)],
+    [PortDef("data","str"),PortDef("success","bool"),
+     PortDef("length","number"),PortDef("pass","bool"),
+     PortDef("error","str")],
+    [P("port","COM Port","str","COM1",
+       tooltip="Vd. COM1 (Windows) hoặc /dev/ttyUSB0 (Linux)"),
+     P("baudrate","Baudrate","int",9600,300,921600),
+     P("bytesize","Byte Size","enum","8",choices=["5","6","7","8"]),
+     P("parity","Parity","enum","N",choices=["N","E","O","M","S"],
+       tooltip="N=None, E=Even, O=Odd, M=Mark, S=Space"),
+     P("stopbits","Stop Bits","enum","1",choices=["1","1.5","2"]),
+     P("timeout_ms","Timeout (ms)","int",1000,10,60000),
+     P("trigger_hex","Trigger bytes (hex)","str","02 F4 03",
+       tooltip="Bytes gửi để kích hoạt scan. Mặc định 02 F4 03 (STX TRG ETX) "
+               "cho scanner Honeywell/Symbol. Để trống nếu scanner auto-trigger."),
+     P("read_size","Read size (bytes)","int",100,1,4096,
+       tooltip="Số bytes đọc tối đa, fallback readline() nếu read trống"),
+     P("encoding","Encoding","enum","utf-8",
+       choices=["utf-8","ascii","latin-1","utf-16"]),
+     P("strip_chars","Strip chars (raw)","str","\\r\\n\\x02\\x03",
+       tooltip="Ký tự strip 2 đầu chuỗi sau decode. Mặc định CR/LF/STX/ETX."),
+     P("expected_length","Expected length (0=any)","int",0,0,1024,
+       tooltip="0 = chấp nhận mọi độ dài. >0 = pass chỉ khi len(data) = giá trị này."),
+     P("contains","Must contain","str","",
+       tooltip="Để trống = không filter. Khi set, pass=True chỉ khi data chứa chuỗi này.")],
+    proc_serial_scan, ""),
+
+  ToolDef("api_get","API GET","Communication",
+    "HTTP GET — fetch dữ liệu từ API để lookup / so sánh.",
+    "#3d0c5a","🌐",
+    [PortDef("query","str",required=False,default="")],
+    [PortDef("response_text","str"),PortDef("response_json","any"),
+     PortDef("value","str"),PortDef("status_code","number"),
+     PortDef("success","bool"),PortDef("pass","bool"),
+     PortDef("error","str")],
+    [P("url_base","URL base","str","",
+       tooltip="Vd https://api.example.com/v1/product/"),
+     P("query_default","Default query","str","",
+       tooltip="Dùng khi input port `query` không kết nối"),
+     P("url_suffix","URL suffix","str","",
+       tooltip="Vd ?lang=vi hoặc /detail"),
+     P("headers_json","Headers (JSON)","str","{}",
+       tooltip='JSON dict header. Vd {"token":"abc","X-API-Key":"xxx"}'),
+     P("timeout_ms","Timeout (ms)","int",5000,100,60000),
+     P("expected_status","Expected HTTP status","int",200,100,599),
+     P("expected_text","Response must contain","str","",
+       tooltip="Để trống = chỉ check status. Khi set, pass=True khi response.text chứa chuỗi này."),
+     P("parse_json","Parse response as JSON","bool",False),
+     P("json_path","JSON path (dot notation)","str","",
+       tooltip='Vd "data.token" → value = response.json()["data"]["token"]. '
+               'Chỉ áp dụng khi parse_json=True.')],
+    proc_api_get, ""),
+
+  ToolDef("api_post","API POST","Communication",
+    "HTTP POST/PUT — gửi JSON body lên API. Body template hỗ trợ "
+    "placeholder {field1}..{field8} substitute từ input ports.",
+    "#3d0c5a","📤",
+    [PortDef("field1","any",required=False),
+     PortDef("field2","any",required=False),
+     PortDef("field3","any",required=False),
+     PortDef("field4","any",required=False),
+     PortDef("field5","any",required=False),
+     PortDef("field6","any",required=False),
+     PortDef("field7","any",required=False),
+     PortDef("field8","any",required=False)],
+    [PortDef("response_text","str"),PortDef("status_code","number"),
+     PortDef("success","bool"),PortDef("pass","bool"),
+     PortDef("error","str")],
+    [P("url","URL","str","",tooltip="Vd https://api.example.com/v1/upload"),
+     P("method","Method","enum","POST",choices=["POST","PUT"]),
+     P("headers_json","Headers (JSON)","str",'{"Content-Type":"application/json"}',
+       tooltip='JSON dict header. Vd {"token":"abc"}'),
+     P("body_template","Body template (JSON)","str",
+       '{"sn":"{field1}", "result":"{field2}", "stationName":"OP1"}',
+       tooltip="Template JSON. Placeholder {field1}..{field8} sẽ được "
+               "substitute bằng giá trị input port tương ứng. Vd:\n"
+               '{"sn":"{field1}", "torque":{field2}, "result":"{field3}",\n'
+               ' "stationName":"OPLEUATTACHMENT", "empNo":"E12345"}'),
+     P("timeout_ms","Timeout (ms)","int",5000,100,60000),
+     P("expected_status","Expected HTTP status","int",200,100,599),
+     P("expected_text","Response must contain","str","",
+       tooltip="Để trống = chỉ check status. Khi set, pass khi response chứa chuỗi này.")],
+    proc_api_post, ""),
+
 ]
 
 TOOL_BY_ID: Dict[str,ToolDef] = {t.tool_id: t for t in TOOL_REGISTRY}
@@ -2041,5 +2375,5 @@ CATEGORIES = [
     "Acquire Image","Pattern Find","Fixture","Caliper",
     "Blob Analysis","Edge & Geometry","Color Analysis","ID & Read",
     "Measurement","Surface Inspection","Image Processing",
-    "Calibration","Logic & Flow","Output & Display","YOLO"
+    "Calibration","Logic & Flow","Output & Display","YOLO","Communication"
 ]
