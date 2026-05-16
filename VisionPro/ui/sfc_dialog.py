@@ -29,6 +29,11 @@ from core.sfc import (
 )
 
 
+# Separator giữa identifier (tool_id / node_id) và human label trong popup
+# suggestion. Khi insert, strip phần phía sau để chỉ chèn identifier.
+_LABEL_SEP = "   —   "
+
+
 # ── Body-template editor with {placeholder} autocomplete ──────────
 class _TemplateEdit(QPlainTextEdit):
     """QPlainTextEdit có autocomplete cho placeholder `{...}`.
@@ -45,6 +50,12 @@ class _TemplateEdit(QPlainTextEdit):
         self._completer.setWidget(self)
         self._completer.setCompletionMode(QCompleter.PopupCompletion)
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        # Substring match — gõ "patmax" sẽ khớp "patmax_align", gõ "pat" cũng
+        # ra cả "patmax_align" và "patfind". User không cần nhớ tiền tố.
+        try:
+            self._completer.setFilterMode(Qt.MatchContains)
+        except Exception:
+            pass    # Qt < 5.2 fallback (PySide6 luôn có)
         self._completer.activated.connect(self._insert_completion)
         self._model = QStringListModel([], self._completer)
         self._completer.setModel(self._model)
@@ -110,6 +121,9 @@ class _TemplateEdit(QPlainTextEdit):
         if ctx is None:
             return
         kind, head, prefix = ctx
+        # Strip phần human label (sau separator) — chỉ chèn tool_id / node_id.
+        if _LABEL_SEP in completion:
+            completion = completion.split(_LABEL_SEP, 1)[0]
         c = self.textCursor()
         # Xoá phần prefix đang gõ rồi chèn completion
         for _ in range(len(prefix)):
@@ -117,6 +131,12 @@ class _TemplateEdit(QPlainTextEdit):
         c.insertText(completion)
         # Sau khi chọn tool name → gợi ý chèn dấu '.' để tiếp port
         if kind == "name":
+            # Builtins (SN, api_get.value, api_get.text) đã đầy đủ → đóng `}`
+            if completion in ("SN", "api_get.value", "api_get.text"):
+                c.insertText("}")
+                self.setTextCursor(c)
+                self._completer.popup().hide()
+                return
             c.insertText(".")
             self.setTextCursor(c)
             # Trigger popup port ngay (giờ context có dấu '.')
@@ -437,22 +457,27 @@ class SfcDialog(QDialog):
         """Trả về list suggestion cho editor.
 
         ctx:
-            "@name:"            → list tool name + builtin (gõ sau `{`).
-            "@port:<head>"      → list port của tool ứng với head (gõ sau `.`).
+            "@name:"            → list tool_id + builtin + (label hiển thị).
+            "@port:<head>"      → list port của tool ứng với head.
         """
         if ctx == "@name:":
-            names: List[str] = ["SN", "api_get.value", "api_get.text"]
-            seen = set()
+            items: List[str] = [
+                "SN" + _LABEL_SEP + "Mã scan gần nhất",
+                "api_get.value" + _LABEL_SEP + "Value extract từ API GET",
+                "api_get.text" + _LABEL_SEP + "Response text của API GET",
+            ]
+            seen_tools = set()
             if self._graph is not None:
-                # 1) Ưu tiên tool_id để user gõ ngắn (vd "patmax")
+                # tool_id của các node đang có (vd "patmax_align — PatMax Align Tool")
                 for n in self._graph.nodes.values():
-                    if n.tool_id not in seen:
-                        names.append(n.tool_id)
-                        seen.add(n.tool_id)
-                # 2) Thêm node_id cho trường hợp >1 node cùng tool_id
-                for nid in self._graph.nodes.keys():
-                    names.append(nid)
-            return sorted(set(names), key=lambda s: (s.startswith("api_get") or s == "SN", s))
+                    if n.tool_id in seen_tools:
+                        continue
+                    seen_tools.add(n.tool_id)
+                    items.append(f"{n.tool_id}{_LABEL_SEP}{n.tool.name}")
+                # node_id (8-char) — phòng trường hợp pipeline có >1 node cùng tool_id
+                for nid, n in self._graph.nodes.items():
+                    items.append(f"{nid}{_LABEL_SEP}{n.tool.name} [{nid}]")
+            return items
 
         if ctx.startswith("@port:"):
             head = ctx[len("@port:"):]
