@@ -886,14 +886,10 @@ def draw_patmax_results(image: np.ndarray,
         ox_i = int(round(ox)); oy_i = int(round(oy))
 
         if show_xy:
-            # Marker origin: ch\u1ec9 X v\u00e0ng (cross) + tr\u1ee5c XY, kh\u00f4ng v\u00f2ng
+            # Marker origin: ch\u1ec9 tr\u1ee5c XY + label (kh\u00f4ng v\u00f2ng, kh\u00f4ng X-cross)
             r_o  = _t(11, s)
             r_d  = _t(3, s)
             arm  = _t(9, s)
-            cv2.line(vis, (ox_i - arm, oy_i - arm), (ox_i + arm, oy_i + arm),
-                     COL_OMARK, _t(2, s), cv2.LINE_AA)
-            cv2.line(vis, (ox_i - arm, oy_i + arm), (ox_i + arm, oy_i - arm),
-                     COL_OMARK, _t(2, s), cv2.LINE_AA)
 
             # \u2500\u2500 H\u1ec7 tr\u1ee5c XY t\u1ea1i origin, xoay theo r.angle \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
             axis_len = max(_t(40, s), int(min(r.width, r.height) * 0.40))
@@ -939,11 +935,7 @@ def draw_patmax_results(image: np.ndarray,
                 exf = float(r.x) + sc * (edx * ca - edy * sa)
                 eyf = float(r.y) + sc * (edx * sa + edy * ca)
                 ex_i = int(round(exf)); ey_i = int(round(eyf))
-                # Marker: ch\u1ec9 X v\u00e0ng + tr\u1ee5c XY (kh\u00f4ng v\u00f2ng, kh\u00f4ng dot)
-                cv2.line(vis, (ex_i - arm, ey_i - arm), (ex_i + arm, ey_i + arm),
-                         COL_OMARK, _t(2, s), cv2.LINE_AA)
-                cv2.line(vis, (ex_i - arm, ey_i + arm), (ex_i + arm, ey_i - arm),
-                         COL_OMARK, _t(2, s), cv2.LINE_AA)
+                # Marker: ch\u1ec9 tr\u1ee5c XY + label (kh\u00f4ng v\u00f2ng, kh\u00f4ng X-cross)
                 # H\u1ec7 tr\u1ee5c XY t\u1ea1i ref, xoay theo (r.angle + ref.angle)
                 total_ang = float(r.angle) + r_ang_off
                 rad_e = math.radians(-total_ang)

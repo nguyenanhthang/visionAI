@@ -859,6 +859,12 @@ class PatMaxDialog(QDialog):
                 oy = y + float(self._model.origin_y)
                 QTimer.singleShot(120, lambda: self._set_origin(ox, oy, from_user=False))
                 QTimer.singleShot(125, lambda: self._origin_combo.setCurrentIndex(7))
+            # Sync extra refs lên canvas (model đã load từ node.params)
+            QTimer.singleShot(130, self._refresh_canvas_extras)
+            # Khoá ROI drawing nếu đã có ROI rồi
+            if self._model and self._model.train_roi:
+                QTimer.singleShot(135,
+                    lambda: self._img_label.set_roi_locked(True))
         else:
             self._img_status.setText(
                 "⚠  Không có ảnh.  "
@@ -871,6 +877,9 @@ class PatMaxDialog(QDialog):
             f"—  Nhấn ⚙ Train Pattern")
         # Cập nhật điểm origin theo preset hiện tại trong ROI mới
         self._apply_origin_preset_to_roi()
+        # Khoá vẽ ROI mới — chỉ cho edit shape hiện có / origin / extras.
+        # Unlock khi user đổi shape, đổi ROI mode, hoặc Reset Image.
+        self._img_label.set_roi_locked(True)
 
     def _on_shape_drawn(self, shape_type: str, data: dict):
         self._current_shape = shape_type
@@ -885,6 +894,8 @@ class PatMaxDialog(QDialog):
             self._current_shape_data = None
             self._current_roi = None
         if hasattr(self, "_img_label"):
+            # Đổi shape → unlock để vẽ mới
+            self._img_label.set_roi_locked(False)
             if self._roi_mode == "single":
                 self._img_label.set_shape_mode(s)
             else:
@@ -910,6 +921,8 @@ class PatMaxDialog(QDialog):
             self._btn_clear_shapes.setVisible(is_multi)
         # Sync canvas
         if hasattr(self, "_img_label"):
+            # Đổi mode → unlock để vẽ ROI mới
+            self._img_label.set_roi_locked(False)
             self._img_label.set_multi_shape(is_multi)
             if not is_multi:
                 # Clear existing list khi về Single
@@ -925,6 +938,7 @@ class PatMaxDialog(QDialog):
     def _on_clear_shapes(self):
         if hasattr(self, "_img_label"):
             self._img_label.clear_shapes()
+            self._img_label.set_roi_locked(False)
         self._current_roi = None
         self._current_shape_data = None
         self._models = []
@@ -1019,8 +1033,9 @@ class PatMaxDialog(QDialog):
         self._score_map_img = None
         if hasattr(self, "_result_vis"):
             self._result_vis = None
-        # Clear canvas markers
+        # Clear canvas markers + unlock ROI để vẽ mới
         self._img_label.set_origin(None, None)
+        self._img_label.set_roi_locked(False)
         self._img_label.set_shape_mode(self._current_shape)  # clears _rect/_poly/_data
         # Reset origin spinboxes & combo
         self._origin_updating = True

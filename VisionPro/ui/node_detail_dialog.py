@@ -75,6 +75,9 @@ class InteractiveImageLabel(QLabel):
         self._dragging_extra_center_idx: int = -1
         self._dragging_extra_rot_idx: int = -1
         self._extras_highlight_idx: int = -1
+        # Khoá vẽ ROI mới khi True (cho phép edit shape hiện tại + kéo
+        # origin/extras, không cho click empty area tạo shape mới)
+        self._roi_locked: bool = False
         # Shape ROI ("rect" | "circle" | "ellipse" | "polygon")
         self._shape: str = "rect"
         self._shape_data: dict = {}                                # toạ độ ảnh
@@ -377,6 +380,12 @@ class InteractiveImageLabel(QLabel):
         self._dragging_extra_rot_idx = -1
         self._extras_highlight_idx = -1
         self._render()
+
+    def set_roi_locked(self, locked: bool):
+        """Khoá vẽ ROI mới (chỉ áp khi mode='roi'/'template').
+        Khi True: click empty area không tạo shape mới; vẫn cho edit
+        shape hiện có + kéo origin/extras."""
+        self._roi_locked = bool(locked)
 
     def set_extras_highlight(self, idx: int):
         """Highlight extra marker idx (-1 = không highlight)."""
@@ -1051,6 +1060,9 @@ class InteractiveImageLabel(QLabel):
                         self._edit_orig_data = dict(self._shape_data)
                         return
             # Click ngoài shape (hoặc chưa có shape) → vẽ mới
+            if self._roi_locked:
+                # ROI khoá — không tạo shape mới
+                return
             if self._multi:
                 # Commit active hiện tại; multi-mode KHÔNG xoá list — append mới
                 self._commit_active_to_list()
