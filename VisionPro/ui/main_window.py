@@ -105,6 +105,7 @@ class MainWindow(QMainWindow):
         from core.sfc import SfcManager
         self._sfc_manager = SfcManager()
         self._sfc_dialog = None
+        self._sfc_pending_post = False  # set khi PLC trigger có sequence POST
 
         self._build_ui()
         self._build_menu()
@@ -449,6 +450,17 @@ class MainWindow(QMainWindow):
         # Đẩy kết quả về PLC (nếu đang connected)
         self._send_result_to_plc(results)
 
+        # ── SFC Step 4: API POST (nếu sequence yêu cầu) ──────────
+        if getattr(self, "_sfc_pending_post", False):
+            self._sfc_pending_post = False
+            self._sfc_manager.set_graph(self._graph)
+            text, ok, err = self._sfc_manager.api_post()
+            if err:
+                self.statusBar().showMessage(f"[SFC] POST error: {err}", 6000)
+            else:
+                self.statusBar().showMessage(
+                    f"[SFC] POST {'PASS' if ok else 'FAIL'}: {text[:80]}", 6000)
+
     def _on_run_error(self, msg: str):
         self._finalize_run()
         self._set_status("ERROR", "#ff3860")
@@ -625,7 +637,7 @@ class MainWindow(QMainWindow):
             return
         self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
         self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
-        self._plc_dialog.show()
+        self._plc_dialog.showMaximized()
 
     def _open_sfc_dialog(self):
         from ui.sfc_dialog import SfcDialog
@@ -645,11 +657,68 @@ class MainWindow(QMainWindow):
         self._cam_dialog.show()
 
     def _on_plc_trigger(self):
-        """PLC kích hoạt → chạy pipeline (chỉ khi đang idle)."""
+        """PLC kích hoạt → tuỳ cấu hình SFC sequence:
+
+        - Sequence OFF: chạy pipeline ngay (behaviour cũ).
+        - Sequence ON:  Scan barcode → API GET → Pipeline → API POST
+                        (POST chạy ở `_on_run_done` sau khi pipeline xong).
+        """
         if self._is_running:
             self.statusBar().showMessage("PLC trigger ignored — pipeline already running", 3000)
             return
+
+        seq = self._sfc_sequence_settings()
+        if not seq.get("enabled"):
+            self._sfc_pending_post = False
+            self._start_run()
+            return
+
+        abort_on_fail = bool(seq.get("abort_on_fail", True))
+
+        # ── Step 1: Scan ────────────────────────────────────────
+        if seq.get("step_scan", True):
+            self._sfc_manager.set_graph(self._graph)
+            sn, err = self._sfc_manager.scan_once()
+            if err or not sn:
+                msg = f"[SFC] Scan fail: {err or 'no data'}"
+                self.statusBar().showMessage(msg, 5000)
+                if abort_on_fail:
+                    return
+            else:
+                self.statusBar().showMessage(f"[SFC] Scanned: {sn}", 3000)
+
+        # ── Step 2: API GET ─────────────────────────────────────
+        if seq.get("step_get", True) and self._sfc_manager.api_get_cfg.enabled:
+            _text, ok, err = self._sfc_manager.api_get()
+            if err or not ok:
+                msg = f"[SFC] GET fail: {err or 'response mismatch'}"
+                self.statusBar().showMessage(msg, 5000)
+                if abort_on_fail:
+                    return
+
+        # ── Step 3: Pipeline run (Step 4 POST chạy ở _on_run_done) ──
+        # Nhớ flag để _on_run_done biết có cần POST hay không.
+        self._sfc_pending_post = bool(
+            seq.get("step_post", True) and self._sfc_manager.api_post_cfg.enabled)
         self._start_run()
+
+    def _sfc_sequence_settings(self) -> dict:
+        """Đọc settings sequence từ PLC dialog (nếu mở) hoặc QSettings."""
+        if self._plc_dialog is not None and hasattr(
+                self._plc_dialog, "get_sfc_sequence_settings"):
+            return self._plc_dialog.get_sfc_sequence_settings()
+        # Fallback: đọc trực tiếp QSettings
+        from PySide6.QtCore import QSettings
+        s = QSettings(); s.beginGroup("plc")
+        out = {
+            "enabled":       s.value("sfc_seq_enabled", False, type=bool),
+            "step_scan":     s.value("sfc_seq_step_scan", True, type=bool),
+            "step_get":      s.value("sfc_seq_step_get", True, type=bool),
+            "step_post":     s.value("sfc_seq_step_post", True, type=bool),
+            "abort_on_fail": s.value("sfc_seq_abort_fail", True, type=bool),
+        }
+        s.endGroup()
+        return out
 
     def _send_result_to_plc(self, results: dict):
         """Gửi PASS/FAIL + dữ liệu mapping (length, area...) về PLC."""
