@@ -292,16 +292,23 @@ class SfcDialog(QDialog):
         gg.addWidget(self.chk_get_parse_json, 5, 0)
         gg.addWidget(QLabel("JSON path:"), 5, 1); gg.addWidget(self.le_get_json_path, 5, 2, 1, 2)
 
+        self.chk_get_bypass_proxy = QCheckBox("Bypass system proxy (cho IP nội bộ LAN)")
+        self.chk_get_bypass_proxy.setChecked(True)
+        self.chk_get_bypass_proxy.setToolTip(
+            "Bật để bỏ qua HTTP_PROXY / corporate Squid proxy — tránh "
+            "request về IP LAN (10.x, 192.168.x) bị proxy chặn / trả HTML lỗi.")
+        gg.addWidget(self.chk_get_bypass_proxy, 6, 0, 1, 4)
+
         self.btn_get_test = QPushButton("🌐  Test GET")
         self.btn_get_test.clicked.connect(self._on_get_test)
-        gg.addWidget(self.btn_get_test, 6, 0, 1, 2)
+        gg.addWidget(self.btn_get_test, 7, 0, 1, 4)
 
         self.txt_get_resp = QPlainTextEdit()
         self.txt_get_resp.setReadOnly(True)
-        self.txt_get_resp.setMaximumHeight(80)
+        self.txt_get_resp.setMaximumHeight(120)
         self.txt_get_resp.setStyleSheet("background:#0a0e1a; color:#94a3b8; font-family:'Courier New'; font-size:10px;")
         self.txt_get_resp.setPlaceholderText("Response sẽ hiện ở đây sau khi Test GET")
-        gg.addWidget(self.txt_get_resp, 7, 0, 1, 4)
+        gg.addWidget(self.txt_get_resp, 8, 0, 1, 4)
         root.addWidget(gb_get)
 
         # ── 3. API POST ───────────────────────────────────────────
@@ -331,6 +338,12 @@ class SfcDialog(QDialog):
         self.le_post_expected.setPlaceholderText("(tuỳ chọn) response phải chứa chuỗi này")
         gp.addWidget(QLabel("Must contain:"), 4, 2); gp.addWidget(self.le_post_expected, 4, 3)
 
+        self.chk_post_bypass_proxy = QCheckBox("Bypass system proxy (cho IP nội bộ LAN)")
+        self.chk_post_bypass_proxy.setChecked(True)
+        self.chk_post_bypass_proxy.setToolTip(
+            "Bật để bỏ qua HTTP_PROXY / corporate Squid proxy.")
+        gp.addWidget(self.chk_post_bypass_proxy, 5, 0, 1, 4)
+
         # Body template — JSON editor + insert reference helper
         hdr_body = QHBoxLayout()
         hdr_body.addWidget(QLabel("Body template (JSON):"))
@@ -342,7 +355,7 @@ class SfcDialog(QDialog):
         self.btn_insert_ref.clicked.connect(self._on_insert_ref)
         hdr_body.addWidget(QLabel("Reference:")); hdr_body.addWidget(self.cb_node_pick)
         hdr_body.addWidget(self.cb_port_pick); hdr_body.addWidget(self.btn_insert_ref)
-        gp.addLayout(hdr_body, 5, 0, 1, 4)
+        gp.addLayout(hdr_body, 6, 0, 1, 4)
 
         self.txt_post_body = _TemplateEdit()
         self.txt_post_body.setFont(QFont("Courier New", 10))
@@ -357,21 +370,21 @@ class SfcDialog(QDialog):
             "Gõ `{` để xem gợi ý các tool đang có trong pipeline.\n"
             "Sau khi chọn tool, gõ `.` (tự thêm) để xem các port output.\n"
             "Tab / Enter để chấp nhận lựa chọn, Esc để đóng popup.")
-        gp.addWidget(self.txt_post_body, 6, 0, 1, 4)
+        gp.addWidget(self.txt_post_body, 7, 0, 1, 4)
 
         self.btn_post_test = QPushButton("📤  Test POST")
         self.btn_post_test.clicked.connect(self._on_post_test)
         self.btn_post_preview = QPushButton("👁  Preview body")
         self.btn_post_preview.clicked.connect(self._on_post_preview)
-        gp.addWidget(self.btn_post_preview, 7, 0, 1, 2)
-        gp.addWidget(self.btn_post_test, 7, 2, 1, 2)
+        gp.addWidget(self.btn_post_preview, 8, 0, 1, 2)
+        gp.addWidget(self.btn_post_test, 8, 2, 1, 2)
 
         self.txt_post_resp = QPlainTextEdit()
         self.txt_post_resp.setReadOnly(True)
-        self.txt_post_resp.setMaximumHeight(80)
+        self.txt_post_resp.setMaximumHeight(120)
         self.txt_post_resp.setStyleSheet("background:#0a0e1a; color:#94a3b8; font-family:'Courier New'; font-size:10px;")
         self.txt_post_resp.setPlaceholderText("Response sẽ hiện ở đây sau khi Test POST")
-        gp.addWidget(self.txt_post_resp, 8, 0, 1, 4)
+        gp.addWidget(self.txt_post_resp, 9, 0, 1, 4)
         root.addWidget(gb_post)
 
         # ── Save / Close ──────────────────────────────────────────
@@ -513,6 +526,7 @@ class SfcDialog(QDialog):
             expected_text=self.le_get_expected.text(),
             parse_json=self.chk_get_parse_json.isChecked(),
             json_path=self.le_get_json_path.text(),
+            bypass_proxy=self.chk_get_bypass_proxy.isChecked(),
         )
 
     def _gather_post(self) -> ApiPostConfig:
@@ -525,6 +539,7 @@ class SfcDialog(QDialog):
             timeout_ms=int(self.sp_post_timeout.value()),
             expected_status=int(self.sp_post_status.value()),
             expected_text=self.le_post_expected.text(),
+            bypass_proxy=self.chk_post_bypass_proxy.isChecked(),
         )
 
     def _apply_to_manager(self):
@@ -652,6 +667,7 @@ class SfcDialog(QDialog):
         self.le_get_expected.setText(g.expected_text)
         self.chk_get_parse_json.setChecked(g.parse_json)
         self.le_get_json_path.setText(g.json_path)
+        self.chk_get_bypass_proxy.setChecked(getattr(g, "bypass_proxy", True))
         # API POST
         p = self._mgr.api_post_cfg
         self.chk_post_enabled.setChecked(p.enabled)
@@ -661,6 +677,7 @@ class SfcDialog(QDialog):
         self.sp_post_timeout.setValue(p.timeout_ms)
         self.sp_post_status.setValue(p.expected_status)
         self.le_post_expected.setText(p.expected_text)
+        self.chk_post_bypass_proxy.setChecked(getattr(p, "bypass_proxy", True))
         self.txt_post_body.setPlainText(p.body_template)
 
     def closeEvent(self, event):

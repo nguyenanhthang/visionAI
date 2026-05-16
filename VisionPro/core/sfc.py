@@ -97,6 +97,7 @@ class ApiGetConfig:
     expected_text: str = ""
     parse_json: bool = False
     json_path: str = ""
+    bypass_proxy: bool = True     # default True — đa số API nội bộ LAN
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -120,9 +121,18 @@ class ApiPostConfig:
     timeout_ms: int = 5000
     expected_status: int = 200
     expected_text: str = ""
+    bypass_proxy: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _requests_kwargs(bypass_proxy: bool) -> dict:
+    """Build kwargs cho requests. Khi bypass_proxy=True → tắt HTTP_PROXY env
+    (tránh request đi qua Squid/corporate proxy → 403 / HTML error page)."""
+    if bypass_proxy:
+        return {"proxies": {"http": None, "https": None}, "verify": False}
+    return {}
 
 
 # ── Manager ───────────────────────────────────────────────────────
@@ -298,8 +308,16 @@ class SfcManager:
             self._log(f"[ApiGet] Placeholder missing: {missing}")
 
         headers = parse_json_dict(cfg.headers_json)
+        kwargs = _requests_kwargs(cfg.bypass_proxy)
         try:
-            r = requests.get(url, headers=headers, timeout=cfg.timeout_ms / 1000.0)
+            # Im lặng warning InsecureRequestWarning khi verify=False
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
+            r = requests.get(url, headers=headers,
+                             timeout=cfg.timeout_ms / 1000.0, **kwargs)
             text = r.text
             status = r.status_code
             value = ""
@@ -352,13 +370,19 @@ class SfcManager:
             return "", False, msg
 
         headers = parse_json_dict(cfg.headers_json)
+        kwargs = _requests_kwargs(cfg.bypass_proxy)
         try:
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
             if cfg.method.upper() == "PUT":
                 r = requests.put(cfg.url, json=body, headers=headers,
-                                 timeout=cfg.timeout_ms / 1000.0)
+                                 timeout=cfg.timeout_ms / 1000.0, **kwargs)
             else:
                 r = requests.post(cfg.url, json=body, headers=headers,
-                                  timeout=cfg.timeout_ms / 1000.0)
+                                  timeout=cfg.timeout_ms / 1000.0, **kwargs)
             text = r.text
             status = r.status_code
             with self._lock:
