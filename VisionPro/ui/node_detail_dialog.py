@@ -41,6 +41,8 @@ class InteractiveImageLabel(QLabel):
     template_drawn = Signal(int, int, int, int)
     origin_changed       = Signal(float, float)   # image coords (float)
     origin_angle_changed = Signal(float)          # degrees
+    extra_origin_changed       = Signal(int, float, float)  # idx, x, y
+    extra_origin_angle_changed = Signal(int, float)         # idx, degrees
     shape_drawn    = Signal(str, dict)      # shape_type, data (image coords)
     shapes_changed = Signal(list)           # multi-mode: list of {"type", **data}
 
@@ -67,6 +69,12 @@ class InteractiveImageLabel(QLabel):
         # Hệ trục XY tại origin — xoay được quanh tâm
         self._origin_angle: float = 0.0   # độ, 0 = X→phải, Y↓
         self._dragging_origin_rot: bool = False
+        # Extra origins (multi reference markers — all draggable + rotatable)
+        # mỗi entry: {"x": float, "y": float, "angle": float, "name": str}
+        self._extras: List[dict] = []
+        self._dragging_extra_center_idx: int = -1
+        self._dragging_extra_rot_idx: int = -1
+        self._extras_highlight_idx: int = -1
         # Shape ROI ("rect" | "circle" | "ellipse" | "polygon")
         self._shape: str = "rect"
         self._shape_data: dict = {}                                # toạ độ ảnh
@@ -349,6 +357,101 @@ class InteractiveImageLabel(QLabel):
         """Đặt góc xoay trục XY tại origin (độ)."""
         self._origin_angle = float(angle) % 360.0
         self._render()
+
+    # ── Extra origins (multi marker, all draggable + rotatable) ─────
+    def set_extras(self, extras: List[dict]):
+        """Set list extra origin markers (image coords).
+        Mỗi entry: {"x", "y", "angle", "name"}.
+        """
+        self._extras = [dict(e) for e in (extras or [])]
+        # Reset drag indices nếu out of range
+        if self._dragging_extra_center_idx >= len(self._extras):
+            self._dragging_extra_center_idx = -1
+        if self._dragging_extra_rot_idx >= len(self._extras):
+            self._dragging_extra_rot_idx = -1
+        self._render()
+
+    def clear_extras(self):
+        self._extras = []
+        self._dragging_extra_center_idx = -1
+        self._dragging_extra_rot_idx = -1
+        self._extras_highlight_idx = -1
+        self._render()
+
+    def set_extras_highlight(self, idx: int):
+        """Highlight extra marker idx (-1 = không highlight)."""
+        self._extras_highlight_idx = int(idx)
+        self._render()
+
+    def _extra_widget_pos(self, idx: int) -> Optional[Tuple[int, int]]:
+        if 0 <= idx < len(self._extras):
+            e = self._extras[idx]
+            return self._img_to_widget(float(e.get("x", 0)),
+                                        float(e.get("y", 0)))
+        return None
+
+    def _extra_axis_endpoints(self, idx: int):
+        c = self._extra_widget_pos(idx)
+        if c is None:
+            return None
+        import math as _m
+        a = _m.radians(float(self._extras[idx].get("angle", 0.0)))
+        cx, cy = c
+        L = self.AXIS_LEN
+        x_end = (int(cx + _m.cos(a) * L), int(cy + _m.sin(a) * L))
+        y_end = (int(cx - _m.sin(a) * L), int(cy + _m.cos(a) * L))
+        return (cx, cy), x_end, y_end
+
+    def _extra_rot_pos(self, idx: int):
+        eps = self._extra_axis_endpoints(idx)
+        if eps is None:
+            return None
+        import math as _m
+        a = _m.radians(float(self._extras[idx].get("angle", 0.0)))
+        cx, cy = eps[0]
+        d = self.AXIS_LEN + self.ROT_HANDLE_OFFSET
+        return (int(cx + _m.cos(a) * d), int(cy + _m.sin(a) * d))
+
+    def _hit_extra_center(self, wx: int, wy: int) -> int:
+        for i in range(len(self._extras)):
+            c = self._extra_widget_pos(i)
+            if c is None:
+                continue
+            dx = wx - c[0]; dy = wy - c[1]
+            if (dx * dx + dy * dy) <= self.CENTER_HIT_RADIUS ** 2:
+                return i
+        return -1
+
+    def _hit_extra_rot(self, wx: int, wy: int, radius: int = 10) -> int:
+        for i in range(len(self._extras)):
+            r = self._extra_rot_pos(i)
+            if r is None:
+                continue
+            dx = wx - r[0]; dy = wy - r[1]
+            if (dx * dx + dy * dy) <= radius ** 2:
+                return i
+        return -1
+
+    def _update_extra_pos_from_widget(self, idx: int, wx: int, wy: int):
+        if not (0 <= idx < len(self._extras)):
+            return
+        ix, iy = self._widget_to_img(wx, wy)
+        self._extras[idx]["x"] = float(ix)
+        self._extras[idx]["y"] = float(iy)
+        self._render()
+        self.extra_origin_changed.emit(idx, float(ix), float(iy))
+
+    def _update_extra_angle_from_widget(self, idx: int, wx: int, wy: int):
+        if not (0 <= idx < len(self._extras)):
+            return
+        c = self._extra_widget_pos(idx)
+        if c is None:
+            return
+        import math as _m
+        a = _m.degrees(_m.atan2(wy - c[1], wx - c[0]))
+        self._extras[idx]["angle"] = a % 360.0
+        self._render()
+        self.extra_origin_angle_changed.emit(idx, a % 360.0)
 
     # ── Origin helpers (toạ độ widget của tâm + 2 đầu trục) ──────
     AXIS_LEN  = 32
@@ -799,6 +902,64 @@ class InteractiveImageLabel(QLabel):
                            f"O ({self._origin_xy[0]:.1f},{self._origin_xy[1]:.1f})  "
                            f"{self._origin_angle:+.1f}deg")
 
+        # Extra origins — vẽ từng marker (tất cả luôn hiển thị + kéo được)
+        for ei, ex in enumerate(self._extras):
+            eps = self._extra_axis_endpoints(ei)
+            if eps is None:
+                continue
+            (ecx, ecy), x_end, y_end = eps
+            erot = self._extra_rot_pos(ei)
+            is_hi = (ei == self._extras_highlight_idx)
+            import math as _m2
+            a = _m2.radians(float(ex.get("angle", 0.0)))
+            ah = 6.0
+
+            # X axis (đỏ; sáng hơn khi highlight)
+            col_ex = QColor(255, 100, 100) if is_hi else QColor(220, 60, 60)
+            p.setPen(QPen(col_ex, 2 if is_hi else 1, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(ecx, ecy, x_end[0], x_end[1])
+            ax1 = (int(x_end[0] - ah * _m2.cos(a - _m2.radians(25))),
+                    int(x_end[1] - ah * _m2.sin(a - _m2.radians(25))))
+            ax2 = (int(x_end[0] - ah * _m2.cos(a + _m2.radians(25))),
+                    int(x_end[1] - ah * _m2.sin(a + _m2.radians(25))))
+            p.drawLine(x_end[0], x_end[1], ax1[0], ax1[1])
+            p.drawLine(x_end[0], x_end[1], ax2[0], ax2[1])
+            p.setPen(QPen(col_ex))
+            p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+            p.drawText(x_end[0] + 4, x_end[1] + 4, "X")
+
+            # Y axis (xanh lá)
+            col_ey = QColor(120, 230, 120) if is_hi else QColor(70, 180, 80)
+            p.setPen(QPen(col_ey, 2 if is_hi else 1, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(ecx, ecy, y_end[0], y_end[1])
+            b = a + _m2.radians(90)
+            ay1 = (int(y_end[0] - ah * _m2.cos(b - _m2.radians(25))),
+                    int(y_end[1] - ah * _m2.sin(b - _m2.radians(25))))
+            ay2 = (int(y_end[0] - ah * _m2.cos(b + _m2.radians(25))),
+                    int(y_end[1] - ah * _m2.sin(b + _m2.radians(25))))
+            p.drawLine(y_end[0], y_end[1], ay1[0], ay1[1])
+            p.drawLine(y_end[0], y_end[1], ay2[0], ay2[1])
+            p.setPen(QPen(col_ey))
+            p.drawText(y_end[0] + 4, y_end[1] + 4, "Y")
+
+            # Rotate handle (vàng — to hơn khi highlight)
+            if erot is not None:
+                rh_col = QColor(255, 215, 0)
+                p.setPen(QPen(rh_col, 2))
+                p.setBrush(QBrush(QColor(255, 215, 0, 80 if not is_hi else 160)))
+                rr = 6 if is_hi else 4
+                p.drawEllipse(erot[0] - rr, erot[1] - rr, rr * 2, rr * 2)
+
+            # Label "Name (x, y) +deg"
+            nm = str(ex.get("name", f"Ref {ei+1}"))
+            label_col = QColor(0, 212, 255) if is_hi else QColor(100, 180, 220)
+            p.setPen(QPen(label_col))
+            p.setFont(QFont("Courier New", 9, QFont.Bold if is_hi else QFont.Normal))
+            p.drawText(ecx + 14, ecy - 10,
+                       f"{nm} ({float(ex.get('x', 0)):.1f},"
+                       f"{float(ex.get('y', 0)):.1f})  "
+                       f"{float(ex.get('angle', 0)):+.1f}deg")
+
         # Pixel pick marker
         if self._pick_pos and self.mode == "pick":
             px2, py2 = self._img_to_widget(*self._pick_pos)
@@ -824,7 +985,7 @@ class InteractiveImageLabel(QLabel):
                 self._render()
                 self.pixel_picked.emit(ix, iy)
         elif self.mode in ("roi", "template"):
-            # Ưu tiên: rotate handle → center handle → kéo bình thường
+            # Ưu tiên: main origin rot/center → extras rot/center → ROI
             if self._show_origin and self._hit_origin_rot(pos.x(), pos.y()):
                 self._dragging_origin_rot = True
                 self._update_origin_angle_from_widget(pos.x(), pos.y())
@@ -832,6 +993,17 @@ class InteractiveImageLabel(QLabel):
             if self._show_origin and self._hit_origin_center(pos.x(), pos.y()):
                 self._dragging_origin = True
                 self._update_origin_from_widget(pos.x(), pos.y())
+                return
+            # Extra origins (multi refs)
+            ehit = self._hit_extra_rot(pos.x(), pos.y())
+            if ehit >= 0:
+                self._dragging_extra_rot_idx = ehit
+                self._update_extra_angle_from_widget(ehit, pos.x(), pos.y())
+                return
+            ehit = self._hit_extra_center(pos.x(), pos.y())
+            if ehit >= 0:
+                self._dragging_extra_center_idx = ehit
+                self._update_extra_pos_from_widget(ehit, pos.x(), pos.y())
                 return
             if event.button() == Qt.RightButton and self._shape == "polygon":
                 # Right-click: huỷ polygon đang vẽ
@@ -921,6 +1093,14 @@ class InteractiveImageLabel(QLabel):
         if self._dragging_origin:
             self._update_origin_from_widget(pos.x(), pos.y())
             return
+        if self._dragging_extra_rot_idx >= 0:
+            self._update_extra_angle_from_widget(
+                self._dragging_extra_rot_idx, pos.x(), pos.y())
+            return
+        if self._dragging_extra_center_idx >= 0:
+            self._update_extra_pos_from_widget(
+                self._dragging_extra_center_idx, pos.x(), pos.y())
+            return
         if self._edit_action:
             self._apply_edit(pos)
             return
@@ -941,6 +1121,12 @@ class InteractiveImageLabel(QLabel):
             return
         if self._dragging_origin:
             self._dragging_origin = False
+            return
+        if self._dragging_extra_rot_idx >= 0:
+            self._dragging_extra_rot_idx = -1
+            return
+        if self._dragging_extra_center_idx >= 0:
+            self._dragging_extra_center_idx = -1
             return
         if self._edit_action:
             # Kết thúc move/resize — phát signal cho dialog cha cập nhật ROI

@@ -886,11 +886,10 @@ def draw_patmax_results(image: np.ndarray,
         ox_i = int(round(ox)); oy_i = int(round(oy))
 
         if show_xy:
-            # Marker origin: v\u00f2ng (theo score) + X v\u00e0ng \u0111\u00e8 l\u00ean + cyan dot t\u00e2m
+            # Marker origin: ch\u1ec9 X v\u00e0ng (cross) + tr\u1ee5c XY, kh\u00f4ng v\u00f2ng
             r_o  = _t(11, s)
             r_d  = _t(3, s)
             arm  = _t(9, s)
-            cv2.circle(vis, (ox_i, oy_i), r_o, col, _t(2, s), cv2.LINE_AA)
             cv2.line(vis, (ox_i - arm, oy_i - arm), (ox_i + arm, oy_i + arm),
                      COL_OMARK, _t(2, s), cv2.LINE_AA)
             cv2.line(vis, (ox_i - arm, oy_i + arm), (ox_i + arm, oy_i - arm),
@@ -940,8 +939,7 @@ def draw_patmax_results(image: np.ndarray,
                 exf = float(r.x) + sc * (edx * ca - edy * sa)
                 eyf = float(r.y) + sc * (edx * sa + edy * ca)
                 ex_i = int(round(exf)); ey_i = int(round(eyf))
-                # Marker: v\u00f2ng + X v\u00e0ng + cyan dot t\u00e2m (gi\u1ed1ng origin)
-                cv2.circle(vis, (ex_i, ey_i), r_o, col, _t(2, s), cv2.LINE_AA)
+                # Marker: ch\u1ec9 X v\u00e0ng + tr\u1ee5c XY (kh\u00f4ng v\u00f2ng, kh\u00f4ng dot)
                 cv2.line(vis, (ex_i - arm, ey_i - arm), (ex_i + arm, ey_i + arm),
                          COL_OMARK, _t(2, s), cv2.LINE_AA)
                 cv2.line(vis, (ex_i - arm, ey_i + arm), (ex_i + arm, ey_i - arm),
