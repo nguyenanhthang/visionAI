@@ -12,20 +12,147 @@ Settings persist qua QSettings, lưu cùng config app.
 from __future__ import annotations
 
 import json
-from typing import Optional
+from typing import Optional, List, Callable
 
-from PySide6.QtCore import Qt, QSettings, Signal
+from PySide6.QtCore import Qt, QSettings, Signal, QStringListModel
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel,
     QLineEdit, QComboBox, QSpinBox, QPushButton, QCheckBox,
     QPlainTextEdit, QMessageBox, QWidget, QFrame, QSizePolicy,
+    QScrollArea, QCompleter,
 )
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QTextCursor, QKeyEvent
 
 from core.sfc import (
     SfcManager, ScannerConfig, ApiGetConfig, ApiPostConfig,
     list_serial_ports,
 )
+
+
+# ── Body-template editor with {placeholder} autocomplete ──────────
+class _TemplateEdit(QPlainTextEdit):
+    """QPlainTextEdit có autocomplete cho placeholder `{...}`.
+
+    - Gõ `{` → popup gợi ý builtins (SN, api_get.value) + tool_id của mọi
+      node hiện có trong graph.
+    - Sau `{<tool>.` → popup gợi ý các output port của tool đó.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._provider: Optional[Callable[[str], List[str]]] = None
+        self._completer = QCompleter([], self)
+        self._completer.setWidget(self)
+        self._completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.activated.connect(self._insert_completion)
+        self._model = QStringListModel([], self._completer)
+        self._completer.setModel(self._model)
+
+    def set_provider(self, fn: Callable[[str], List[str]]) -> None:
+        """fn(prefix) -> list of suggestions theo context hiện tại."""
+        self._provider = fn
+
+    # ── context helpers ───────────────────────────────────────
+    def _ref_context(self):
+        """Return (token_before_cursor, has_dot) nếu cursor đang trong
+        ``{...}``; else None."""
+        c = self.textCursor()
+        pos = c.position()
+        text = self.toPlainText()
+        # Tìm `{` gần nhất phía trước cursor, không bị `}` chen vào
+        open_idx = text.rfind("{", 0, pos)
+        close_idx = text.rfind("}", 0, pos)
+        if open_idx == -1 or open_idx < close_idx:
+            return None
+        # Nếu có dấu '}' hoặc xuống dòng giữa { và cursor → không phải ref
+        between = text[open_idx + 1:pos]
+        if "}" in between or "\n" in between:
+            return None
+        return between
+
+    def _current_prefix(self):
+        """Phần đang gõ sau `{` hoặc sau `.`. Trả ('', '') nếu không ở ref."""
+        token = self._ref_context()
+        if token is None:
+            return None
+        if "." in token:
+            head, _, tail = token.rpartition(".")
+            return ("port", head, tail)
+        return ("name", "", token)
+
+    # ── popup ─────────────────────────────────────────────────
+    def _trigger_popup(self):
+        ctx = self._current_prefix()
+        if ctx is None or self._provider is None:
+            self._completer.popup().hide()
+            return
+        kind, head, prefix = ctx
+        # Provider trả full list theo kind (head dùng cho kind="port")
+        if kind == "port":
+            items = self._provider(f"@port:{head}")
+        else:
+            items = self._provider("@name:")
+        if not items:
+            self._completer.popup().hide()
+            return
+        self._model.setStringList(items)
+        self._completer.setCompletionPrefix(prefix)
+        # Hiển thị popup gần cursor
+        rect = self.cursorRect()
+        rect.setWidth(self._completer.popup().sizeHintForColumn(0)
+                      + self._completer.popup().verticalScrollBar().sizeHint().width()
+                      + 20)
+        self._completer.complete(rect)
+
+    def _insert_completion(self, completion: str):
+        ctx = self._current_prefix()
+        if ctx is None:
+            return
+        kind, head, prefix = ctx
+        c = self.textCursor()
+        # Xoá phần prefix đang gõ rồi chèn completion
+        for _ in range(len(prefix)):
+            c.deletePreviousChar()
+        c.insertText(completion)
+        # Sau khi chọn tool name → gợi ý chèn dấu '.' để tiếp port
+        if kind == "name":
+            c.insertText(".")
+            self.setTextCursor(c)
+            # Trigger popup port ngay (giờ context có dấu '.')
+            self._trigger_popup()
+        else:
+            # Chọn xong port → đóng bằng '}'
+            c.insertText("}")
+            self.setTextCursor(c)
+            self._completer.popup().hide()
+
+    # ── events ────────────────────────────────────────────────
+    def keyPressEvent(self, e: QKeyEvent):
+        popup = self._completer.popup()
+        if popup.isVisible():
+            # Delegate navigation/accept tới popup; activated → _insert_completion.
+            if e.key() in (Qt.Key_Enter, Qt.Key_Return, Qt.Key_Escape,
+                            Qt.Key_Tab, Qt.Key_Backtab):
+                e.ignore()
+                return
+        super().keyPressEvent(e)
+        # Sau khi insert/move → re-check context
+        ctx = self._current_prefix()
+        if ctx is None:
+            popup.hide()
+            return
+        # Trigger popup khi gõ ký tự liên quan hoặc khi cursor di chuyển trong ref
+        text = e.text()
+        if text in ("{", "."):
+            self._trigger_popup()
+        elif text and (text.isalnum() or text == "_"):
+            self._trigger_popup()
+        elif not text:
+            # Arrow / Home / End → refresh nếu vẫn trong ref
+            self._trigger_popup()
+        else:
+            popup.hide()
 
 
 class SfcDialog(QDialog):
@@ -37,7 +164,17 @@ class SfcDialog(QDialog):
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("SFC / MES Integration")
-        self.resize(820, 880)
+        # Cho window có nút minimize/maximize + tự maximize khi mở.
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.CustomizeWindowHint
+            | Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        self.resize(1024, 900)
         self._mgr = manager
         self._graph = graph
         if graph is not None:
@@ -46,17 +183,36 @@ class SfcDialog(QDialog):
         self._load_settings()
         self._refresh_ports()
         self._refresh_node_picker()
+        self._wire_body_autocomplete()
+
+    def showEvent(self, event):
+        """Tự maximize lần đầu mở để không bị cắt nội dung trên màn nhỏ."""
+        super().showEvent(event)
+        if not getattr(self, "_did_first_maximize", False):
+            self._did_first_maximize = True
+            self.setWindowState(self.windowState() | Qt.WindowMaximized)
 
     def set_graph(self, graph) -> None:
         self._graph = graph
         self._mgr.set_graph(graph)
         self._refresh_node_picker()
+        # Provider closure capture self._graph qua self → tự cập nhật, nhưng
+        # rewire để đảm bảo editor lấy bản mới.
+        self._wire_body_autocomplete()
 
     # ════════════════════════════════════════════════════════════════
     #  UI build
     # ════════════════════════════════════════════════════════════════
     def _build_ui(self):
-        root = QVBoxLayout(self); root.setSpacing(8)
+        # Outer layout wraps a scroll area so all 3 sections luôn truy cập
+        # được trên màn hình nhỏ — vẫn cuộn được kể cả khi minimize.
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body_w = QWidget(); scroll.setWidget(body_w)
+        outer.addWidget(scroll)
+        root = QVBoxLayout(body_w); root.setSpacing(8)
+        root.setContentsMargins(10, 10, 10, 10)
 
         # ── 1. Scanner ────────────────────────────────────────────
         gb_scan = QGroupBox("1.  Hand Scanner  (Serial / COM)")
@@ -188,23 +344,19 @@ class SfcDialog(QDialog):
         hdr_body.addWidget(self.cb_port_pick); hdr_body.addWidget(self.btn_insert_ref)
         gp.addLayout(hdr_body, 5, 0, 1, 4)
 
-        self.txt_post_body = QPlainTextEdit()
+        self.txt_post_body = _TemplateEdit()
         self.txt_post_body.setFont(QFont("Courier New", 10))
-        self.txt_post_body.setMinimumHeight(180)
+        self.txt_post_body.setMinimumHeight(220)
         self.txt_post_body.setPlaceholderText(
             'Vd:\n'
             '{\n'
             '  "sn": "{SN}",\n'
-            '  "torque1": "{caliper1.width}",\n'
-            '  "result": "{judge.pass}",\n'
-            '  "stationName": "OPLEUATTACHMENT",\n'
-            '  "empNo": "E12345"\n'
+            '  "result": "{patmax.found}",\n'
+            '  "stationName": "OPLEUATTACHMENT"\n'
             '}\n\n'
-            "Placeholder hỗ trợ:\n"
-            "  {SN}                      — mã scan gần nhất\n"
-            "  {api_get.value}           — value extract từ API GET\n"
-            "  {<node_id>.<port>}        — output của node theo node_id\n"
-            "  {<tool_id>.<port>}        — output node đầu tiên có tool_id\n")
+            "Gõ `{` để xem gợi ý các tool đang có trong pipeline.\n"
+            "Sau khi chọn tool, gõ `.` (tự thêm) để xem các port output.\n"
+            "Tab / Enter để chấp nhận lựa chọn, Esc để đóng popup.")
         gp.addWidget(self.txt_post_body, 6, 0, 1, 4)
 
         self.btn_post_test = QPushButton("📤  Test POST")
@@ -260,6 +412,55 @@ class SfcDialog(QDialog):
                 self.cb_node_pick.addItem(label, nid)
         self.cb_node_pick.blockSignals(False)
         self._on_node_pick_changed()
+
+    def _wire_body_autocomplete(self):
+        """Cung cấp gợi ý cho editor body template — chạy lại mỗi lần
+        graph đổi (set_graph) để list tool/node luôn cập nhật."""
+        if not hasattr(self, "txt_post_body"):
+            return
+        self.txt_post_body.set_provider(self._completion_provider)
+
+    def _completion_provider(self, ctx: str) -> List[str]:
+        """Trả về list suggestion cho editor.
+
+        ctx:
+            "@name:"            → list tool name + builtin (gõ sau `{`).
+            "@port:<head>"      → list port của tool ứng với head (gõ sau `.`).
+        """
+        if ctx == "@name:":
+            names: List[str] = ["SN", "api_get.value", "api_get.text"]
+            seen = set()
+            if self._graph is not None:
+                # 1) Ưu tiên tool_id để user gõ ngắn (vd "patmax")
+                for n in self._graph.nodes.values():
+                    if n.tool_id not in seen:
+                        names.append(n.tool_id)
+                        seen.add(n.tool_id)
+                # 2) Thêm node_id cho trường hợp >1 node cùng tool_id
+                for nid in self._graph.nodes.keys():
+                    names.append(nid)
+            return sorted(set(names), key=lambda s: (s.startswith("api_get") or s == "SN", s))
+
+        if ctx.startswith("@port:"):
+            head = ctx[len("@port:"):]
+            ports = self._lookup_ports_for(head)
+            return sorted(ports)
+        return []
+
+    def _lookup_ports_for(self, head: str) -> List[str]:
+        """Tìm output port của tool theo head (node_id hoặc tool_id)."""
+        if self._graph is None:
+            return []
+        # Match node_id trước
+        n = self._graph.nodes.get(head)
+        if n is None:
+            for nn in self._graph.nodes.values():
+                if nn.tool_id == head:
+                    n = nn
+                    break
+        if n is None:
+            return []
+        return [p.name for p in n.tool.outputs]
 
     def _on_node_pick_changed(self):
         self.cb_port_pick.clear()

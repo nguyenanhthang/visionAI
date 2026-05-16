@@ -635,7 +635,7 @@ class MainWindow(QMainWindow):
             self._sfc_dialog.activateWindow()
             return
         self._sfc_dialog = SfcDialog(self._sfc_manager, self._graph, self)
-        self._sfc_dialog.show()
+        self._sfc_dialog.showMaximized()
 
     def _open_camera_dialog(self):
         from ui.camera_dialog import CameraSetupDialog
