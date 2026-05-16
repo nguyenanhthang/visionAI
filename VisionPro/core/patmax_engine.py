@@ -895,7 +895,6 @@ def draw_patmax_results(image: np.ndarray,
                      COL_OMARK, _t(2, s), cv2.LINE_AA)
             cv2.line(vis, (ox_i - arm, oy_i + arm), (ox_i + arm, oy_i - arm),
                      COL_OMARK, _t(2, s), cv2.LINE_AA)
-            cv2.circle(vis, (ox_i, oy_i), r_d, COL_CYAN, -1, cv2.LINE_AA)
 
             # \u2500\u2500 H\u1ec7 tr\u1ee5c XY t\u1ea1i origin, xoay theo r.angle \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
             axis_len = max(_t(40, s), int(min(r.width, r.height) * 0.40))
@@ -947,7 +946,6 @@ def draw_patmax_results(image: np.ndarray,
                          COL_OMARK, _t(2, s), cv2.LINE_AA)
                 cv2.line(vis, (ex_i - arm, ey_i + arm), (ex_i + arm, ey_i - arm),
                          COL_OMARK, _t(2, s), cv2.LINE_AA)
-                cv2.circle(vis, (ex_i, ey_i), r_d, COL_CYAN, -1, cv2.LINE_AA)
                 # H\u1ec7 tr\u1ee5c XY t\u1ea1i ref, xoay theo (r.angle + ref.angle)
                 total_ang = float(r.angle) + r_ang_off
                 rad_e = math.radians(-total_ang)

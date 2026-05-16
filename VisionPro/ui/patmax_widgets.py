@@ -172,11 +172,16 @@ class ResultTable(QTableWidget):
                             r.origin_x, r.origin_y, r.angle, r.scale, score_col)
             row += 1
 
-            # Mỗi extra ref → 1 row
+            # Mỗi extra ref → 1 row.  Bỏ qua ref trùng vị trí + angle với
+            # Origin (tránh row dup khi Ref 1 auto-add ở origin chính).
             for j, ref in enumerate(extras, start=1):
                 try:
                     ex, ey, eang = transform_ref_to_image(model, ref, r)
                 except Exception:
+                    continue
+                if (abs(ex - r.origin_x) < 0.5
+                        and abs(ey - r.origin_y) < 0.5
+                        and abs(eang - r.angle) < 0.1):
                     continue
                 nm = str(ref.get("name", f"Ref {j}"))
                 self.insertRow(row)
