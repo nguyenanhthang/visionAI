@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QLabel,
     QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QCheckBox,
     QPlainTextEdit, QMessageBox, QWidget, QFrame, QTableWidget,
-    QTableWidgetItem, QHeaderView, QScrollArea,
+    QTableWidgetItem, QHeaderView,
 )
 
 from core.plc import (
@@ -55,18 +55,7 @@ class PLCDialog(QDialog):
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("PLC Connection")
-        # Window controls: minimize/maximize/close + tự maximize lần đầu mở
-        # (giống SfcDialog) để không bị cắt nội dung trên màn nhỏ.
-        self.setWindowFlags(
-            Qt.Window
-            | Qt.CustomizeWindowHint
-            | Qt.WindowTitleHint
-            | Qt.WindowSystemMenuHint
-            | Qt.WindowMinimizeButtonHint
-            | Qt.WindowMaximizeButtonHint
-            | Qt.WindowCloseButtonHint
-        )
-        self.resize(900, 900)
+        self.resize(720, 820)
         self._mgr = manager
         self._graph = graph
         self._bridge = _ManagerBridge()
@@ -77,13 +66,6 @@ class PLCDialog(QDialog):
         self._load_settings()
         self._refresh_status()
 
-    def showEvent(self, event):
-        """Tự maximize lần đầu mở."""
-        super().showEvent(event)
-        if not getattr(self, "_did_first_maximize", False):
-            self._did_first_maximize = True
-            self.setWindowState(self.windowState() | Qt.WindowMaximized)
-
     def set_graph(self, graph) -> None:
         """Cập nhật reference đến FlowGraph hiện hành & refresh combo node."""
         self._graph = graph
@@ -91,16 +73,7 @@ class PLCDialog(QDialog):
 
     # ── UI ────────────────────────────────────────────────────────
     def _build_ui(self):
-        # Wrap nội dung trong QScrollArea — content nhiều section dài,
-        # đảm bảo cuộn được trên màn hình bất kỳ.
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        body_w = QWidget(); scroll.setWidget(body_w)
-        outer.addWidget(scroll)
-        root = QVBoxLayout(body_w)
-        root.setContentsMargins(10, 10, 10, 10)
+        root = QVBoxLayout(self)
         root.setSpacing(8)
 
         # — Connection group —
@@ -221,54 +194,6 @@ class PLCDialog(QDialog):
         hb_map.addStretch()
         gm.addLayout(hb_map)
         root.addWidget(gb_map)
-
-        # — SFC trigger sequence — kết nối PLC trigger ↔ SFC workflow —
-        gb_sfc = QGroupBox("SFC Trigger Sequence (PLC trigger → Scan → GET → Pipeline → POST)")
-        gs = QGridLayout(gb_sfc)
-
-        self.chk_sfc_seq_enabled = QCheckBox(
-            "Enable SFC sequence khi PLC trigger")
-        self.chk_sfc_seq_enabled.setToolTip(
-            "Bật: PLC fire trigger DM → tự động chạy Scan → API GET → "
-            "Pipeline → API POST.\n"
-            "Tắt: PLC trigger chỉ chạy Pipeline (behaviour cũ).")
-        gs.addWidget(self.chk_sfc_seq_enabled, 0, 0, 1, 4)
-
-        self.chk_sfc_step_scan = QCheckBox("• Bước 1: Scan barcode/QR (Scanner section của SFC)")
-        self.chk_sfc_step_scan.setChecked(True)
-        self.chk_sfc_step_scan.setToolTip(
-            "Bỏ tích nếu PLC trigger không cần scan (vd SN đã có sẵn từ camera/QR khác).")
-        gs.addWidget(self.chk_sfc_step_scan, 1, 0, 1, 4)
-
-        self.chk_sfc_step_get = QCheckBox("• Bước 2: API GET (check SN trên SFC)")
-        self.chk_sfc_step_get.setChecked(True)
-        self.chk_sfc_step_get.setToolTip(
-            "Gọi API GET với {SN} từ bước scan. Tắt nếu không cần lookup trước "
-            "khi chạy pipeline.")
-        gs.addWidget(self.chk_sfc_step_get, 2, 0, 1, 4)
-
-        self.chk_sfc_step_post = QCheckBox("• Bước 4: API POST (gửi kết quả sau pipeline)")
-        self.chk_sfc_step_post.setChecked(True)
-        self.chk_sfc_step_post.setToolTip(
-            "Sau khi pipeline run xong → tự động POST kết quả với body template "
-            "đã cấu hình. Tắt nếu chỉ muốn lưu local.")
-        gs.addWidget(self.chk_sfc_step_post, 3, 0, 1, 4)
-
-        self.chk_sfc_abort_on_fail = QCheckBox(
-            "Dừng sequence nếu Scan/GET fail (không chạy pipeline & POST)")
-        self.chk_sfc_abort_on_fail.setChecked(True)
-        self.chk_sfc_abort_on_fail.setToolTip(
-            "Bật: scan timeout / GET trả status ≠ expected → abort, không "
-            "chạy pipeline.\n"
-            "Tắt: vẫn chạy pipeline kể cả khi scan/GET fail.")
-        gs.addWidget(self.chk_sfc_abort_on_fail, 4, 0, 1, 4)
-
-        btn_open_sfc = QPushButton("⚙  Open SFC configuration…")
-        btn_open_sfc.setToolTip("Mở dialog cấu hình Scanner / API GET / API POST")
-        btn_open_sfc.clicked.connect(self._on_open_sfc_dialog)
-        gs.addWidget(btn_open_sfc, 5, 0, 1, 4)
-
-        root.addWidget(gb_sfc)
 
         # — Log —
         self.lbl_status = QLabel("● Disconnected")
@@ -561,27 +486,6 @@ class PLCDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Write failed", str(e))
 
-    # ── SFC integration ───────────────────────────────────────────
-    def _on_open_sfc_dialog(self):
-        """Yêu cầu MainWindow mở SfcDialog. Phát signal lên parent — parent
-        đã có _open_sfc_dialog wired ở menu Tools."""
-        parent = self.parent()
-        if parent is not None and hasattr(parent, "_open_sfc_dialog"):
-            parent._open_sfc_dialog()
-        else:
-            QMessageBox.information(self, "SFC",
-                "Mở Tools → SFC / MES Integration… từ main window để cấu hình.")
-
-    def get_sfc_sequence_settings(self) -> dict:
-        """Trả về settings SFC sequence cho MainWindow đọc khi PLC trigger fire."""
-        return {
-            "enabled":       self.chk_sfc_seq_enabled.isChecked(),
-            "step_scan":     self.chk_sfc_step_scan.isChecked(),
-            "step_get":      self.chk_sfc_step_get.isChecked(),
-            "step_post":     self.chk_sfc_step_post.isChecked(),
-            "abort_on_fail": self.chk_sfc_abort_on_fail.isChecked(),
-        }
-
     # ── Persistence ───────────────────────────────────────────────
     def _save_settings(self):
         s = QSettings()
@@ -606,13 +510,6 @@ class PLCDialog(QDialog):
         s.setValue("mappings", json.dumps([m.to_dict() for m in cfg.data_mappings]))
         s.setValue("fins_dest", cfg.fins_dest_node)
         s.setValue("fins_src",  cfg.fins_src_node)
-        # SFC sequence settings (lưu cùng group "plc")
-        seq = self.get_sfc_sequence_settings()
-        s.setValue("sfc_seq_enabled",     seq["enabled"])
-        s.setValue("sfc_seq_step_scan",   seq["step_scan"])
-        s.setValue("sfc_seq_step_get",    seq["step_get"])
-        s.setValue("sfc_seq_step_post",   seq["step_post"])
-        s.setValue("sfc_seq_abort_fail",  seq["abort_on_fail"])
         s.endGroup()
 
     def _load_settings(self):
@@ -644,20 +541,6 @@ class PLCDialog(QDialog):
                 fins_src_node=int(s.value("fins_src", 25)),
             )
             self._apply_config_to_ui(cfg)
-        except Exception:
-            pass
-        # SFC sequence settings
-        try:
-            self.chk_sfc_seq_enabled.setChecked(
-                s.value("sfc_seq_enabled", False, type=bool))
-            self.chk_sfc_step_scan.setChecked(
-                s.value("sfc_seq_step_scan", True, type=bool))
-            self.chk_sfc_step_get.setChecked(
-                s.value("sfc_seq_step_get", True, type=bool))
-            self.chk_sfc_step_post.setChecked(
-                s.value("sfc_seq_step_post", True, type=bool))
-            self.chk_sfc_abort_on_fail.setChecked(
-                s.value("sfc_seq_abort_fail", True, type=bool))
         except Exception:
             pass
         s.endGroup()

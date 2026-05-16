@@ -188,6 +188,55 @@ def proc_camera_acquire(inputs, params):
 #  CATEGORY: PATMAX / PATTERN FIND
 # ═══════════════════════════════════════════════════════════════════
 
+def _build_patmax_objects(results, model):
+    """Build list `objects` từ results.
+    Mỗi object: x/y = origin chính + ref{N}_x, ref{N}_y, ref{N}_angle cho
+    từng extra ref (đã transform theo angle/scale/scale của result).
+    Cũng có "refs": [{name, x, y, angle}, ...] để UI duyệt.
+    """
+    from core.patmax_engine import transform_ref_to_image
+    objs = []
+    extras = list(getattr(model, "extra_refs", []) or []) if model else []
+    for r in results:
+        obj = {"x": r.origin_x, "y": r.origin_y, "score": r.score,
+               "angle": r.angle, "scale": r.scale,
+               "center_x": r.x, "center_y": r.y,
+               "origin_x": r.origin_x, "origin_y": r.origin_y}
+        refs_data = []
+        for j, ref in enumerate(extras, start=1):
+            try:
+                ex, ey, eang = transform_ref_to_image(model, ref, r)
+            except Exception:
+                continue
+            nm = str(ref.get("name", f"Ref {j}"))
+            refs_data.append({"name": nm, "x": ex, "y": ey, "angle": eang})
+            obj[f"ref{j}_x"]     = ex
+            obj[f"ref{j}_y"]     = ey
+            obj[f"ref{j}_angle"] = eang
+        obj["refs"] = refs_data
+        objs.append(obj)
+    return objs
+
+
+def _apply_extra_terminals(out: dict, objects: list, params: dict):
+    """Apply extra output terminals từ params['_extra_terminals'].
+    term = {"object": int, "field": str, "name": str}
+    field có thể là field cơ bản (x, y, angle, score, scale, ...) hoặc
+    ref-aware (ref1_x, ref2_y, ...).
+    """
+    for term in (params.get("_extra_terminals") or []):
+        try:
+            obj_idx = int(term.get("object", 0))
+            field = str(term.get("field", "x"))
+            name = term.get("name") or f"{field}_{obj_idx}"
+            if 0 <= obj_idx < len(objects):
+                out[name] = objects[obj_idx].get(field, 0.0)
+            else:
+                out[name] = 0.0
+        except Exception:
+            continue
+
+
 def proc_patmax(inputs, params):
     """
     CogPatMaxPatternAlignTool — dùng PatMaxEngine.
@@ -213,10 +262,8 @@ def proc_patmax(inputs, params):
     show_bbox = bool(params.get("show_bbox", show_ref))
 
     if not use_multi and not model.is_valid():
-        clean = _bgr(img.copy())
         vis = _empty_vis(_bgr(img))
-        return {"image": clean, "_display_image": vis,
-                "found": False, "score": 0.0,
+        return {"image": vis, "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0, "num_found": 0}
 
     ref = models_list[0] if use_multi else model
@@ -264,41 +311,21 @@ def proc_patmax(inputs, params):
             coarse_downscale=ds, channels=chans,
         )
 
-    clean = _bgr(img.copy())
-    vis = draw_patmax_results(clean, results, model,
+    vis = draw_patmax_results(_bgr(img), results, model,
                                 show_xy=show_xy, show_bbox=show_bbox)
 
-    objects = [
-        {"x": r.origin_x, "y": r.origin_y, "score": r.score,
-         "angle": r.angle, "scale": r.scale,
-         "center_x": r.x, "center_y": r.y,
-         "origin_x": r.origin_x, "origin_y": r.origin_y}
-        for r in results
-    ]
+    objects = _build_patmax_objects(results, model)
     if results:
         r = results[0]
-        out = {"image": clean, "_display_image": vis,
-               "found": True, "score": r.score,
+        out = {"image": vis, "found": True, "score": r.score,
                "x": r.origin_x, "y": r.origin_y,
                "angle": r.angle, "scale": r.scale,
                "num_found": len(results), "objects": objects}
     else:
-        out = {"image": clean, "_display_image": vis,
-               "found": False, "score": 0.0,
+        out = {"image": vis, "found": False, "score": 0.0,
                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                "num_found": 0, "objects": []}
-    # Extra terminals: [{"object": int, "field": str, "name": str}, ...]
-    for term in (params.get("_extra_terminals") or []):
-        try:
-            obj_idx = int(term.get("object", 0))
-            field = str(term.get("field", "x"))
-            name = term.get("name") or f"{field}_{obj_idx}"
-            if 0 <= obj_idx < len(objects):
-                out[name] = objects[obj_idx].get(field, 0.0)
-            else:
-                out[name] = 0.0
-        except Exception:
-            continue
+    _apply_extra_terminals(out, objects, params)
     return out
 
 
@@ -330,9 +357,7 @@ def proc_patmax_align(inputs, params):
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
     if not _is_gray_image(img):
-        clean = _bgr(img)
-        return {"image": clean, "_display_image": clean,
-                "found": False, "score": 0.0,
+        return {"image": _bgr(img), "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
 
@@ -341,10 +366,8 @@ def proc_patmax_align(inputs, params):
     show_xy   = bool(params.get("show_xy",   show_ref))
     show_bbox = bool(params.get("show_bbox", show_ref))
     if not model.is_valid():
-        clean = _bgr(img.copy())
         vis = _empty_vis(_bgr(img))
-        return {"image": clean, "_display_image": vis,
-                "found": False, "score": 0.0,
+        return {"image": vis, "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                 "num_found": 0, "objects": []}
 
@@ -378,37 +401,20 @@ def proc_patmax_align(inputs, params):
         coarse_downscale=ds,
         build_score_map=False,   # production: skip heatmap (caller discards)
     )
-    clean = _bgr(img.copy())
-    vis = draw_patmax_results(clean, results, model,
+    vis = draw_patmax_results(_bgr(img), results, model,
                                 show_xy=show_xy, show_bbox=show_bbox)
-    objects = [
-        {"x": r.origin_x, "y": r.origin_y, "score": r.score,
-         "angle": r.angle, "scale": r.scale,
-         "center_x": r.x, "center_y": r.y,
-         "origin_x": r.origin_x, "origin_y": r.origin_y}
-        for r in results
-    ]
+    objects = _build_patmax_objects(results, model)
     if results:
         r = results[0]
-        out = {"image": clean, "_display_image": vis,
-               "found": True, "score": r.score,
+        out = {"image": vis, "found": True, "score": r.score,
                "x": r.origin_x, "y": r.origin_y,
                "angle": r.angle, "scale": r.scale,
                "num_found": len(results), "objects": objects}
     else:
-        out = {"image": clean, "_display_image": vis,
-               "found": False, "score": 0.0,
+        out = {"image": vis, "found": False, "score": 0.0,
                "x": 0.0, "y": 0.0, "angle": 0.0, "scale": 1.0,
                "num_found": 0, "objects": []}
-    for term in (params.get("_extra_terminals") or []):
-        try:
-            obj_idx = int(term.get("object", 0))
-            field = str(term.get("field", "x"))
-            name = term.get("name") or f"{field}_{obj_idx}"
-            out[name] = (objects[obj_idx].get(field, 0.0)
-                          if 0 <= obj_idx < len(objects) else 0.0)
-        except Exception:
-            continue
+    _apply_extra_terminals(out, objects, params)
     return out
 
 
@@ -428,11 +434,9 @@ def proc_patfind(inputs, params):
     show_xy   = bool(params.get("show_xy",   show_ref))
     show_bbox = bool(params.get("show_bbox", show_ref))
     if not model.is_valid():
-        clean = _bgr(img.copy())
         vis = _empty_vis(_bgr(img))
         print("[PatFind] No model — double-click node to train")
-        return {"image": clean, "_display_image": vis,
-                "found": False, "score": 0.0,
+        return {"image": vis, "found": False, "score": 0.0,
                 "x": 0.0, "y": 0.0, "num_found": 0}
 
     # PatFind: no rotation, no scale change
@@ -443,16 +447,13 @@ def proc_patfind(inputs, params):
         scale_low=1.0,  scale_high=1.0,  scale_step=0.1,
         num_results=params.get("num_results", model.num_results),
     )
-    clean = _bgr(img.copy())
-    vis = draw_patmax_results(clean, results, model,
+    vis = draw_patmax_results(_bgr(img), results, model,
                                 show_xy=show_xy, show_bbox=show_bbox)
     if results:
         r = results[0]
-        return {"image": clean, "_display_image": vis,
-                "found": True, "score": r.score,
+        return {"image": vis, "found": True, "score": r.score,
                 "x": r.x, "y": r.y, "num_found": len(results)}
-    return {"image": clean, "_display_image": vis,
-            "found": False, "score": 0.0,
+    return {"image": vis, "found": False, "score": 0.0,
             "x": 0.0, "y": 0.0, "num_found": 0}
 
 
@@ -1127,7 +1128,7 @@ def proc_crop(inputs, params):
     """
     img = inputs.get("image")
     if img is None:
-        return {"image": None, "_display_image": None, "roi_image": None,
+        return {"image": None, "roi_image": None,
                 "x": 0, "y": 0, "w": 0, "h": 0}
 
     ih, iw = img.shape[:2]
@@ -1184,22 +1185,18 @@ def proc_crop(inputs, params):
         params["crop_w"] = cw
         params["crop_h"] = ch
 
-    # Crop ảnh thực sự (clean — không có overlay) — cho downstream qua `roi_image`
+    # Crop ảnh thực sự — cho downstream qua port `roi_image`
     roi = img[y:y + ch, x:x + cw].copy()
 
-    # `image` output = ảnh GỐC pass-through (clean, không vẽ gì) —
-    #                  để downstream xử lý trên ảnh sạch.
-    # `display_image` output = ảnh GỐC + bounding box overlay —
-    #                          cho node panel hiển thị vị trí ROI.
-    clean = _bgr(img.copy())
-    disp = clean.copy()
-    s = _draw_scale(disp)
+    # `image` output = ẢNH GỐC + bounding box overlay (cho display)
+    vis = _bgr(img.copy())
+    s = _draw_scale(vis)
     col = (0, 255, 180) if tracked_ports else (0, 212, 255)
-    cv2.rectangle(disp, (x, y), (x + cw, y + ch), col, _t(2, s))
+    cv2.rectangle(vis, (x, y), (x + cw, y + ch), col, _t(2, s))
 
     print(f"[Crop] {mode_label} ({x},{y}) {cw}x{ch}")
 
-    return {"image": clean, "_display_image": disp, "roi_image": roi,
+    return {"image": vis, "roi_image": roi,
             "x": x, "y": y, "w": cw, "h": ch}
 
 
@@ -1876,9 +1873,9 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_image_convert, "CogImageConvertTool"),
 
   ToolDef("crop_roi","Crop ROI","Image Processing",
-    "Cắt vùng ROI — nhận x/y/w/h từ PatMax để tracking.\n"
-    "• image     = ảnh gốc clean (cho downstream xử lý, panel vẫn hiện bbox).\n"
-    "• roi_image = vùng đã cắt từ ảnh gốc (clean, không vướng overlay upstream).",
+    "Cắt vùng ROI — nhận x/y/w/h từ PatMax để tracking. "
+    "Output `image` = ảnh gốc + bbox overlay; `roi_image` = vùng đã cắt "
+    "(dùng cho downstream tool xử lý ROI).",
     "#2c3e50","✂",
     [PortDef("image","image"),
      PortDef("x","number",required=False,default=None),
