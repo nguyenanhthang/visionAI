@@ -782,10 +782,6 @@ class InteractiveImageLabel(QLabel):
                 p.drawLine(y_end[0], y_end[1], ay2[0], ay2[1])
                 p.setPen(QPen(col_y))
                 p.drawText(y_end[0] + 4, y_end[1] + 4, "Y")
-                # Tâm
-                p.setPen(QPen(QColor(0, 212, 255), 1))
-                p.setBrush(QBrush(QColor(0, 212, 255)))
-                p.drawEllipse(cx - 3, cy - 3, 6, 6)
                 # Rotate handle
                 if rot is not None:
                     rh_col = QColor(255, 215, 0)
