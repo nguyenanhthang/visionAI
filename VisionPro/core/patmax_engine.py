@@ -989,6 +989,27 @@ def draw_patmax_results(image: np.ndarray,
 # ═══════════════════════════════════════════════════════════════
 #  SAVE / LOAD
 # ═══════════════════════════════════════════════════════════════
+
+def transform_ref_to_image(model: PatMaxModel, ref: dict,
+                            result: PatMaxResult) -> Tuple[float, float, float]:
+    """Transform 1 extra reference point từ pattern-local sang image coords
+    sau khi pattern đã match. Trả (x_image, y_image, angle_total).
+    angle_total = result.angle + ref.angle (degrees).
+    """
+    pw = float(model.pattern_w); ph = float(model.pattern_h)
+    rx_local = float(ref.get("x", 0.0))
+    ry_local = float(ref.get("y", 0.0))
+    r_ang_off = float(ref.get("angle", 0.0))
+    edx = rx_local - pw / 2.0
+    edy = ry_local - ph / 2.0
+    rad = math.radians(-float(result.angle))
+    ca = math.cos(rad); sa = math.sin(rad)
+    sc = float(result.scale) if result.scale else 1.0
+    ex = float(result.x) + sc * (edx * ca - edy * sa)
+    ey = float(result.y) + sc * (edx * sa + edy * ca)
+    return ex, ey, float(result.angle) + r_ang_off
+
+
 def save_model(model: PatMaxModel, path: str):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     base = os.path.splitext(path)[0]

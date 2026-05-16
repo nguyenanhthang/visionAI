@@ -1400,7 +1400,7 @@ class PatMaxDialog(QDialog):
             # Save for display
             self._result_vis = result_vis
 
-            self._result_table.populate(results)
+            self._result_table.populate(results, self._model)
 
             n = len(results)
             if n > 0:
@@ -1495,15 +1495,33 @@ class PatMaxDialog(QDialog):
             QTimer.singleShot(500, self._search_progress.hide)
             self._btn_search.setEnabled(True)
 
-    def _on_result_selected(self, row: int):
-        if row < 0 or row >= len(self._results):
+    def _on_result_selected(self, res_idx: int, ref_idx: int):
+        """Signal mới: (result_idx, ref_idx). ref_idx = -1 → origin chính,
+        >= 0 → extras[ref_idx]."""
+        if res_idx < 0 or res_idx >= len(self._results):
             return
-        # Highlight selected result
-        r = self._results[row]
+        r = self._results[res_idx]
+        if ref_idx < 0:
+            # Origin chính
+            self._img_status.setText(
+                f"Result #{res_idx+1} · Origin:  score={r.score:.4f}  "
+                f"x={r.origin_x:.2f}  y={r.origin_y:.2f}  "
+                f"angle={r.angle:+.2f}°  scale={r.scale:.3f}")
+            return
+        # Extra ref
+        extras = list(getattr(self._model, "extra_refs", []) or [])
+        if ref_idx >= len(extras):
+            return
+        try:
+            from core.patmax_engine import transform_ref_to_image
+            ex, ey, eang = transform_ref_to_image(
+                self._model, extras[ref_idx], r)
+        except Exception:
+            return
+        nm = str(extras[ref_idx].get("name", f"Ref {ref_idx+1}"))
         self._img_status.setText(
-            f"Result #{row+1}:  score={r.score:.4f}  "
-            f"x={r.x:.2f}  y={r.y:.2f}  "
-            f"angle={r.angle:+.2f}°  scale={r.scale:.3f}")
+            f"Result #{res_idx+1} · {nm}:  "
+            f"x={ex:.2f}  y={ey:.2f}  angle={eang:+.2f}°")
 
     def _set_view(self, view: str):
         self._current_view = view
