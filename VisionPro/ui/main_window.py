@@ -454,12 +454,22 @@ class MainWindow(QMainWindow):
         if getattr(self, "_sfc_pending_post", False):
             self._sfc_pending_post = False
             self._sfc_manager.set_graph(self._graph)
+            p = self._sfc_manager.api_post_cfg
+            # Resolve body để log
+            body_resolved, missing = self._sfc_manager.resolve_placeholders(
+                p.body_template)
+            self._sfc_log(
+                f"[SFC] Step 4: POST {p.url}"
+                + (f"\n        ⚠ Placeholder không resolve: {missing}" if missing else "")
+                + f"\n        body = {body_resolved[:300]}")
             text, ok, err = self._sfc_manager.api_post()
             if err:
-                self.statusBar().showMessage(f"[SFC] POST error: {err}", 6000)
+                self._sfc_log(f"[SFC] Step 4 ERROR: {err}")
             else:
-                self.statusBar().showMessage(
-                    f"[SFC] POST {'PASS' if ok else 'FAIL'}: {text[:80]}", 6000)
+                preview = text[:200].replace("\n", " ")
+                self._sfc_log(
+                    f"[SFC] Step 4 {'OK' if ok else 'FAIL'}: {preview!r}")
+            self._sfc_log("──────── SFC SEQUENCE END ────────")
 
     def _on_run_error(self, msg: str):
         self._finalize_run()
@@ -670,37 +680,79 @@ class MainWindow(QMainWindow):
         seq = self._sfc_sequence_settings()
         if not seq.get("enabled"):
             self._sfc_pending_post = False
+            self._sfc_log("[SFC] Sequence disabled — running pipeline only")
             self._start_run()
             return
 
         abort_on_fail = bool(seq.get("abort_on_fail", True))
+        self._sfc_log("──────── SFC SEQUENCE START ────────")
 
         # ── Step 1: Scan ────────────────────────────────────────
         if seq.get("step_scan", True):
             self._sfc_manager.set_graph(self._graph)
+            cfg = self._sfc_manager.scanner
+            self._sfc_log(
+                f"[SFC] Step 1: Scan {cfg.port}@{cfg.baudrate} "
+                f"trigger={cfg.trigger_hex!r} timeout={cfg.timeout_ms}ms")
             sn, err = self._sfc_manager.scan_once()
             if err or not sn:
-                msg = f"[SFC] Scan fail: {err or 'no data'}"
-                self.statusBar().showMessage(msg, 5000)
+                self._sfc_log(f"[SFC] Step 1 FAIL: {err or 'no data (timeout)'}")
                 if abort_on_fail:
+                    self._sfc_log("[SFC] ABORT — abort_on_fail=True")
                     return
             else:
-                self.statusBar().showMessage(f"[SFC] Scanned: {sn}", 3000)
+                self._sfc_log(f"[SFC] Step 1 OK: SN={sn!r}")
+        else:
+            self._sfc_log("[SFC] Step 1 skipped (disabled)")
 
         # ── Step 2: API GET ─────────────────────────────────────
         if seq.get("step_get", True) and self._sfc_manager.api_get_cfg.enabled:
-            _text, ok, err = self._sfc_manager.api_get()
-            if err or not ok:
-                msg = f"[SFC] GET fail: {err or 'response mismatch'}"
-                self.statusBar().showMessage(msg, 5000)
+            g = self._sfc_manager.api_get_cfg
+            resolved_url, _miss = self._sfc_manager.resolve_placeholders(
+                g.url_template, extra={"SN": self._sfc_manager.last_sn})
+            self._sfc_log(
+                f"[SFC] Step 2: GET {resolved_url}\n"
+                f"        expected_status={g.expected_status}"
+                + (f", must_contain={g.expected_text!r}" if g.expected_text else ""))
+            text, ok, err = self._sfc_manager.api_get()
+            if err:
+                self._sfc_log(f"[SFC] Step 2 ERROR: {err}")
                 if abort_on_fail:
+                    self._sfc_log("[SFC] ABORT — abort_on_fail=True")
                     return
+            elif not ok:
+                self._sfc_log(
+                    f"[SFC] Step 2 FAIL: response không khớp\n"
+                    f"        response.text = {text[:200]!r}")
+                if abort_on_fail:
+                    self._sfc_log("[SFC] ABORT — abort_on_fail=True")
+                    return
+            else:
+                preview = text[:200].replace("\n", " ")
+                self._sfc_log(f"[SFC] Step 2 OK: {preview!r}")
+        else:
+            self._sfc_log("[SFC] Step 2 skipped (disabled hoặc Enable API GET=off)")
 
         # ── Step 3: Pipeline run (Step 4 POST chạy ở _on_run_done) ──
-        # Nhớ flag để _on_run_done biết có cần POST hay không.
         self._sfc_pending_post = bool(
             seq.get("step_post", True) and self._sfc_manager.api_post_cfg.enabled)
+        self._sfc_log(
+            f"[SFC] Step 3: Pipeline run "
+            f"(POST sau khi xong = {self._sfc_pending_post})")
         self._start_run()
+
+    def _sfc_log(self, msg: str) -> None:
+        """Log SFC sequence event → console + status bar + PLC dialog log
+        (nếu đang mở). Centralize ở 1 chỗ để dễ trace."""
+        print(msg)
+        # Status bar — chỉ dòng tóm tắt (cắt nếu dài)
+        self.statusBar().showMessage(msg.split("\n", 1)[0][:200], 5000)
+        # PLC dialog log — append đầy đủ
+        if self._plc_dialog is not None and hasattr(self._plc_dialog, "_log"):
+            try:
+                self._plc_dialog._log(msg)
+            except Exception:
+                pass
 
     def _sfc_sequence_settings(self) -> dict:
         """Đọc settings sequence từ PLC dialog (nếu mở) hoặc QSettings."""
