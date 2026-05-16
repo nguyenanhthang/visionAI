@@ -1453,7 +1453,20 @@ class PatMaxDialog(QDialog):
             node = self._node
             node.outputs["found"]     = n > 0
             node.outputs["num_found"] = n
-            node.outputs["image"]     = result_vis
+            # `image` = ảnh nguồn clean (cho downstream xử lý);
+            # `_display_image` = ảnh + overlay (private key, cho panel hiển thị
+            # — không lộ ra port).
+            if self._current_image is not None:
+                _src = self._current_image
+                if len(_src.shape) == 2:
+                    import cv2 as _cv2
+                    _src = _cv2.cvtColor(_src, _cv2.COLOR_GRAY2BGR)
+                else:
+                    _src = _src.copy()
+                node.outputs["image"] = _src
+            else:
+                node.outputs["image"] = result_vis
+            node.outputs["_display_image"] = result_vis
             if n > 0:
                 best = results[0]
                 # x, y = toạ độ điểm tham chiếu (yellow) — chính là output chính
