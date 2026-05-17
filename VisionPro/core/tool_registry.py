@@ -728,16 +728,6 @@ def proc_blob(inputs, params):
             t |= cv2.THRESH_OTSU; thresh_val = 0
         _, mask = cv2.threshold(gray, thresh_val, 255, t)
 
-    # Morphology cleanup
-    k = params.get("morph_open", 0)
-    if k > 0:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(k,k))
-        mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    k2 = params.get("morph_close", 0)
-    if k2 > 0:
-        kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(k2,k2))
-        mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel2)
-
     contours, hier = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     scale    = params.get("pixel_to_mm2", 1.0)
     min_a    = params.get("min_area", 50.0)
@@ -749,7 +739,12 @@ def proc_blob(inputs, params):
 
     vis = _bgr(img.copy())
     s = _draw_scale(vis)
-    show_labels = bool(params.get("show_labels", False))
+    show_contours = bool(params.get("show_contours", True))
+    show_bbox     = bool(params.get("show_bbox", True))
+    show_centroid = bool(params.get("show_centroid", True))
+    show_labels   = bool(params.get("show_labels", False))
+    label_dx      = int(params.get("label_dx", 6))
+    label_dy      = int(params.get("label_dy", -6))
     blobs = []; centroids = []; total_area = 0.0
 
     for cnt in contours:
@@ -789,11 +784,18 @@ def proc_blob(inputs, params):
 
         # Draw
         box = cv2.boxPoints(rect).astype(np.int32)
-        cv2.drawContours(vis,[cnt],-1,(0,200,255),_t(2,s))
-        cv2.drawContours(vis,[box],-1,(255,180,0),_t(1,s))
-        cv2.circle(vis,(int(cx),int(cy)),_t(4,s),(0,255,80),-1)
+        if show_contours:
+            cv2.drawContours(vis,[cnt],-1,(0,200,255),_t(2,s))
+        if show_bbox:
+            cv2.drawContours(vis,[box],-1,(255,180,0),_t(1,s))
+        if show_centroid:
+            cv2.circle(vis,(int(cx),int(cy)),_t(4,s),(0,255,80),-1)
         if show_labels:
-            cv2.putText(vis,f"{area_mm:.1f}mm²",(int(cx)+int(6*s),int(cy)-int(6*s)),
+            # mm² ký tự Unicode → Hershey font không render được (ra "??").
+            # Dùng "mm2" ASCII.
+            tx = int(cx) + int(label_dx * s)
+            ty = int(cy) + int(label_dy * s)
+            cv2.putText(vis,f"{area_mm:.1f} mm2",(tx, ty),
                         cv2.FONT_HERSHEY_SIMPLEX,_fs(0.45,s),(0,200,255),_t(1,s))
 
     min_cnt = params.get("min_count", 1)
@@ -1878,16 +1880,16 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   # ── BLOB ────────────────────────────────────────────────────────
   ToolDef("blob","Blob Analysis","Blob Analysis",
-    "Phân tích vùng toàn diện: area, circularity, elongation — CogBlobTool",
+    "Phân tích vùng: area, circularity, elongation, bounding box — CogBlobTool. "
+    "Nối node Morphology phía trước nếu cần lọc nhiễu/vá lỗ.",
     "#2d6a4f","🔵",
     [PortDef("image","image"),PortDef("mask","image",required=False)],
     [PortDef("image","image"),PortDef("count","number"),PortDef("pass","bool"),
      PortDef("total_area","number"),PortDef("blobs","any"),PortDef("centroids","any")],
-    [P("auto_threshold","Auto Threshold (Otsu)","bool",True),
+    [P("auto_threshold","Auto Threshold (Otsu)","bool",True,
+       tooltip="Chỉ áp dụng khi KHÔNG có port mask kết nối. Có mask → bỏ qua."),
      P("threshold","Manual Threshold","int",128,0,255),
      P("invert","Invert Mask","bool",False),
-     P("morph_open","Morph Open (px)","int",0,0,50,tooltip="Xóa nhiễu nhỏ"),
-     P("morph_close","Morph Close (px)","int",0,0,50,tooltip="Lấp lỗ nhỏ"),
      P("min_area","Min Area (px²)","float",50,0,1e7),
      P("max_area","Max Area (px²)","float",1e7,0,1e9),
      P("min_circularity","Min Circularity","float",0.0,0,1,step=0.05,
@@ -1899,8 +1901,18 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("pixel_to_mm2","px²→mm²","float",1.0,0.0001,1e6,step=0.0001),
      P("min_count","Min Count","int",1,0,10000),
      P("max_count","Max Count","int",1000,0,10000),
-     P("show_labels","Display: show labels on image","bool",False,
-       tooltip="Bật để vẽ label area (mm²) cạnh từng blob lên ảnh output. Mặc định tắt — vẫn được log ra console.")],
+     P("show_contours","Show Contours","bool",True,
+       tooltip="Vẽ contour vàng quanh từng blob."),
+     P("show_bbox","Show BBox","bool",True,
+       tooltip="Vẽ rotated bounding box cam."),
+     P("show_centroid","Show Centroid","bool",True,
+       tooltip="Chấm xanh tại tâm blob."),
+     P("show_labels","Show Labels","bool",False,
+       tooltip="Hiển thị label area (mm2) cạnh từng blob."),
+     P("label_dx","Label Offset X","int",6,-300,300,use_slider=True,
+       tooltip="Dịch label theo trục X (px, đã scale theo ảnh)."),
+     P("label_dy","Label Offset Y","int",-6,-300,300,use_slider=True,
+       tooltip="Dịch label theo trục Y (px). Âm = lên trên, dương = xuống dưới.")],
     proc_blob, "CogBlobTool"),
 
   # ── EDGE / LINE / CIRCLE ────────────────────────────────────────
