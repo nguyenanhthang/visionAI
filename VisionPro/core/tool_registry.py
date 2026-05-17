@@ -954,23 +954,6 @@ def proc_blob(inputs, params):
     is_pass = min_cnt <= len(blobs) <= max_cnt
     print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² {'PASS' if is_pass else 'FAIL'}")
 
-    # Không detect được → in area lớn nhất tìm thấy trong mask (chưa qua
-    # filter) bằng chữ đỏ giữa ảnh. Giúp biết blob to nhất bao nhiêu px²
-    # để chỉnh min_area / max_area cho đúng.
-    if len(blobs) == 0:
-        H, W = vis.shape[:2]
-        if contours:
-            max_found = max(cv2.contourArea(c) for c in contours)
-            text = f"max area: {max_found:.0f} px2"
-        else:
-            text = "max area: 0 px2 (mask empty)"
-        font = cv2.FONT_HERSHEY_DUPLEX
-        fs_no = _fs(0.9, s); th_no = _t(2, s)
-        (tw, th), bl = cv2.getTextSize(text, font, fs_no, th_no)
-        tx = (W - tw) // 2; ty = (H + th) // 2
-        cv2.putText(vis, text, (tx, ty), font, fs_no, (0, 0, 255),
-                    th_no, cv2.LINE_AA)
-
     return {"image":vis,"count":len(blobs),"pass":is_pass,
             "total_area":total_area,"blobs":blobs,"centroids":centroids,
             # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
@@ -1815,19 +1798,25 @@ def proc_message(inputs, params):
     position = params.get("position", "Top-Left")
     pad = int(16 * s)
     if position == "Top-Left":
-        tx, ty = pad, pad + th
+        ax, ay = pad, pad + th
     elif position == "Top-Right":
-        tx, ty = W - tw - pad, pad + th
+        ax, ay = W - tw - pad, pad + th
     elif position == "Top-Center":
-        tx, ty = (W - tw) // 2, pad + th
+        ax, ay = (W - tw) // 2, pad + th
     elif position == "Bottom-Left":
-        tx, ty = pad, H - pad - bl
+        ax, ay = pad, H - pad - bl
     elif position == "Bottom-Right":
-        tx, ty = W - tw - pad, H - pad - bl
+        ax, ay = W - tw - pad, H - pad - bl
     elif position == "Bottom-Center":
-        tx, ty = (W - tw) // 2, H - pad - bl
+        ax, ay = (W - tw) // 2, H - pad - bl
     else:  # Center
-        tx, ty = (W - tw) // 2, (H + th) // 2
+        ax, ay = (W - tw) // 2, (H + th) // 2
+
+    # Offset có thể chỉnh bằng slider HOẶC kéo text trên canvas
+    # (sync về label_dx/label_dy qua _on_label_dragged).
+    dx = int(params.get("label_dx", 0))
+    dy = int(params.get("label_dy", 0))
+    tx = ax + int(dx * s); ty = ay + int(dy * s)
 
     if params.get("show_background", True):
         bg_pad = int(8 * s)
@@ -1837,7 +1826,13 @@ def proc_message(inputs, params):
                       (0, 0, 0), -1)
     cv2.putText(vis, text, (tx, ty), font, fs_val, color, th_val, cv2.LINE_AA)
     print(f"[Message] pass={passed} text='{text}'")
-    return {"image": vis, "text": text, "pass": passed}
+
+    # Expose label rect + anchor để dialog hit-test drag — đồng nhất với Blob.
+    label_rects = [(tx, ty - th - bl, tw, th + bl)]
+    label_anchors = [(float(ax), float(ay))]
+    return {"image": vis, "text": text, "pass": passed,
+            "_label_rects": label_rects,
+            "_label_centroids": label_anchors}
 
 
 def proc_save_image(inputs,params):
@@ -2552,9 +2547,15 @@ TOOL_REGISTRY: List[ToolDef] = [
        choices=["Yellow","Cyan","Green","Red","White","Magenta","Orange","Blue"]),
      P("color_none","Color NONE","enum","Yellow",
        choices=["Yellow","Cyan","Green","Red","White","Magenta","Orange","Blue"]),
-     P("position","Position","enum","Top-Left",
+     P("position","Anchor Position","enum","Top-Left",
        choices=["Top-Left","Top-Center","Top-Right","Center",
-                "Bottom-Left","Bottom-Center","Bottom-Right"]),
+                "Bottom-Left","Bottom-Center","Bottom-Right"],
+       tooltip="Vị trí gốc. Offset X/Y dưới đây dịch tiếp từ điểm này — "
+               "hoặc kéo text trực tiếp trên ảnh để sync slider."),
+     P("label_dx","Offset X","int",0,-2000,2000,use_slider=True,
+       tooltip="Dịch text theo trục X từ anchor. Có thể kéo text trên ảnh."),
+     P("label_dy","Offset Y","int",0,-2000,2000,use_slider=True,
+       tooltip="Dịch text theo trục Y từ anchor. Có thể kéo text trên ảnh."),
      P("font","Font","enum","Duplex",
        choices=["Simplex","Plain","Duplex","Complex","Triplex",
                 "Script Simplex","Script Complex"]),
