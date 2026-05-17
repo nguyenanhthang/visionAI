@@ -457,14 +457,41 @@ class ImageViewerPanel(QWidget):
                 queue.append((dst, depth + 1))
         return best[1]
 
+    def _branch_image_nodes(self, root_id: str) -> List[str]:
+        """BFS xuôi dòng từ root → list mọi node có image output trong branch.
+        Dùng để populate dropdown trong mỗi ô của multi-view.
+        """
+        if self._graph is None:
+            return []
+        img_outs: Dict[str, List[str]] = {}
+        for c in self._graph.connections:
+            if c.src_port == "image" and c.dst_port == "image":
+                img_outs.setdefault(c.src_id, []).append(c.dst_id)
+        result = []
+        seen = set()
+        queue = [root_id]
+        while queue:
+            cur = queue.pop(0)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            node = self._graph.nodes.get(cur)
+            if node and "image" in {p.name for p in node.tool.outputs}:
+                result.append(cur)
+            for dst in img_outs.get(cur, []):
+                if dst not in seen:
+                    queue.append(dst)
+        return result
+
     def _rebuild_multi_grid(self):
-        """Detect branches và xây grid (1×N hoặc 2×N) các ZoomableImageWidget.
-        Mỗi ô có label hiện tên node terminal của branch tương ứng.
+        """Detect branches và xây grid các ZoomableImageWidget. Mỗi ô có
+        dropdown chọn node của branch để user tùy xem (default = terminal).
         """
         # Clear old widgets
-        for _root, view, lbl in self._multi_views:
-            view.setParent(None); view.deleteLater()
-            lbl.setParent(None);  lbl.deleteLater()
+        for cell in self._multi_views:
+            cell["root"]  # keep linter happy
+            cell["cell_widget"].setParent(None)
+            cell["cell_widget"].deleteLater()
         self._multi_views = []
 
         roots = self._enumerate_branch_roots()
@@ -475,60 +502,131 @@ class ImageViewerPanel(QWidget):
         n = len(roots)
         if n <= 1:    cols = 1
         elif n <= 2:  cols = 2
-        elif n <= 6:  cols = (n + 1) // 2  # 2 rows
-        else:         cols = 3              # 3+ rows
+        elif n <= 6:  cols = (n + 1) // 2
+        else:         cols = 3
 
-        from PySide6.QtWidgets import QVBoxLayout as _QV, QFrame as _QF
+        from PySide6.QtWidgets import QVBoxLayout as _QV, QHBoxLayout as _QH
         for i, root_id in enumerate(roots):
             cell = QWidget()
             cell_lay = _QV(cell)
             cell_lay.setContentsMargins(0, 0, 0, 0)
             cell_lay.setSpacing(0)
-            # Label
-            terminal_id = self._branch_terminal(root_id)
-            term_node = self._graph.nodes.get(terminal_id)
-            term_name = term_node.tool.name if term_node else "?"
+
+            # Header: root label + node dropdown + status badge
+            hdr = QWidget()
+            hdr.setStyleSheet(
+                "background:#060a14;border-bottom:1px solid #1e2d45;")
+            hl = _QH(hdr)
+            hl.setContentsMargins(6, 3, 6, 3); hl.setSpacing(6)
             root_node = self._graph.nodes.get(root_id)
             root_name = root_node.tool.name if root_node else "?"
-            lbl = QLabel(f"  {root_name}  →  {term_name}")
-            lbl.setStyleSheet(
-                "background:#060a14;color:#00d4ff;font-size:10px;"
-                "font-weight:600;padding:4px 6px;"
-                "border-bottom:1px solid #1e2d45;")
-            cell_lay.addWidget(lbl)
+            root_lbl = QLabel(f"<b>{root_name}</b>  →")
+            root_lbl.setStyleSheet("color:#64748b;font-size:10px;")
+            root_lbl.setTextFormat(Qt.RichText)
+            hl.addWidget(root_lbl)
+
+            cb = QComboBox()
+            cb.setStyleSheet("""
+                QComboBox{background:#0a0e1a;border:1px solid #1e2d45;
+                          color:#e2e8f0;padding:1px 6px;border-radius:3px;
+                          font-size:10px;}
+                QComboBox::drop-down{border:none;}
+                QComboBox QAbstractItemView{background:#0d1220;color:#e2e8f0;
+                                             border:1px solid #1e2d45;
+                                             selection-background-color:#1a2236;}
+            """)
+            branch_nodes = self._branch_image_nodes(root_id)
+            terminal_id = self._branch_terminal(root_id)
+            for nid in branch_nodes:
+                node = self._graph.nodes.get(nid)
+                if not node:
+                    continue
+                cb.addItem(f"{node.tool.icon} {node.tool.name}", nid)
+            # Default select terminal
+            for j in range(cb.count()):
+                if cb.itemData(j) == terminal_id:
+                    cb.setCurrentIndex(j); break
+            cb.currentIndexChanged.connect(
+                lambda _idx, rid=root_id: self._on_multi_node_changed(rid))
+            hl.addWidget(cb, 1)
+
+            status_lbl = QLabel("●")
+            status_lbl.setStyleSheet("color:#64748b;font-size:11px;")
+            hl.addWidget(status_lbl)
+
+            cell_lay.addWidget(hdr)
+
             view = ZoomableImageWidget()
             cell_lay.addWidget(view, 1)
+
             r, c = divmod(i, cols)
             self._multi_grid.addWidget(cell, r, c)
-            self._multi_views.append((root_id, view, lbl))
+            self._multi_views.append({
+                "root": root_id, "cell_widget": cell,
+                "view": view, "combo": cb, "status": status_lbl,
+            })
         self._refresh_multi_views()
 
+    def _on_multi_node_changed(self, root_id: str):
+        """User pick node khác cho 1 ô → load image của node đó."""
+        for entry in self._multi_views:
+            if entry["root"] != root_id:
+                continue
+            self._push_multi_cell(entry)
+            return
+
+    def _push_multi_cell(self, entry):
+        """Load ảnh + status của node đang chọn trong ô vào view."""
+        nid = entry["combo"].currentData()
+        node = self._graph.nodes.get(nid) if self._graph and nid else None
+        if node is None:
+            return
+        img = node.outputs.get("_display_image")
+        if img is None:
+            img = node.outputs.get("image")
+        if img is not None:
+            entry["view"].set_image(img)
+        status = getattr(node, "status", "—") or "—"
+        color = {"pass": "#39ff14", "fail": "#ff3860",
+                 "error": "#ff3860", "running": "#ffd700"}.get(status, "#64748b")
+        entry["status"].setStyleSheet(
+            f"color:{color};font-size:13px;font-weight:bold;")
+        entry["status"].setToolTip(status.upper())
+
     def _refresh_multi_views(self):
-        """Push ảnh mới nhất của terminal node lên từng ô của grid."""
+        """Push ảnh mới nhất của node đang chọn lên từng ô. Cũng cập nhật
+        items của combo nếu node mới được thêm vào branch."""
         if self._graph is None:
             return
-        for root_id, view, lbl in self._multi_views:
-            terminal_id = self._branch_terminal(root_id)
-            node = self._graph.nodes.get(terminal_id)
-            if node is None:
-                continue
-            # KHÔNG dùng `a or b` cho numpy array — ValueError ambiguous.
-            img = node.outputs.get("_display_image")
-            if img is None:
-                img = node.outputs.get("image")
-            if img is not None:
-                view.set_image(img)
-            term_node = self._graph.nodes.get(terminal_id)
-            term_name = term_node.tool.name if term_node else "?"
-            root_node = self._graph.nodes.get(root_id)
-            root_name = root_node.tool.name if root_node else "?"
-            status = getattr(node, "status", "—") or "—"
-            color = {"pass": "#39ff14", "fail": "#ff3860",
-                     "error": "#ff3860", "running": "#ffd700"}.get(status, "#64748b")
-            lbl.setText(
-                f"  {root_name}  →  {term_name}    "
-                f"<span style='color:{color}'>● {status.upper()}</span>")
-            lbl.setTextFormat(Qt.RichText)
+        for entry in self._multi_views:
+            # Sync combo items với branch hiện tại (graph có thể đổi)
+            branch_nodes = self._branch_image_nodes(entry["root"])
+            existing_ids = [entry["combo"].itemData(j)
+                             for j in range(entry["combo"].count())]
+            if list(existing_ids) != list(branch_nodes):
+                prev = entry["combo"].currentData()
+                entry["combo"].blockSignals(True)
+                entry["combo"].clear()
+                for nid in branch_nodes:
+                    node = self._graph.nodes.get(nid)
+                    if not node:
+                        continue
+                    entry["combo"].addItem(
+                        f"{node.tool.icon} {node.tool.name}", nid)
+                # Restore previous selection nếu còn tồn tại
+                restored = False
+                for j in range(entry["combo"].count()):
+                    if entry["combo"].itemData(j) == prev:
+                        entry["combo"].setCurrentIndex(j)
+                        restored = True; break
+                if not restored:
+                    # Fallback về terminal
+                    term = self._branch_terminal(entry["root"])
+                    for j in range(entry["combo"].count()):
+                        if entry["combo"].itemData(j) == term:
+                            entry["combo"].setCurrentIndex(j); break
+                entry["combo"].blockSignals(False)
+            self._push_multi_cell(entry)
 
     # ── Internal ─────────────────────────────────────────────────
     def _on_node_selected(self, idx: int):
