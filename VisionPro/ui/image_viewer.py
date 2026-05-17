@@ -41,21 +41,37 @@ class ZoomableImageWidget(QWidget):
 
     # ── Image ───────────────────────────────────────────────────
     def set_image(self, arr: Optional[np.ndarray]):
-        self._arr = arr
         if arr is None:
+            self._arr = None
             self._pixmap = None
             self.update()
             return
-        import cv2
-        a = arr.copy()
-        if len(a.shape) == 2:
-            a = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
-        elif a.shape[2] == 3:
-            a = cv2.cvtColor(a, cv2.COLOR_BGR2RGB)
-        elif a.shape[2] == 4:
-            a = cv2.cvtColor(a, cv2.COLOR_BGRA2RGBA)
-        h, w, ch = a.shape
-        qimg = QImage(a.data.tobytes(), w, h, ch * w, QImage.Format_RGB888)
+        # Đảm bảo contiguous để Qt dùng buffer trực tiếp (không copy).
+        if not arr.flags['C_CONTIGUOUS']:
+            arr = np.ascontiguousarray(arr)
+        self._arr = arr   # giữ alive cho QImage buffer reference
+        if arr.ndim == 2:
+            h, w = arr.shape
+            qimg = QImage(arr.data, w, h, arr.strides[0],
+                           QImage.Format_Grayscale8)
+        elif arr.shape[2] == 3:
+            h, w, _ = arr.shape
+            # Format_BGR888 dùng trực tiếp BGR của OpenCV → skip cvtColor.
+            qimg = QImage(arr.data, w, h, arr.strides[0],
+                           QImage.Format_BGR888)
+        elif arr.shape[2] == 4:
+            import cv2
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGBA)
+            self._arr = arr
+            h, w, _ = arr.shape
+            qimg = QImage(arr.data, w, h, arr.strides[0],
+                           QImage.Format_RGBA8888)
+        else:
+            self._pixmap = None
+            self.update()
+            return
+        # QPixmap.fromImage copy data sang pixmap format → arr có thể GC sau
+        # call này. Nhưng giữ self._arr để pixel-pick / hover còn truy cập.
         self._pixmap = QPixmap.fromImage(qimg)
         self._fit_to_window()
         self.update()

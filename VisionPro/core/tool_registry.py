@@ -915,16 +915,43 @@ def proc_find_circle(inputs, params):
     gray=_gray(img); vis=_bgr(img.copy())
     s = _draw_scale(vis)
     show_labels = bool(params.get("show_labels", False))
-    blurred=cv2.GaussianBlur(gray,(9,9),2)
-    circles=cv2.HoughCircles(blurred,cv2.HOUGH_GRADIENT,
-        params.get("dp",1.2),params.get("min_dist",30),
-        param1=params.get("param1",100),param2=params.get("param2",30),
-        minRadius=params.get("min_radius",5),maxRadius=params.get("max_radius",300))
+
+    # Coarse downscale cho HoughCircles — chi phí O(W*H/dp²), giảm DS×
+    # → giảm DS²× thời gian. Default auto: aim ~1.5MP (≈ 5MP/4, 20MP/16).
+    # User override bằng param `downscale` (>=1, 0 = auto).
+    ds_param = int(params.get("downscale", 0) or 0)
+    if ds_param > 0:
+        ds = max(1, ds_param)
+    else:
+        h_g, w_g = gray.shape[:2]
+        target_px = 1_500_000
+        ds = max(1, int(round((h_g * w_g / target_px) ** 0.5)))
+
+    if ds > 1:
+        small = cv2.resize(gray, None, fx=1.0/ds, fy=1.0/ds,
+                            interpolation=cv2.INTER_AREA)
+    else:
+        small = gray
+
+    blurred = cv2.GaussianBlur(small, (9, 9), 2)
+    # Scale radius/dist params về coord space của ảnh downscaled
+    raw_min_r = float(params.get("min_radius", 5))
+    raw_max_r = float(params.get("max_radius", 300))
+    raw_min_d = float(params.get("min_dist", 30))
+    min_r_ds = max(3, int(round(raw_min_r / ds)))
+    max_r_ds = max(min_r_ds + 1, int(round(raw_max_r / ds)))
+    min_d_ds = max(3, int(round(raw_min_d / ds)))
+    circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT,
+        params.get("dp", 1.2), min_d_ds,
+        param1=params.get("param1", 100), param2=params.get("param2", 30),
+        minRadius=min_r_ds, maxRadius=max_r_ds)
     found=False; cx=0.0; cy=0.0; radius=0.0
     if circles is not None:
-        circles=np.uint16(np.around(circles))
-        c=circles[0][0]
-        cx=float(c[0]); cy=float(c[1]); radius=float(c[2])
+        c = circles[0][0]
+        # Scale lại về full-res coords
+        cx = float(c[0]) * ds
+        cy = float(c[1]) * ds
+        radius = float(c[2]) * ds
         found=True
         cv2.circle(vis,(int(cx),int(cy)),int(radius),(0,220,80),_t(2,s))
         cv2.circle(vis,(int(cx),int(cy)),_t(3,s),(0,220,80),-1)
@@ -936,7 +963,7 @@ def proc_find_circle(inputs, params):
                         cv2.FONT_HERSHEY_SIMPLEX,_fs(0.55,s),(0,220,80),_t(2,s))
     min_r=params.get("min_r_check",0.0); max_r=params.get("max_r_check",9999.0)
     is_pass=found and (min_r<=radius*params.get("pixel_to_mm",1.0)<=max_r)
-    print(f"[FindCircle] {'PASS' if is_pass else ('FAIL' if found else 'NOT FOUND')} r={radius:.2f}px")
+    print(f"[FindCircle] {'PASS' if is_pass else ('FAIL' if found else 'NOT FOUND')} r={radius:.2f}px ds={ds}")
     return {"image":vis,"found":found,"cx":cx,"cy":cy,
             "radius":radius*params.get("pixel_to_mm",1.0),"pass":is_pass}
 
