@@ -269,11 +269,11 @@ class ImageViewerPanel(QWidget):
             return b
 
         btn_fit  = tb_btn("⊡", "Fit to window (F)")
-        btn_1to1 = tb_btn("1:1", "Actual pixels")
+        btn_1to1 = tb_btn("1:1", "Actual pixels (cap ở fit nếu ảnh > viewport)")
         btn_in   = tb_btn("+", "Zoom in")
         btn_out  = tb_btn("−", "Zoom out")
         btn_fit.clicked.connect(self._fit)
-        btn_1to1.clicked.connect(lambda: self._img_view.set_zoom(1.0))
+        btn_1to1.clicked.connect(self._zoom_actual)
         btn_in.clicked.connect(lambda: self._img_view.set_zoom(self._img_view._scale * 1.5))
         btn_out.clicked.connect(lambda: self._img_view.set_zoom(self._img_view._scale / 1.5))
         for b in (btn_out, btn_in, btn_1to1, btn_fit):
@@ -611,6 +611,22 @@ class ImageViewerPanel(QWidget):
 
     def _fit(self):
         self._img_view.fit()
+
+    def _zoom_actual(self):
+        """1:1 button — cap zoom ở fit_scale để ảnh không tràn viewport.
+        Ảnh nhỏ hơn viewport: scale = 1.0 (actual pixels).
+        Ảnh lớn hơn viewport: scale = fit_scale (vẫn hiển thị đầy đủ,
+        không cần pan). User muốn zoom thật > fit có thể dùng wheel hoặc +.
+        """
+        v = self._img_view
+        if v._pixmap is None:
+            return
+        pw, ph = v._pixmap.width(), v._pixmap.height()
+        ww, wh = v.width(), v.height()
+        if ww < 1 or wh < 1 or pw < 1 or ph < 1:
+            return
+        fit_scale = min(ww / pw, wh / ph) * 0.95
+        v.set_zoom(min(1.0, fit_scale))
 
     def _on_pixel_info(self, x: int, y: int, rgb: tuple):
         r, g, b = rgb
