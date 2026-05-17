@@ -33,6 +33,8 @@ class ParamDef:
     tooltip: str = ""
     # Conditional visibility: dict {param_name: required_value}
     visible_if: Dict[str, Any] = field(default_factory=dict)
+    # Hiển thị slider kèm spinbox cho int/float param (cần min_val/max_val)
+    use_slider: bool = False
 
 
 @dataclass
@@ -1828,13 +1830,16 @@ TOOL_REGISTRY: List[ToolDef] = [
     [PortDef("image","image"),PortDef("color_hsv","any",required=False)],
     [PortDef("image","image"),PortDef("mask","image"),PortDef("pass","bool"),
      PortDef("pixel_ratio","number"),PortDef("pixel_count","number")],
-    [P("h_low","H Low","int",0,0,180),P("h_high","H High","int",180,0,180),
-     P("s_low","S Low","int",50,0,255),P("s_high","S High","int",255,0,255),
-     P("v_low","V Low","int",50,0,255),P("v_high","V High","int",255,0,255),
-     P("tolerance","Tolerance","int",0,0,100),
-     P("morph_open","Morph Open","int",0,0,50),
-     P("min_ratio","Min Ratio","float",0.01,0,1,step=0.001),
-     P("max_ratio","Max Ratio","float",1.0,0,1,step=0.001)],
+    [P("h_low","H Low","int",0,0,180,use_slider=True),
+     P("h_high","H High","int",180,0,180,use_slider=True),
+     P("s_low","S Low","int",50,0,255,use_slider=True),
+     P("s_high","S High","int",255,0,255,use_slider=True),
+     P("v_low","V Low","int",50,0,255,use_slider=True),
+     P("v_high","V High","int",255,0,255,use_slider=True),
+     P("tolerance","Tolerance","int",0,0,100,use_slider=True),
+     P("morph_open","Morph Open","int",0,0,50,use_slider=True),
+     P("min_ratio","Min Ratio","float",0.01,0,1,step=0.001,use_slider=True),
+     P("max_ratio","Max Ratio","float",1.0,0,1,step=0.001,use_slider=True)],
     proc_color_segment, "CogColorSegmenterTool"),
 
   ToolDef("color_match","Color Match","Color Analysis",

@@ -11,7 +11,7 @@ import numpy as np
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                 QTabWidget, QWidget, QScrollArea, QFrame,
-                                QSplitter, QPushButton, QGroupBox,
+                                QSplitter, QPushButton, QGroupBox, QCheckBox,
                                 QSizePolicy, QApplication, QFileDialog,
                                 QMessageBox)
 from PySide6.QtCore import Qt, Signal, QRect, QPoint, QSize, QTimer
@@ -1294,6 +1294,23 @@ class NodeDetailDialog(QDialog):
         tc.addWidget(t1); tc.addWidget(t2)
         hl.addLayout(tc, 1)
 
+        self._auto_run_cb = QCheckBox("Auto Run")
+        self._auto_run_cb.setChecked(bool(node.params.get("_auto_run", False)))
+        self._auto_run_cb.setStyleSheet(
+            "QCheckBox{color:#fff;font-size:12px;font-weight:600;"
+            "background:transparent;padding:0 8px;}"
+            "QCheckBox::indicator{width:14px;height:14px;"
+            "border:1px solid #00d4ff;border-radius:3px;background:#0a0e1a;}"
+            "QCheckBox::indicator:checked{background:#00d4ff;}")
+        self._auto_run_cb.setToolTip("Tự động chạy node khi thay đổi tham số")
+        self._auto_run_cb.toggled.connect(self._on_auto_run_toggled)
+        hl.addWidget(self._auto_run_cb)
+
+        self._auto_run_timer = QTimer(self)
+        self._auto_run_timer.setSingleShot(True)
+        self._auto_run_timer.setInterval(120)
+        self._auto_run_timer.timeout.connect(self._on_run)
+
         self._run_btn = QPushButton("▶  Run Node")
         self._run_btn.setFixedSize(120, 34)
         self._run_btn.setStyleSheet(
@@ -1707,6 +1724,14 @@ class NodeDetailDialog(QDialog):
         if any(getattr(p, "visible_if", None) and name in p.visible_if
                 for p in node.tool.params):
             QTimer.singleShot(0, self._rebuild_params_tab)
+        # Auto Run: debounce qua timer để không spam khi kéo slider.
+        if getattr(self, "_auto_run_cb", None) and self._auto_run_cb.isChecked():
+            self._auto_run_timer.start()
+
+    def _on_auto_run_toggled(self, checked: bool):
+        self._node.params["_auto_run"] = bool(checked)
+        if checked:
+            self._auto_run_timer.start()
 
     def _rebuild_params_tab(self):
         """Rebuild Params tab — dùng khi visible_if của param khác đổi.

@@ -8,7 +8,7 @@ from typing import Optional, Any
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                 QLineEdit, QSpinBox, QDoubleSpinBox,
-                                QComboBox, QCheckBox, QPushButton,
+                                QComboBox, QCheckBox, QPushButton, QSlider,
                                 QScrollArea, QFrame, QTabWidget, QFileDialog)
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage
@@ -61,23 +61,27 @@ class ParamRow(QWidget):
             return w
 
         if p.ptype == "int":
-            w = QSpinBox()
-            w.setMinimum(int(p.min_val) if p.min_val is not None else -999999)
-            w.setMaximum(int(p.max_val) if p.max_val is not None else  999999)
-            w.setSingleStep(int(p.step) if p.step else 1)
-            w.setValue(int(val) if val is not None else 0)
-            w.valueChanged.connect(lambda v: self.value_changed.emit(p.name, v))
-            return w
+            sb = QSpinBox()
+            sb.setMinimum(int(p.min_val) if p.min_val is not None else -999999)
+            sb.setMaximum(int(p.max_val) if p.max_val is not None else  999999)
+            sb.setSingleStep(int(p.step) if p.step else 1)
+            sb.setValue(int(val) if val is not None else 0)
+            sb.valueChanged.connect(lambda v: self.value_changed.emit(p.name, v))
+            if getattr(p, "use_slider", False) and p.min_val is not None and p.max_val is not None:
+                return self._wrap_slider(sb, int(p.min_val), int(p.max_val), is_float=False)
+            return sb
 
         if p.ptype == "float":
-            w = QDoubleSpinBox()
-            w.setMinimum(float(p.min_val) if p.min_val is not None else -1e9)
-            w.setMaximum(float(p.max_val) if p.max_val is not None else  1e9)
-            w.setSingleStep(float(p.step) if p.step else 0.1)
-            w.setDecimals(4)
-            w.setValue(float(val) if val is not None else 0.0)
-            w.valueChanged.connect(lambda v: self.value_changed.emit(p.name, v))
-            return w
+            sb = QDoubleSpinBox()
+            sb.setMinimum(float(p.min_val) if p.min_val is not None else -1e9)
+            sb.setMaximum(float(p.max_val) if p.max_val is not None else  1e9)
+            sb.setSingleStep(float(p.step) if p.step else 0.1)
+            sb.setDecimals(4)
+            sb.setValue(float(val) if val is not None else 0.0)
+            sb.valueChanged.connect(lambda v: self.value_changed.emit(p.name, v))
+            if getattr(p, "use_slider", False) and p.min_val is not None and p.max_val is not None:
+                return self._wrap_slider(sb, float(p.min_val), float(p.max_val), is_float=True)
+            return sb
 
         # str
         w = QWidget()
@@ -100,6 +104,47 @@ class ParamRow(QWidget):
             else:
                 btn.clicked.connect(lambda: self._browse_file(le))
             hl.addWidget(btn)
+        return w
+
+    def _wrap_slider(self, spin: QWidget, lo, hi, is_float: bool) -> QWidget:
+        """Combine slider + spinbox; expose setValue/value on the wrapper
+        so callers using `pr._editor.setValue()` keep working."""
+        FLOAT_SCALE = 1000
+        sl = QSlider(Qt.Horizontal)
+        if is_float:
+            sl.setRange(int(lo * FLOAT_SCALE), int(hi * FLOAT_SCALE))
+            sl.setValue(int(spin.value() * FLOAT_SCALE))
+        else:
+            sl.setRange(int(lo), int(hi))
+            sl.setValue(int(spin.value()))
+        sl.setMinimumWidth(80)
+
+        def _slider_to_spin(v):
+            spin.blockSignals(True)
+            spin.setValue(v / FLOAT_SCALE if is_float else v)
+            spin.blockSignals(False)
+            spin.valueChanged.emit(spin.value())
+
+        def _spin_to_slider(v):
+            sl.blockSignals(True)
+            sl.setValue(int(v * FLOAT_SCALE) if is_float else int(v))
+            sl.blockSignals(False)
+
+        sl.valueChanged.connect(_slider_to_spin)
+        spin.valueChanged.connect(_spin_to_slider)
+
+        w = QWidget()
+        hl = QHBoxLayout(w)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(6)
+        hl.addWidget(sl, 1)
+        spin.setMaximumWidth(72 if is_float else 60)
+        hl.addWidget(spin)
+
+        # Proxy setValue/value so external code (sync spinbox) still works.
+        w.setValue = spin.setValue
+        w.value = spin.value
+        w.blockSignals = lambda b: (sl.blockSignals(b), spin.blockSignals(b))
         return w
 
     def _browse_file(self, le: QLineEdit):
