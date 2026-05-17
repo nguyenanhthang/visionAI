@@ -4,7 +4,7 @@ Panel xem ảnh chính — hiển thị ảnh kết quả với zoom/pan, overla
 chọn node để xem output image.
 """
 from __future__ import annotations
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import numpy as np
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -309,12 +309,31 @@ class ImageViewerPanel(QWidget):
         self._btn_results.setMenu(self._results_menu)
         tl.addWidget(self._btn_results)
 
+        # Multi-view toggle — auto split khung khi có nhiều input branches.
+        self._btn_multi = tb_btn("⊞", "Toggle multi-view (mỗi Acquire Image 1 ô)")
+        self._btn_multi.setCheckable(True)
+        self._btn_multi.toggled.connect(self._on_multi_toggled)
+        tl.addWidget(self._btn_multi)
+
         lay.addWidget(tb)
 
         # ── Image view ─────────────────────────────────────────────
+        # Stack: index 0 = single, index 1 = multi-grid
+        from PySide6.QtWidgets import QStackedWidget, QGridLayout
+        self._view_stack = QStackedWidget()
         self._img_view = ZoomableImageWidget()
         self._img_view.pixel_info.connect(self._on_pixel_info)
-        lay.addWidget(self._img_view, 1)
+        self._view_stack.addWidget(self._img_view)
+
+        # Multi-view grid (built lazily — refresh khi toggle / graph changes)
+        self._multi_container = QWidget()
+        self._multi_grid = QGridLayout(self._multi_container)
+        self._multi_grid.setContentsMargins(0, 0, 0, 0)
+        self._multi_grid.setSpacing(2)
+        self._multi_views: List[tuple] = []  # [(root_id, view_widget, label), ...]
+        self._view_stack.addWidget(self._multi_container)
+
+        lay.addWidget(self._view_stack, 1)
 
         # ── Status bar ─────────────────────────────────────────────
         status = QWidget()
@@ -340,6 +359,8 @@ class ImageViewerPanel(QWidget):
     # ── Public API ────────────────────────────────────────────────
     def set_graph(self, graph: FlowGraph):
         self._graph = graph
+        if self._btn_multi.isChecked():
+            self._rebuild_multi_grid()
 
     def refresh_node_list(self):
         """Cập nhật dropdown list các node có output image."""
@@ -366,6 +387,8 @@ class ImageViewerPanel(QWidget):
                     break
 
         self._node_combo.blockSignals(False)
+        if self._btn_multi.isChecked():
+            self._rebuild_multi_grid()
 
     def show_node(self, node_id: str):
         """Hiển thị output image của node_id."""
@@ -379,6 +402,131 @@ class ImageViewerPanel(QWidget):
         """Refresh ảnh của node đang xem."""
         if self._current_node_id:
             self._display_node(self._current_node_id)
+        if self._btn_multi.isChecked():
+            self._refresh_multi_views()
+
+    # ── Multi-view ────────────────────────────────────────────────
+    def _on_multi_toggled(self, checked: bool):
+        """Toggle giữa single view và multi-view grid."""
+        if checked:
+            self._rebuild_multi_grid()
+            self._view_stack.setCurrentIndex(1)
+        else:
+            self._view_stack.setCurrentIndex(0)
+
+    def _enumerate_branch_roots(self) -> List[str]:
+        """Find pipeline root nodes — node có image output nhưng KHÔNG nhận
+        image input (vd Acquire Image / Camera Acquire). Mỗi root = 1 branch.
+        """
+        if self._graph is None:
+            return []
+        img_dst_nodes = {c.dst_id for c in self._graph.connections
+                         if c.dst_port == "image"}
+        roots = []
+        for nid, node in self._graph.nodes.items():
+            out_names = {p.name for p in node.tool.outputs}
+            if "image" in out_names and nid not in img_dst_nodes:
+                roots.append(nid)
+        return roots
+
+    def _branch_terminal(self, root_id: str) -> str:
+        """BFS xuôi dòng từ root theo image connections → trả về node cuối
+        cùng (xa nhất từ root) có image output. Khi pipeline rẽ nhánh
+        → chọn nhánh dài nhất.
+        """
+        if self._graph is None:
+            return root_id
+        img_outs: Dict[str, List[str]] = {}
+        for c in self._graph.connections:
+            if c.src_port == "image" and c.dst_port == "image":
+                img_outs.setdefault(c.src_id, []).append(c.dst_id)
+        # BFS với depth tracking → terminal = node depth lớn nhất có image out
+        best = (0, root_id)
+        visited = {root_id}
+        queue = [(root_id, 0)]
+        while queue:
+            cur, depth = queue.pop(0)
+            for dst in img_outs.get(cur, []):
+                if dst in visited:
+                    continue
+                visited.add(dst)
+                node = self._graph.nodes.get(dst)
+                if node and "image" in {p.name for p in node.tool.outputs}:
+                    if depth + 1 > best[0]:
+                        best = (depth + 1, dst)
+                queue.append((dst, depth + 1))
+        return best[1]
+
+    def _rebuild_multi_grid(self):
+        """Detect branches và xây grid (1×N hoặc 2×N) các ZoomableImageWidget.
+        Mỗi ô có label hiện tên node terminal của branch tương ứng.
+        """
+        # Clear old widgets
+        for _root, view, lbl in self._multi_views:
+            view.setParent(None); view.deleteLater()
+            lbl.setParent(None);  lbl.deleteLater()
+        self._multi_views = []
+
+        roots = self._enumerate_branch_roots()
+        if not roots:
+            return
+
+        # Grid layout: 1 root → 1×1; 2 → 1×2; 3-4 → 2×2; 5-6 → 2×3; 7-9 → 3×3
+        n = len(roots)
+        if n <= 1:    cols = 1
+        elif n <= 2:  cols = 2
+        elif n <= 6:  cols = (n + 1) // 2  # 2 rows
+        else:         cols = 3              # 3+ rows
+
+        from PySide6.QtWidgets import QVBoxLayout as _QV, QFrame as _QF
+        for i, root_id in enumerate(roots):
+            cell = QWidget()
+            cell_lay = _QV(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setSpacing(0)
+            # Label
+            terminal_id = self._branch_terminal(root_id)
+            term_node = self._graph.nodes.get(terminal_id)
+            term_name = term_node.tool.name if term_node else "?"
+            root_node = self._graph.nodes.get(root_id)
+            root_name = root_node.tool.name if root_node else "?"
+            lbl = QLabel(f"  {root_name}  →  {term_name}")
+            lbl.setStyleSheet(
+                "background:#060a14;color:#00d4ff;font-size:10px;"
+                "font-weight:600;padding:4px 6px;"
+                "border-bottom:1px solid #1e2d45;")
+            cell_lay.addWidget(lbl)
+            view = ZoomableImageWidget()
+            cell_lay.addWidget(view, 1)
+            r, c = divmod(i, cols)
+            self._multi_grid.addWidget(cell, r, c)
+            self._multi_views.append((root_id, view, lbl))
+        self._refresh_multi_views()
+
+    def _refresh_multi_views(self):
+        """Push ảnh mới nhất của terminal node lên từng ô của grid."""
+        if self._graph is None:
+            return
+        for root_id, view, lbl in self._multi_views:
+            terminal_id = self._branch_terminal(root_id)
+            node = self._graph.nodes.get(terminal_id)
+            if node is None:
+                continue
+            img = node.outputs.get("_display_image") \
+                  or node.outputs.get("image")
+            if img is not None:
+                view.set_image(img)
+            term_node = self._graph.nodes.get(terminal_id)
+            term_name = term_node.tool.name if term_node else "?"
+            root_node = self._graph.nodes.get(root_id)
+            root_name = root_node.tool.name if root_node else "?"
+            status = getattr(node, "status", "—") or "—"
+            color = {"pass": "#39ff14", "fail": "#ff3860",
+                     "error": "#ff3860", "running": "#ffd700"}.get(status, "#64748b")
+            lbl.setText(
+                f"  {root_name}  →  {term_name}    "
+                f"<span style='color:{color}'>● {status.upper()}</span>")
+            lbl.setTextFormat(Qt.RichText)
 
     # ── Internal ─────────────────────────────────────────────────
     def _on_node_selected(self, idx: int):
