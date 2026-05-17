@@ -199,6 +199,7 @@ class PatMaxDialog(QDialog):
         self._img_label.extra_origin_changed.connect(self._on_extra_origin_dragged)
         self._img_label.extra_origin_angle_changed.connect(
             self._on_extra_origin_angle_dragged)
+        self._img_label.obj_origin_changed.connect(self._on_obj_origin_dragged)
         self._img_label.shape_drawn.connect(self._on_shape_drawn)
         self._img_label.shapes_changed.connect(self._on_shapes_changed)
         self._img_label.setMinimumSize(600, 400)
@@ -1116,6 +1117,45 @@ class PatMaxDialog(QDialog):
             finally:
                 self._ref_field_updating = False
 
+    def _on_obj_origin_dragged(self, obj_idx: int, ox: float, oy: float):
+        """User kéo marker origin của Object thứ obj_idx (result view).
+        Ghi override vào node.params và update output values + Results table
+        cho khớp. KHÔNG re-render cv2 result image (Qt marker đã move) — giữ
+        drag mượt, không tốn cpu.
+        """
+        if obj_idx < 0:
+            return
+        params = self._node.params
+        raw = params.get("_per_obj_origin_overrides")
+        overrides = raw if isinstance(raw, dict) else {}
+        overrides[obj_idx] = (float(ox), float(oy))
+        params["_per_obj_origin_overrides"] = overrides
+
+        # Re-resolve objects + re-apply extra terminals để downstream node
+        # đọc được giá trị mới ngay.
+        from core.tool_registry import (_build_patmax_objects,
+                                          _apply_extra_terminals,
+                                          _patmax_obj_origin_overrides)
+        results = getattr(self, "_results", None) or []
+        if not results:
+            return
+        norm_overrides = _patmax_obj_origin_overrides(params)
+        objects = _build_patmax_objects(results, self._model, norm_overrides)
+        self._node.outputs["objects"] = objects
+        if objects:
+            self._node.outputs["x"] = objects[0]["x"]
+            self._node.outputs["y"] = objects[0]["y"]
+        # Clear old terminal values then re-apply (in-place mutation on dict)
+        for term in (params.get("_extra_terminals") or []):
+            from core.tool_registry import auto_terminal_name
+            nm = auto_terminal_name(term)
+            self._node.outputs.pop(nm, None)
+        _apply_extra_terminals(self._node.outputs, objects, params)
+
+        # Update Results table — chỉ ô X, Y của row Origin obj_idx
+        if hasattr(self, "_result_table"):
+            self._result_table.populate(results, self._model, norm_overrides)
+
     def _train(self):
         if self._current_image is None:
             QMessageBox.warning(self, "Train", "Chưa có ảnh. Hãy chạy pipeline trước.")
@@ -1391,15 +1431,20 @@ class PatMaxDialog(QDialog):
             self._results = results
             self._score_map_img = score_map_vis
 
-            # Draw results on image (apply per-object origin overrides nếu có)
+            # Draw results on image (apply per-object origin overrides nếu có).
+            # Skip origin markers — Qt overlay vẽ chúng draggable trên result
+            # view; refs + bbox vẫn baked vào cv2 (không drag được).
             from core.tool_registry import _patmax_obj_origin_overrides
             overrides = _patmax_obj_origin_overrides(self._node.params)
             result_vis = draw_patmax_results(img, results, self._model,
-                                              obj_origin_overrides=overrides)
+                                              obj_origin_overrides=overrides,
+                                              draw_origin_markers=False)
             # Save for display
             self._result_vis = result_vis
 
             self._result_table.populate(results, self._model, overrides)
+            # Refresh Qt draggable markers ngay sau search
+            self._refresh_obj_origin_markers()
 
             n = len(results)
             if n > 0:
@@ -1558,19 +1603,22 @@ class PatMaxDialog(QDialog):
             img = _rv if _rv is not None else self._current_image
             if img is not None:
                 self._img_label.set_image(img)
-            # Khi đang xem result_vis: marker origin + extras đã vẽ trong ảnh,
-            # ẩn overlay để không chồng. Khi xem raw image: bật overlay.
+            # Result view: ẩn train origin/extras, bật per-object draggable
+            # origin markers (Qt overlay). Raw view: ngược lại.
             if _rv is not None:
                 self._img_label.set_origin(None, None)
                 self._img_label.clear_extras()
+                self._refresh_obj_origin_markers()
             else:
                 self._img_label.set_origin(self._sp_origin_x.value(),
                                            self._sp_origin_y.value())
                 self._refresh_canvas_extras()
+                self._img_label.clear_obj_origins()
             self._view_info.setText("Output image with results")
         elif view == "scoremap":
             self._img_label.set_origin(None, None)
             self._img_label.clear_extras()
+            self._img_label.clear_obj_origins()
             img = getattr(self, "_score_map_img", None)
             if img is not None:
                 self._img_label.set_image(img)
@@ -1581,6 +1629,7 @@ class PatMaxDialog(QDialog):
         elif view == "edges":
             self._img_label.set_origin(None, None)
             self._img_label.clear_extras()
+            self._img_label.clear_obj_origins()
             if self._model.is_valid() and self._model.edge_image is not None:
                 import cv2
                 edge_vis = cv2.cvtColor(self._model.edge_image, cv2.COLOR_GRAY2BGR)
@@ -1828,6 +1877,34 @@ class PatMaxDialog(QDialog):
                 "angle": float(ref.get("angle", 0.0)),
             })
         self._img_label.set_extras(canvas_list)
+
+    def _refresh_obj_origin_markers(self):
+        """Populate per-object draggable origin markers từ results + overrides.
+        Gọi khi vào result view. Multi-obj → label 'Obj N'; single → 'O'.
+        """
+        if not hasattr(self, "_img_label"):
+            return
+        results = getattr(self, "_results", None) or []
+        if not results:
+            self._img_label.clear_obj_origins()
+            return
+        from core.tool_registry import _patmax_obj_origin_overrides
+        from core.patmax_engine import resolve_obj_origin_xy
+        overrides = _patmax_obj_origin_overrides(self._node.params)
+        multi = sum(1 for r in results if r.found) > 1
+        items = []
+        for i, r in enumerate(results):
+            if not r.found:
+                continue
+            ox, oy = resolve_obj_origin_xy(r, i, overrides)
+            items.append({
+                "x":       float(ox),
+                "y":       float(oy),
+                "angle":   float(r.angle),
+                "name":    f"Obj {i+1}" if multi else "O",
+                "obj_idx": i,
+            })
+        self._img_label.set_obj_origins(items)
 
     def _on_extra_ref_selected(self, row: int):
         refs = self._extras()

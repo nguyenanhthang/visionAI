@@ -853,13 +853,17 @@ def draw_patmax_results(image: np.ndarray,
                          show_reference: bool = True,
                          show_xy: Optional[bool] = None,
                          show_bbox: Optional[bool] = None,
-                         obj_origin_overrides: Optional[Dict[int, Tuple[float, float]]] = None) -> np.ndarray:
+                         obj_origin_overrides: Optional[Dict[int, Tuple[float, float]]] = None,
+                         draw_origin_markers: bool = True) -> np.ndarray:
     """Render k\u1ebft qu\u1ea3 PatMax l\u00ean \u1ea3nh.
 
-    show_xy=False    \u2192 \u1ea9n origin marker, X/Y axes, label "O (x,y)".
-    show_bbox=False  \u2192 \u1ea9n rotated bounding box v\u00e0 score label.
-    show_reference   \u2192 master toggle (legacy). Khi show_xy/show_bbox
-                       kh\u00f4ng truy\u1ec1n v\u00e0o, m\u1eb7c \u0111\u1ecbnh = show_reference.
+    show_xy=False           \u2192 \u1ea9n origin marker, X/Y axes, label "O (x,y)".
+    show_bbox=False         \u2192 \u1ea9n rotated bounding box v\u00e0 score label.
+    show_reference          \u2192 master toggle (legacy). Khi show_xy/show_bbox
+                              kh\u00f4ng truy\u1ec1n v\u00e0o, m\u1eb7c \u0111\u1ecbnh = show_reference.
+    draw_origin_markers     \u2192 False: skip XY axes + label \u1edf origin (refs
+                              v\u1eabn v\u1ebd). D\u00f9ng cho dialog result view khi Qt
+                              overlay v\u1ebd markers draggable thay.
     """
     vis = image.copy() if len(image.shape)==3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     # Resolve toggles: show_xy / show_bbox ri\u00eang l\u1ebb override show_reference
@@ -910,40 +914,37 @@ def draw_patmax_results(image: np.ndarray,
         ox_i = int(round(ox)); oy_i = int(round(oy))
 
         if show_xy:
-            # Marker origin: ch\u1ec9 tr\u1ee5c XY + label (kh\u00f4ng v\u00f2ng, kh\u00f4ng X-cross)
-            r_o  = _t(11, s)
-            r_d  = _t(3, s)
-            arm  = _t(9, s)
-
-            # \u2500\u2500 H\u1ec7 tr\u1ee5c XY t\u1ea1i origin, xoay theo r.angle \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+            # D\u00f9ng ":" thay "\u00b7" \u0111\u1ec3 cv2 ASCII font hi\u1ec3n th\u1ecb \u0111\u00fang (\u00b7\u2192??).
+            obj_prefix = f"Obj {i+1}: " if multi_obj else ""
             axis_len = max(_t(40, s), int(min(r.width, r.height) * 0.40))
             rad = math.radians(-r.angle)
             cax = math.cos(rad); sax = math.sin(rad)
-            # X axis (\u0111\u1ecf): d\u1ecdc theo angle
-            x_end = (int(ox_i + cax * axis_len), int(oy_i + sax * axis_len))
-            cv2.arrowedLine(vis, (ox_i, oy_i), x_end, COL_X, _t(2, s),
-                            cv2.LINE_AA, tipLength=0.18)
-            cv2.putText(vis, "X", (x_end[0] + _t(4, s), x_end[1] + _t(4, s)),
-                        cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_X, _t(2, s),
-                        cv2.LINE_AA)
-            # Y axis (xanh l\u00e1): 90\u00b0 clockwise so v\u1edbi X trong image-space (Y\u2193)
-            y_end = (int(ox_i - sax * axis_len), int(oy_i + cax * axis_len))
-            cv2.arrowedLine(vis, (ox_i, oy_i), y_end, COL_Y, _t(2, s),
-                            cv2.LINE_AA, tipLength=0.18)
-            cv2.putText(vis, "Y", (y_end[0] + _t(4, s), y_end[1] + _t(4, s)),
-                        cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_Y, _t(2, s),
-                        cv2.LINE_AA)
 
-            # Label "O (x.x, y.y)  +angle" \u2014 cyan, ph\u00eda tr\u00ean-ph\u1ea3i origin.
-            # D\u00f9ng ":" thay "\u00b7" \u0111\u1ec3 cv2 ASCII font hi\u1ec3n th\u1ecb \u0111\u00fang (\u00b7\u2192??).
-            obj_prefix = f"Obj {i+1}: " if multi_obj else ""
-            ol_txt = f"{obj_prefix}O ({ox:.1f},{oy:.1f})"
-            if abs(r.angle) > 0.05:
-                ol_txt += f"  {r.angle:+.1f}deg"
-            cv2.putText(vis, ol_txt,
-                        (ox_i + int(14 * s), oy_i - int(10 * s)),
-                        cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_CYAN,
-                        _t(2, s), cv2.LINE_AA)
+            if draw_origin_markers:
+                # \u2500\u2500 H\u1ec7 tr\u1ee5c XY t\u1ea1i origin, xoay theo r.angle \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+                # X axis (\u0111\u1ecf): d\u1ecdc theo angle
+                x_end = (int(ox_i + cax * axis_len), int(oy_i + sax * axis_len))
+                cv2.arrowedLine(vis, (ox_i, oy_i), x_end, COL_X, _t(2, s),
+                                cv2.LINE_AA, tipLength=0.18)
+                cv2.putText(vis, "X", (x_end[0] + _t(4, s), x_end[1] + _t(4, s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_X, _t(2, s),
+                            cv2.LINE_AA)
+                # Y axis (xanh l\u00e1): 90\u00b0 clockwise so v\u1edbi X trong image-space (Y\u2193)
+                y_end = (int(ox_i - sax * axis_len), int(oy_i + cax * axis_len))
+                cv2.arrowedLine(vis, (ox_i, oy_i), y_end, COL_Y, _t(2, s),
+                                cv2.LINE_AA, tipLength=0.18)
+                cv2.putText(vis, "Y", (y_end[0] + _t(4, s), y_end[1] + _t(4, s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_Y, _t(2, s),
+                            cv2.LINE_AA)
+
+                # Label "O (x.x, y.y)  +angle" \u2014 cyan, ph\u00eda tr\u00ean-ph\u1ea3i origin
+                ol_txt = f"{obj_prefix}O ({ox:.1f},{oy:.1f})"
+                if abs(r.angle) > 0.05:
+                    ol_txt += f"  {r.angle:+.1f}deg"
+                cv2.putText(vis, ol_txt,
+                            (ox_i + int(14 * s), oy_i - int(10 * s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, _fs(0.5, s), COL_CYAN,
+                            _t(2, s), cv2.LINE_AA)
 
             # \u2500\u2500 Extra reference points (\u0111i\u1ec3m tham chi\u1ebfu b\u1ed5 sung) \u2500\u2500\u2500\u2500\u2500\u2500
             extra_refs = list(getattr(model, "extra_refs", []) or []) if model else []

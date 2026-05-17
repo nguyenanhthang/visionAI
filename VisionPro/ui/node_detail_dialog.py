@@ -43,6 +43,9 @@ class InteractiveImageLabel(QLabel):
     origin_angle_changed = Signal(float)          # degrees
     extra_origin_changed       = Signal(int, float, float)  # idx, x, y
     extra_origin_angle_changed = Signal(int, float)         # idx, degrees
+    # Per-object origin markers (result view) — obj_idx tách rời với
+    # extra_refs index để PatMaxDialog phân biệt nguồn drag.
+    obj_origin_changed = Signal(int, float, float)  # obj_idx, x, y
     shape_drawn    = Signal(str, dict)      # shape_type, data (image coords)
     shapes_changed = Signal(list)           # multi-mode: list of {"type", **data}
     label_offset_changed = Signal(int, int) # drag label trên ảnh → (dx, dy) image px
@@ -76,6 +79,12 @@ class InteractiveImageLabel(QLabel):
         self._dragging_extra_center_idx: int = -1
         self._dragging_extra_rot_idx: int = -1
         self._extras_highlight_idx: int = -1
+        # Per-object origin markers (PatMax result view).
+        # mỗi entry: {"x", "y", "angle", "name", "obj_idx"} — image coords.
+        # Tách khỏi _extras vì semantics khác: drag → ghi override per-object
+        # vào node.params, không ảnh hưởng model pattern.
+        self._obj_origins: List[dict] = []
+        self._dragging_obj_origin_idx: int = -1
         # Khoá vẽ ROI mới khi True (cho phép edit shape hiện tại + kéo
         # origin/extras, không cho click empty area tạo shape mới)
         self._roi_locked: bool = False
@@ -390,6 +399,48 @@ class InteractiveImageLabel(QLabel):
         self._dragging_extra_rot_idx = -1
         self._extras_highlight_idx = -1
         self._render()
+
+    # ── Per-object origin markers (PatMax result view) ──────────────
+    def set_obj_origins(self, items: List[dict]):
+        """Set per-object draggable origin markers. Mỗi item cần keys:
+        x, y (image coords), angle (deg), name (str hiển thị), obj_idx (int).
+        """
+        self._obj_origins = [dict(e) for e in (items or [])]
+        if self._dragging_obj_origin_idx >= len(self._obj_origins):
+            self._dragging_obj_origin_idx = -1
+        self._render()
+
+    def clear_obj_origins(self):
+        self._obj_origins = []
+        self._dragging_obj_origin_idx = -1
+        self._render()
+
+    def _obj_origin_widget_pos(self, idx: int) -> Optional[Tuple[int, int]]:
+        if 0 <= idx < len(self._obj_origins):
+            e = self._obj_origins[idx]
+            return self._img_to_widget(float(e.get("x", 0)),
+                                        float(e.get("y", 0)))
+        return None
+
+    def _hit_obj_origin_center(self, wx: int, wy: int) -> int:
+        for i in range(len(self._obj_origins)):
+            c = self._obj_origin_widget_pos(i)
+            if c is None:
+                continue
+            dx = wx - c[0]; dy = wy - c[1]
+            if (dx * dx + dy * dy) <= self.CENTER_HIT_RADIUS ** 2:
+                return i
+        return -1
+
+    def _update_obj_origin_pos_from_widget(self, idx: int, wx: int, wy: int):
+        if not (0 <= idx < len(self._obj_origins)):
+            return
+        ix, iy = self._widget_to_img(wx, wy)
+        self._obj_origins[idx]["x"] = float(ix)
+        self._obj_origins[idx]["y"] = float(iy)
+        self._render()
+        obj_idx = int(self._obj_origins[idx].get("obj_idx", idx))
+        self.obj_origin_changed.emit(obj_idx, float(ix), float(iy))
 
     def set_roi_locked(self, locked: bool):
         """Khoá vẽ ROI mới (chỉ áp khi mode='roi'/'template').
@@ -1003,6 +1054,48 @@ class InteractiveImageLabel(QLabel):
                        f"{float(ex.get('y', 0)):.1f})  "
                        f"{float(ex.get('angle', 0)):+.1f}deg")
 
+        # Per-object origin markers (PatMax result view) — draggable centers,
+        # vẽ trục XY xoay theo angle, label cyan giống style cv2 origin marker.
+        import math as _m_oo
+        for oi, oo in enumerate(self._obj_origins):
+            wpos = self._obj_origin_widget_pos(oi)
+            if wpos is None:
+                continue
+            ocx, ocy = wpos
+            a_oo = _m_oo.radians(float(oo.get("angle", 0.0)))
+            L = self.AXIS_LEN
+            x_end = (int(ocx + _m_oo.cos(a_oo) * L),
+                     int(ocy + _m_oo.sin(a_oo) * L))
+            y_end = (int(ocx - _m_oo.sin(a_oo) * L),
+                     int(ocy + _m_oo.cos(a_oo) * L))
+
+            # X axis (đỏ)
+            p.setPen(QPen(QColor(220, 60, 60), 2, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(ocx, ocy, x_end[0], x_end[1])
+            p.setPen(QPen(QColor(220, 60, 60)))
+            p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+            p.drawText(x_end[0] + 4, x_end[1] + 4, "X")
+            # Y axis (xanh lá)
+            p.setPen(QPen(QColor(70, 180, 80), 2, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(ocx, ocy, y_end[0], y_end[1])
+            p.setPen(QPen(QColor(70, 180, 80)))
+            p.drawText(y_end[0] + 4, y_end[1] + 4, "Y")
+            # Center dot (cyan filled) — hint kéo được
+            cdot_col = QColor(0, 212, 255)
+            p.setPen(QPen(cdot_col, 1))
+            p.setBrush(QBrush(cdot_col))
+            p.drawEllipse(ocx - 4, ocy - 4, 8, 8)
+            # Label
+            nm_oo = str(oo.get("name", f"Obj {oi+1}"))
+            p.setPen(QPen(QColor(0, 212, 255)))
+            p.setFont(QFont("Courier New", 9, QFont.Bold))
+            ang_oo = float(oo.get("angle", 0.0))
+            lbl = (f"{nm_oo}: O ({float(oo.get('x', 0)):.1f},"
+                   f"{float(oo.get('y', 0)):.1f})")
+            if abs(ang_oo) > 0.05:
+                lbl += f"  {ang_oo:+.1f}deg"
+            p.drawText(ocx + 14, ocy - 10, lbl)
+
         # Pixel pick marker
         if self._pick_pos and self.mode == "pick":
             px2, py2 = self._img_to_widget(*self._pick_pos)
@@ -1056,6 +1149,13 @@ class InteractiveImageLabel(QLabel):
             if ehit >= 0:
                 self._dragging_extra_center_idx = ehit
                 self._update_extra_pos_from_widget(ehit, pos.x(), pos.y())
+                return
+            # Per-object origin markers (drag center, không có rotate handle)
+            ohit = self._hit_obj_origin_center(pos.x(), pos.y())
+            if ohit >= 0:
+                self._dragging_obj_origin_idx = ohit
+                self._update_obj_origin_pos_from_widget(
+                    ohit, pos.x(), pos.y())
                 return
             if event.button() == Qt.RightButton and self._shape == "polygon":
                 # Right-click: huỷ polygon đang vẽ
@@ -1178,6 +1278,10 @@ class InteractiveImageLabel(QLabel):
             self._update_extra_pos_from_widget(
                 self._dragging_extra_center_idx, pos.x(), pos.y())
             return
+        if self._dragging_obj_origin_idx >= 0:
+            self._update_obj_origin_pos_from_widget(
+                self._dragging_obj_origin_idx, pos.x(), pos.y())
+            return
         if self._edit_action:
             self._apply_edit(pos)
             return
@@ -1212,6 +1316,9 @@ class InteractiveImageLabel(QLabel):
             return
         if self._dragging_extra_center_idx >= 0:
             self._dragging_extra_center_idx = -1
+            return
+        if self._dragging_obj_origin_idx >= 0:
+            self._dragging_obj_origin_idx = -1
             return
         if self._edit_action:
             # Kết thúc move/resize — phát signal cho dialog cha cập nhật ROI
