@@ -770,24 +770,43 @@ def proc_blob(inputs, params):
                     }.get(params.get("label_font","Simplex"),cv2.FONT_HERSHEY_SIMPLEX)
     blobs = []; centroids = []; total_area = 0.0
     label_rects = []   # mỗi entry: (x, y, w, h) trong toạ độ ảnh — hit test drag
+    show_rejected = bool(params.get("show_rejected", False))
+    rejected = {"area": 0, "circularity": 0, "elongation": 0, "moments": 0}
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < min_a or area > max_a: continue
+        if area < min_a or area > max_a:
+            rejected["area"] += 1
+            if show_rejected:
+                cv2.drawContours(vis, [cnt], -1, (60, 60, 200),
+                                  _t(max(1, contour_thick - 1), s))
+            continue
 
         perimeter = cv2.arcLength(cnt, True)
         circularity = (4*math.pi*area/(perimeter**2)) if perimeter>0 else 0
-        if not (min_circ <= circularity <= max_circ): continue
+        if not (min_circ <= circularity <= max_circ):
+            rejected["circularity"] += 1
+            if show_rejected:
+                cv2.drawContours(vis, [cnt], -1, (60, 60, 200),
+                                  _t(max(1, contour_thick - 1), s))
+            continue
 
         M = cv2.moments(cnt)
-        if M["m00"] == 0: continue
+        if M["m00"] == 0:
+            rejected["moments"] += 1
+            continue
         cx = M["m10"]/M["m00"]; cy = M["m01"]/M["m00"]
 
         # Bounding box & orientation
         rect = cv2.minAreaRect(cnt)
         (bx,by),(bw,bh),angle_deg = rect
         elongation = max(bw,bh)/max(min(bw,bh),0.001)
-        if not (min_elo <= elongation <= max_elo): continue
+        if not (min_elo <= elongation <= max_elo):
+            rejected["elongation"] += 1
+            if show_rejected:
+                cv2.drawContours(vis, [cnt], -1, (60, 60, 200),
+                                  _t(max(1, contour_thick - 1), s))
+            continue
 
         # Convex hull & convexity
         hull       = cv2.convexHull(cnt)
@@ -832,14 +851,57 @@ def proc_blob(inputs, params):
     min_cnt = params.get("min_count", 1)
     max_cnt = params.get("max_count", 1000)
     is_pass = min_cnt <= len(blobs) <= max_cnt
-    print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² {'PASS' if is_pass else 'FAIL'}")
+    total_cnt = len(contours)
+    total_rej = sum(rejected.values())
+    print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² "
+          f"contours={total_cnt} rejected={rejected} "
+          f"{'PASS' if is_pass else 'FAIL'}")
 
-    return {"image":vis,"count":len(blobs),"pass":is_pass,
-            "total_area":total_area,"blobs":blobs,"centroids":centroids,
-            # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
-            # khi user kéo label trên canvas. Không expose qua port.
-            "_label_rects": label_rects,
-            "_label_centroids": [(float(cx2), float(cy2)) for (cx2, cy2) in centroids]}
+    # Diagnostic overlay khi không bắt được blob nào
+    if len(blobs) == 0:
+        H, W = vis.shape[:2]
+        font = cv2.FONT_HERSHEY_DUPLEX
+        fs2 = _fs(0.8, s); th2 = _t(2, s)
+        msg1 = "NO BLOB DETECTED"
+        # Tính reason chính
+        if total_cnt == 0:
+            reason = "Mask trong => kiem tra threshold/HSV upstream"
+        else:
+            top = max(rejected, key=rejected.get)
+            reason_map = {
+                "area": f"Tat ca bi loc boi area ({rejected['area']}/{total_cnt}) "
+                        f"=> giam min_area / tang max_area",
+                "circularity": f"Bi loc circularity ({rejected['circularity']}/{total_cnt}) "
+                               f"=> noi rong [min,max] circularity",
+                "elongation": f"Bi loc elongation ({rejected['elongation']}/{total_cnt}) "
+                              f"=> noi rong [min,max] elongation",
+                "moments": "Contour suy bien (m00=0)",
+            }
+            reason = reason_map.get(top, f"contours={total_cnt} rejected={rejected}")
+        (tw1, th1), _ = cv2.getTextSize(msg1, font, fs2, th2)
+        (tw2, th2_h), _ = cv2.getTextSize(reason, font, _fs(0.5, s), _t(1, s))
+        pad = int(12 * s)
+        bw_d = max(tw1, tw2) + pad * 2
+        bh_d = th1 + th2_h + pad * 3
+        x0 = (W - bw_d) // 2; y0 = (H - bh_d) // 2
+        cv2.rectangle(vis, (x0, y0), (x0 + bw_d, y0 + bh_d), (0, 0, 0), -1)
+        cv2.rectangle(vis, (x0, y0), (x0 + bw_d, y0 + bh_d), (0, 0, 220), th2)
+        cv2.putText(vis, msg1, (x0 + pad, y0 + pad + th1),
+                    font, fs2, (0, 0, 255), th2, cv2.LINE_AA)
+        cv2.putText(vis, reason, (x0 + pad, y0 + pad * 2 + th1 + th2_h),
+                    font, _fs(0.5, s), (0, 200, 255), _t(1, s), cv2.LINE_AA)
+
+    out = {"image":vis,"count":len(blobs),"pass":is_pass,
+           "total_area":total_area,"blobs":blobs,"centroids":centroids,
+           # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
+           # khi user kéo label trên canvas. Không expose qua port.
+           "_label_rects": label_rects,
+           "_label_centroids": [(float(cx2), float(cy2)) for (cx2, cy2) in centroids]}
+    # Diagnostic — show_mask=True hiển thị mask thay vì overlay → debug
+    # vì sao không bắt được blob (nhiễu? đứt đoạn? quá nhỏ?).
+    if params.get("show_mask", False):
+        out["_display_image"] = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1936,6 +1998,13 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("pixel_to_mm2","px²→mm²","float",1.0,0.0001,1e6,step=0.0001),
      P("min_count","Min Count","int",1,0,10000),
      P("max_count","Max Count","int",1000,0,10000),
+     P("show_mask","Show Mask (debug)","bool",False,
+       tooltip="Hiển thị mask nhị phân thay vì overlay — dùng để debug khi "
+               "không detect được blob (xem mask có nhiễu/đứt đoạn không)."),
+     P("show_rejected","Show Rejected Blobs","bool",False,
+       tooltip="Vẽ contour bị loại (do area/circularity/elongation) bằng nét "
+               "xanh đậm — để biết chỉnh ngưỡng nào cho đúng. Khi count=0, "
+               "overlay đỏ ở giữa ảnh sẽ chỉ rõ lý do bị loại nhiều nhất."),
      P("show_contours","Show Contours","bool",True,
        tooltip="Vẽ contour quanh từng blob."),
      P("contour_color","Contour Color","enum","Yellow",
