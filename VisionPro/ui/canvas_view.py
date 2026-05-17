@@ -335,6 +335,16 @@ class AOICanvas(QGraphicsView):
             self.setCursor(Qt.ClosedHandCursor)
             event.accept()
             return
+        # Left-click trên vùng trống (không trúng node nào) → pan canvas
+        # thay vì rubber-band select, giống Figma/Photoshop.
+        if event.button() == Qt.LeftButton:
+            item = self.itemAt(event.pos())
+            if item is None:
+                self._panning   = True
+                self._pan_start = event.pos()
+                self.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -350,8 +360,9 @@ class AOICanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MiddleButton:
+        if self._panning and event.button() in (Qt.MiddleButton, Qt.LeftButton):
             self._panning = False
+            self._pan_start = None
             self.setCursor(Qt.ArrowCursor)
             event.accept()
             return

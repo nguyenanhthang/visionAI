@@ -745,7 +745,22 @@ def proc_blob(inputs, params):
     show_labels   = bool(params.get("show_labels", False))
     label_dx      = int(params.get("label_dx", 6))
     label_dy      = int(params.get("label_dy", -6))
+    label_size    = float(params.get("label_size", 0.45))
+    label_thick   = int(params.get("label_thickness", 1))
+    label_color   = {"Yellow":(0,200,255),"Cyan":(255,255,0),
+                     "Green":(0,255,80),"Red":(0,0,255),
+                     "White":(255,255,255),"Magenta":(255,0,255)
+                    }.get(params.get("label_color","Yellow"),(0,200,255))
+    label_font    = {"Simplex":cv2.FONT_HERSHEY_SIMPLEX,
+                     "Plain":cv2.FONT_HERSHEY_PLAIN,
+                     "Duplex":cv2.FONT_HERSHEY_DUPLEX,
+                     "Complex":cv2.FONT_HERSHEY_COMPLEX,
+                     "Triplex":cv2.FONT_HERSHEY_TRIPLEX,
+                     "Script Simplex":cv2.FONT_HERSHEY_SCRIPT_SIMPLEX,
+                     "Script Complex":cv2.FONT_HERSHEY_SCRIPT_COMPLEX,
+                    }.get(params.get("label_font","Simplex"),cv2.FONT_HERSHEY_SIMPLEX)
     blobs = []; centroids = []; total_area = 0.0
+    label_rects = []   # mỗi entry: (x, y, w, h) trong toạ độ ảnh — hit test drag
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -793,10 +808,17 @@ def proc_blob(inputs, params):
         if show_labels:
             # mm² ký tự Unicode → Hershey font không render được (ra "??").
             # Dùng "mm2" ASCII.
+            text = f"{area_mm:.1f} mm2"
             tx = int(cx) + int(label_dx * s)
             ty = int(cy) + int(label_dy * s)
-            cv2.putText(vis,f"{area_mm:.1f} mm2",(tx, ty),
-                        cv2.FONT_HERSHEY_SIMPLEX,_fs(0.45,s),(0,200,255),_t(1,s))
+            fs_val = _fs(label_size, s)
+            th_val = _t(label_thick, s)
+            cv2.putText(vis, text, (tx, ty),
+                        label_font, fs_val, label_color, th_val,
+                        cv2.LINE_AA)
+            # Bounding rect của text → dialog hit-test khi drag
+            (tw, th), bl = cv2.getTextSize(text, label_font, fs_val, th_val)
+            label_rects.append((tx, ty - th - bl, tw, th + bl))
 
     min_cnt = params.get("min_count", 1)
     max_cnt = params.get("max_count", 1000)
@@ -804,7 +826,11 @@ def proc_blob(inputs, params):
     print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² {'PASS' if is_pass else 'FAIL'}")
 
     return {"image":vis,"count":len(blobs),"pass":is_pass,
-            "total_area":total_area,"blobs":blobs,"centroids":centroids}
+            "total_area":total_area,"blobs":blobs,"centroids":centroids,
+            # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
+            # khi user kéo label trên canvas. Không expose qua port.
+            "_label_rects": label_rects,
+            "_label_centroids": [(float(cx2), float(cy2)) for (cx2, cy2) in centroids]}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1910,9 +1936,21 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("show_labels","Show Labels","bool",False,
        tooltip="Hiển thị label area (mm2) cạnh từng blob."),
      P("label_dx","Label Offset X","int",6,-300,300,use_slider=True,
-       tooltip="Dịch label theo trục X (px, đã scale theo ảnh)."),
+       tooltip="Dịch label theo trục X (px, đã scale theo ảnh). "
+               "Có thể kéo label trực tiếp trên ảnh — slider tự sync."),
      P("label_dy","Label Offset Y","int",-6,-300,300,use_slider=True,
-       tooltip="Dịch label theo trục Y (px). Âm = lên trên, dương = xuống dưới.")],
+       tooltip="Dịch label theo trục Y (px). Âm = lên trên, dương = xuống dưới. "
+               "Có thể kéo label trực tiếp trên ảnh — slider tự sync."),
+     P("label_color","Label Color","enum","Yellow",
+       choices=["Yellow","Cyan","Green","Red","White","Magenta"]),
+     P("label_font","Label Font","enum","Simplex",
+       choices=["Simplex","Plain","Duplex","Complex","Triplex",
+                "Script Simplex","Script Complex"]),
+     P("label_size","Label Font Size","float",0.45,0.2,3.0,step=0.05,
+       use_slider=True,
+       tooltip="Cỡ chữ (font scale OpenCV)."),
+     P("label_thickness","Label Thickness","int",1,1,8,use_slider=True,
+       tooltip="Độ dày nét chữ.")],
     proc_blob, "CogBlobTool"),
 
   # ── EDGE / LINE / CIRCLE ────────────────────────────────────────

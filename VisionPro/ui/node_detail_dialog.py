@@ -45,6 +45,7 @@ class InteractiveImageLabel(QLabel):
     extra_origin_angle_changed = Signal(int, float)         # idx, degrees
     shape_drawn    = Signal(str, dict)      # shape_type, data (image coords)
     shapes_changed = Signal(list)           # multi-mode: list of {"type", **data}
+    label_offset_changed = Signal(int, int) # drag label trên ảnh → (dx, dy) image px
 
     def __init__(self, mode="view", parent=None):
         super().__init__(parent)
@@ -92,6 +93,15 @@ class InteractiveImageLabel(QLabel):
         self._multi: bool = False
         self._shapes: List[dict] = []     # mỗi entry: {"type": str, "data": dict}
         self._active_idx: Optional[int] = None
+
+        # Draggable labels (vd Blob Analysis output) — list rect (x,y,w,h)
+        # trong toạ độ ảnh + tâm anchor (cx, cy) tương ứng.
+        self._label_rects: List[Tuple[int, int, int, int]] = []
+        self._label_anchors: List[Tuple[float, float]] = []
+        self._dragging_label: bool = False
+        self._label_drag_start_img: Optional[Tuple[float, float]] = None
+        self._label_drag_start_off: Tuple[int, int] = (0, 0)
+        self._current_label_off: Tuple[int, int] = (0, 0)
 
         self.setAlignment(Qt.AlignCenter)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -386,6 +396,27 @@ class InteractiveImageLabel(QLabel):
         Khi True: click empty area không tạo shape mới; vẫn cho edit
         shape hiện có + kéo origin/extras."""
         self._roi_locked = bool(locked)
+
+    def set_label_rects(self, rects: List[Tuple[int, int, int, int]],
+                         anchors: List[Tuple[float, float]],
+                         current_offset: Tuple[int, int]):
+        """Đăng ký vùng draggable cho text labels (vd: Blob output).
+        rects/anchors cùng độ dài. current_offset là (dx, dy) hiện tại
+        trong params — cần để khôi phục anchor lúc drag."""
+        self._label_rects = list(rects or [])
+        self._label_anchors = list(anchors or [])
+        self._current_label_off = tuple(current_offset or (0, 0))
+
+    def _hit_label(self, wx: int, wy: int) -> int:
+        """Trả về index label trúng tại (wx, wy) widget coords, -1 nếu miss."""
+        for i, (rx, ry, rw, rh) in enumerate(self._label_rects):
+            wx0, wy0 = self._img_to_widget(rx, ry)
+            ww = max(1, int(rw * self._scale))
+            wh = max(1, int(rh * self._scale))
+            # Mở rộng tolerance 4px để dễ trúng
+            if wx0 - 4 <= wx <= wx0 + ww + 4 and wy0 - 4 <= wy <= wy0 + wh + 4:
+                return i
+        return -1
 
     def set_extras_highlight(self, idx: int):
         """Highlight extra marker idx (-1 = không highlight)."""
@@ -738,6 +769,9 @@ class InteractiveImageLabel(QLabel):
         canvas = QPixmap(self.width(), self.height())
         canvas.fill(QColor(5, 8, 16))
         p = QPainter(canvas)
+        # Anti-alias cho shape; SmoothPixmapTransform giúp nét cả khi zoom in/out.
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.drawPixmap(self._off_x, self._off_y, dw, dh, pix)
 
         # Readonly rect (port connected) — màu xanh lá
@@ -985,6 +1019,15 @@ class InteractiveImageLabel(QLabel):
         if event.button() != Qt.LeftButton:
             return
         pos = event.position().toPoint()
+        # Label drag (Blob/AreaMeasure…): bắt trước mọi mode khác.
+        if self._label_rects and self._hit_label(pos.x(), pos.y()) >= 0:
+            self._dragging_label = True
+            ix, iy = self._widget_to_img(pos.x(), pos.y())
+            self._label_drag_start_img = (float(ix), float(iy))
+            self._label_drag_start_off = tuple(self._current_label_off)
+            self.setCursor(QCursor(Qt.ClosedHandCursor))
+            event.accept()
+            return
         if self.mode == "pick":
             ix, iy = self._widget_to_img(pos.x(), pos.y())
             if self._arr is not None:
@@ -1099,6 +1142,28 @@ class InteractiveImageLabel(QLabel):
 
     def mouseMoveEvent(self, event: QMouseEvent):
         pos = event.position().toPoint()
+        # Label drag (Blob output) — sync offset về dialog/slider qua signal.
+        if self._dragging_label and self._label_drag_start_img is not None:
+            ix, iy = self._widget_to_img(pos.x(), pos.y())
+            dx0, dy0 = self._label_drag_start_off
+            sx, sy = self._label_drag_start_img
+            new_dx = int(round(dx0 + (ix - sx)))
+            new_dy = int(round(dy0 + (iy - sy)))
+            # Cập nhật state local trước khi emit để hit-test mượt
+            self._current_label_off = (new_dx, new_dy)
+            self.label_offset_changed.emit(new_dx, new_dy)
+            return
+        # Đổi cursor khi hover trên label
+        if (not self._dragging and not self._dragging_origin
+                and not self._dragging_origin_rot
+                and self._label_rects):
+            if self._hit_label(pos.x(), pos.y()) >= 0:
+                self.setCursor(QCursor(Qt.OpenHandCursor))
+            else:
+                cur_map = {"roi": Qt.CrossCursor, "template": Qt.CrossCursor,
+                           "pick": Qt.PointingHandCursor, "view": Qt.ArrowCursor,
+                           "readonly": Qt.ArrowCursor}
+                self.setCursor(QCursor(cur_map.get(self.mode, Qt.ArrowCursor)))
         if self._dragging_origin_rot:
             self._update_origin_angle_from_widget(pos.x(), pos.y())
             return
@@ -1128,6 +1193,14 @@ class InteractiveImageLabel(QLabel):
         self._render()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._dragging_label:
+            self._dragging_label = False
+            self._label_drag_start_img = None
+            cur_map = {"roi": Qt.CrossCursor, "template": Qt.CrossCursor,
+                       "pick": Qt.PointingHandCursor, "view": Qt.ArrowCursor,
+                       "readonly": Qt.ArrowCursor}
+            self.setCursor(QCursor(cur_map.get(self.mode, Qt.ArrowCursor)))
+            return
         if self._dragging_origin_rot:
             self._dragging_origin_rot = False
             return
@@ -1459,6 +1532,9 @@ class NodeDetailDialog(QDialog):
 
         else:
             self._img_label = InteractiveImageLabel(mode="view")
+
+        # Tool nào xuất _label_rects (vd Blob) → cho drag label sync về slider.
+        self._img_label.label_offset_changed.connect(self._on_label_dragged)
 
         img_hdr.addWidget(QWidget())   # spacer placeholder
         rl.addLayout(img_hdr)
@@ -1792,6 +1868,23 @@ class NodeDetailDialog(QDialog):
         if checked:
             self._auto_run_timer.start()
 
+    def _on_label_dragged(self, dx: int, dy: int):
+        """User kéo text label trên ảnh → sync vào params label_dx/dy
+        + spinbox/slider ở Params panel (block signal tránh feedback loop).
+        Luôn debounce qua timer — drag liên tục có thể spam rất nhiều."""
+        node = self._node
+        node.params["label_dx"] = int(dx)
+        node.params["label_dy"] = int(dy)
+        for name, val in (("label_dx", dx), ("label_dy", dy)):
+            pr = getattr(self, "_param_rows", {}).get(name)
+            if pr:
+                ed = pr._editor
+                if hasattr(ed, "setValue"):
+                    ed.blockSignals(True)
+                    ed.setValue(int(val))
+                    ed.blockSignals(False)
+        self._auto_run_timer.start()
+
     def _rebuild_params_tab(self):
         """Rebuild Params tab — dùng khi visible_if của param khác đổi.
         An toàn khi dialog đã đóng / scroll widget đã bị Qt xoá."""
@@ -1896,6 +1989,13 @@ class NodeDetailDialog(QDialog):
                 self._img_info.setStyleSheet(
                     f"color:{sc}; font-size:10px; font-family:'Courier New'; padding:2px;")
             self._img_label.set_image(img)
+
+            # Label drag (Blob…): nạp rect + anchor để hit-test sau mỗi run.
+            label_rects = node.outputs.get("_label_rects") or []
+            anchors = node.outputs.get("_label_centroids") or []
+            cur_off = (int(node.params.get("label_dx", 0)),
+                       int(node.params.get("label_dy", 0)))
+            self._img_label.set_label_rects(label_rects, anchors, cur_off)
 
             # crop_roi: hiển thị rect
             if node.tool.tool_id == "crop_roi":
