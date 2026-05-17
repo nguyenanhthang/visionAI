@@ -744,6 +744,13 @@ def proc_blob(inputs, params):
     show_centroid = bool(params.get("show_centroid", True))
     contour_thick = int(params.get("contour_thickness", 2))
     bbox_thick    = int(params.get("bbox_thickness", 1))
+    _color_map    = {"Yellow":(0,200,255),"Cyan":(255,255,0),
+                     "Green":(0,255,80),"Red":(0,0,255),
+                     "White":(255,255,255),"Magenta":(255,0,255),
+                     "Orange":(0,140,255),"Blue":(255,80,0)}
+    contour_color = _color_map.get(params.get("contour_color","Yellow"),(0,200,255))
+    bbox_color    = _color_map.get(params.get("bbox_color","Orange"),(0,140,255))
+    centroid_color= _color_map.get(params.get("centroid_color","Green"),(0,255,80))
     show_labels   = bool(params.get("show_labels", False))
     label_dx      = int(params.get("label_dx", 6))
     label_dy      = int(params.get("label_dy", -6))
@@ -802,11 +809,11 @@ def proc_blob(inputs, params):
         # Draw
         box = cv2.boxPoints(rect).astype(np.int32)
         if show_contours:
-            cv2.drawContours(vis,[cnt],-1,(0,200,255),_t(contour_thick,s))
+            cv2.drawContours(vis,[cnt],-1,contour_color,_t(contour_thick,s))
         if show_bbox:
-            cv2.drawContours(vis,[box],-1,(255,180,0),_t(bbox_thick,s))
+            cv2.drawContours(vis,[box],-1,bbox_color,_t(bbox_thick,s))
         if show_centroid:
-            cv2.circle(vis,(int(cx),int(cy)),_t(4,s),(0,255,80),-1)
+            cv2.circle(vis,(int(cx),int(cy)),_t(4,s),centroid_color,-1)
         if show_labels:
             # mm² ký tự Unicode → Hershey font không render được (ra "??").
             # Dùng "mm2" ASCII.
@@ -1930,15 +1937,21 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("min_count","Min Count","int",1,0,10000),
      P("max_count","Max Count","int",1000,0,10000),
      P("show_contours","Show Contours","bool",True,
-       tooltip="Vẽ contour vàng quanh từng blob."),
+       tooltip="Vẽ contour quanh từng blob."),
+     P("contour_color","Contour Color","enum","Yellow",
+       choices=["Yellow","Cyan","Green","Red","White","Magenta","Orange","Blue"]),
      P("contour_thickness","Contour Thickness","int",2,1,12,use_slider=True,
        tooltip="Độ dày nét contour (px, scale theo ảnh)."),
      P("show_bbox","Show BBox","bool",True,
-       tooltip="Vẽ rotated bounding box cam."),
+       tooltip="Vẽ rotated bounding box."),
+     P("bbox_color","BBox Color","enum","Orange",
+       choices=["Yellow","Cyan","Green","Red","White","Magenta","Orange","Blue"]),
      P("bbox_thickness","BBox Thickness","int",1,1,12,use_slider=True,
        tooltip="Độ dày nét bounding box (px, scale theo ảnh)."),
      P("show_centroid","Show Centroid","bool",True,
-       tooltip="Chấm xanh tại tâm blob."),
+       tooltip="Chấm tại tâm blob."),
+     P("centroid_color","Centroid Color","enum","Green",
+       choices=["Yellow","Cyan","Green","Red","White","Magenta","Orange","Blue"]),
      P("show_labels","Show Labels","bool",False,
        tooltip="Hiển thị label area (mm2) cạnh từng blob."),
      P("label_dx","Label Offset X","int",6,-300,300,use_slider=True,
