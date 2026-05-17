@@ -916,6 +916,70 @@ def proc_color_picker(inputs, params):
         cv2.putText(vis,f"H{H} S{S} V{V}",(x+int(46*s),y),cv2.FONT_HERSHEY_SIMPLEX,_fs(0.5,s),(0,255,255),_t(1,s))
     return {"image":vis,"color_hsv":color_hsv,"h":H,"s":S,"v":V,"r":R,"g":G,"b":B}
 
+def _shape_to_mask(shape_type: str, shape_data: dict,
+                   h: int, w: int) -> Optional[np.ndarray]:
+    """Build a binary mask (uint8 0/255) of an ROI shape on an h×w canvas.
+    Returns None nếu shape không hợp lệ."""
+    if not shape_type or not shape_data:
+        return None
+    m = np.zeros((h, w), dtype=np.uint8)
+    try:
+        if shape_type == "rect":
+            x = int(shape_data.get("x", 0)); y = int(shape_data.get("y", 0))
+            rw = int(shape_data.get("w", 0)); rh = int(shape_data.get("h", 0))
+            if rw <= 0 or rh <= 0: return None
+            cv2.rectangle(m, (x, y), (x + rw, y + rh), 255, -1)
+        elif shape_type == "ellipse":
+            x = int(shape_data.get("x", 0)); y = int(shape_data.get("y", 0))
+            rw = int(shape_data.get("w", 0)); rh = int(shape_data.get("h", 0))
+            if rw <= 0 or rh <= 0: return None
+            cv2.ellipse(m, (x + rw // 2, y + rh // 2),
+                        (max(1, rw // 2), max(1, rh // 2)), 0, 0, 360, 255, -1)
+        elif shape_type == "circle":
+            cx = int(shape_data.get("cx", 0)); cy = int(shape_data.get("cy", 0))
+            r = int(shape_data.get("r", 0))
+            if r <= 0: return None
+            cv2.circle(m, (cx, cy), r, 255, -1)
+        elif shape_type == "polygon":
+            pts = shape_data.get("pts") or []
+            if len(pts) < 3: return None
+            arr = np.array([[int(px), int(py)] for px, py in pts], dtype=np.int32)
+            cv2.fillPoly(m, [arr], 255)
+        else:
+            return None
+    except Exception:
+        return None
+    return m
+
+
+def _draw_shape_outline(vis: np.ndarray, shape_type: str,
+                        shape_data: dict, color=(0, 200, 255), thick=2):
+    """Vẽ outline shape lên ảnh visualization (in-place)."""
+    if not shape_type or not shape_data:
+        return
+    try:
+        if shape_type == "rect":
+            x = int(shape_data.get("x", 0)); y = int(shape_data.get("y", 0))
+            w = int(shape_data.get("w", 0)); h = int(shape_data.get("h", 0))
+            cv2.rectangle(vis, (x, y), (x + w, y + h), color, thick)
+        elif shape_type == "ellipse":
+            x = int(shape_data.get("x", 0)); y = int(shape_data.get("y", 0))
+            w = int(shape_data.get("w", 0)); h = int(shape_data.get("h", 0))
+            cv2.ellipse(vis, (x + w // 2, y + h // 2),
+                        (max(1, w // 2), max(1, h // 2)), 0, 0, 360, color, thick)
+        elif shape_type == "circle":
+            cx = int(shape_data.get("cx", 0)); cy = int(shape_data.get("cy", 0))
+            r = int(shape_data.get("r", 0))
+            cv2.circle(vis, (cx, cy), r, color, thick)
+        elif shape_type == "polygon":
+            pts = shape_data.get("pts") or []
+            if len(pts) >= 2:
+                arr = np.array([[int(px), int(py)] for px, py in pts], dtype=np.int32)
+                cv2.polylines(vis, [arr], True, color, thick)
+    except Exception:
+        pass
+
+
 def proc_color_segment(inputs, params):
     """CogColorSegmenterTool — Phân đoạn màu HSV, xuất mask + ratio."""
     img=inputs.get("image")
@@ -946,12 +1010,31 @@ def proc_color_segment(inputs, params):
     if k>0:
         mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,
                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(k,k)))
-    cnt=int(np.count_nonzero(mask)); ratio=cnt/mask.size
+
+    # ROI shape: chỉ tính trong vùng vẽ; ratio = inside/area_of_shape
+    H, W = mask.shape[:2]
+    roi_shape_type = params.get("_roi_shape_type")
+    roi_shape_data = params.get("_roi_shape_data")
+    roi_mask = _shape_to_mask(roi_shape_type, roi_shape_data, H, W)
+    if roi_mask is not None:
+        mask = cv2.bitwise_and(mask, roi_mask)
+        denom = int(np.count_nonzero(roi_mask)) or 1
+    else:
+        denom = mask.size
+
+    cnt=int(np.count_nonzero(mask)); ratio=cnt/denom
     min_r=params.get("min_ratio",0.01); max_r=params.get("max_ratio",1.0)
     is_pass=min_r<=ratio<=max_r
     vis=_bgr(img.copy()); overlay=vis.copy()
     overlay[mask>0]=[0,220,80]; cv2.addWeighted(vis,0.55,overlay,0.45,0,vis)
-    print(f"[ColorSeg] ratio={ratio:.3f} pixels={cnt} {'PASS' if is_pass else 'FAIL'}")
+    if roi_mask is not None:
+        # Làm tối phần ngoài ROI để dễ thấy vùng đang xét
+        dim = (vis * 0.35).astype(np.uint8)
+        vis = np.where(roi_mask[..., None] > 0, vis, dim)
+        _draw_shape_outline(vis, roi_shape_type, roi_shape_data,
+                            color=(0, 200, 255),
+                            thick=max(1, int(round(_draw_scale(vis) * 2))))
+    print(f"[ColorSeg] ratio={ratio:.3f} pixels={cnt}/{denom} {'PASS' if is_pass else 'FAIL'}")
     out={"image":vis,"mask":mask,"pass":is_pass,"pixel_ratio":ratio,"pixel_count":cnt}
     if params.get("show_mask",False):
         out["_display_image"]=cv2.cvtColor(mask,cv2.COLOR_GRAY2BGR)
@@ -1881,7 +1964,14 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("min_ratio","Min Ratio","float",0.01,0,1,step=0.001,use_slider=True),
      P("max_ratio","Max Ratio","float",1.0,0,1,step=0.001,use_slider=True),
      P("show_mask","Show Mask","bool",False,
-       tooltip="Hiển thị mask nhị phân (trắng/đen) thay vì overlay xanh.")],
+       tooltip="Hiển thị mask nhị phân (trắng/đen) thay vì overlay xanh."),
+     P("roi_shape","ROI Shape","enum","Full Image",
+       choices=["Full Image","Rectangle","Circle","Ellipse","Polygon"],
+       tooltip="Giới hạn vùng phân tích:\n"
+               "• Full Image: toàn ảnh (mặc định).\n"
+               "• Rectangle/Circle/Ellipse: kéo chuột để vẽ.\n"
+               "• Polygon: click từng đỉnh, double-click đóng, right-click huỷ.\n"
+               "Pixel ratio sẽ tính trên diện tích shape (không phải toàn ảnh).")],
     proc_color_segment, "CogColorSegmenterTool"),
 
   ToolDef("color_match","Color Match","Color Analysis",

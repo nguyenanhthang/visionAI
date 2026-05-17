@@ -1435,6 +1435,28 @@ class NodeDetailDialog(QDialog):
             self._img_label = InteractiveImageLabel(mode="pick")
             self._img_label.pixel_picked.connect(self._on_pixel_picked)
 
+        elif tool.tool_id == "color_segment":
+            # ROI shape: vẽ vùng cần phân tích (rect/circle/ellipse/polygon)
+            self._mode_hint.setText(
+                "🎨  Chọn ROI Shape ở params → vẽ vùng cần lọc trên ảnh "
+                "(Full Image = không giới hạn).")
+            self._mode_hint.show()
+            self._img_label = InteractiveImageLabel(mode="roi")
+            self._img_label.shape_drawn.connect(self._on_color_segment_shape)
+            roi_type = node.params.get("roi_shape", "Full Image")
+            shape_key = self._color_seg_shape_key(roi_type)
+            if shape_key:
+                self._img_label.set_shape_mode(shape_key)
+                saved = node.params.get("_roi_shape_data")
+                saved_t = node.params.get("_roi_shape_type")
+                if saved and saved_t == shape_key:
+                    QTimer.singleShot(120,
+                        lambda s=shape_key, d=dict(saved):
+                            self._img_label.set_shape_data(s, d))
+            else:
+                # Full Image → khoá vẽ shape
+                self._img_label.set_roi_locked(True)
+
         else:
             self._img_label = InteractiveImageLabel(mode="view")
 
@@ -1712,11 +1734,48 @@ class NodeDetailDialog(QDialog):
         self._pixel_bar.show()
         self._on_run()
 
+    def _color_seg_shape_key(self, label: str) -> Optional[str]:
+        return {"Rectangle": "rect", "Circle": "circle",
+                "Ellipse": "ellipse", "Polygon": "polygon"}.get(label)
+
+    def _on_color_segment_shape(self, shape_type: str, data: dict):
+        """User vẽ xong shape → lưu vào params và chạy lại nếu Auto Run."""
+        self._node.params["_roi_shape_type"] = shape_type
+        self._node.params["_roi_shape_data"] = dict(data) if data else None
+        if getattr(self, "_auto_run_cb", None) and self._auto_run_cb.isChecked():
+            self._auto_run_timer.start()
+        else:
+            # Auto Run tắt → vẫn rerun để user thấy ngay vùng ROI mới
+            self._on_run()
+
     def _on_param(self, node_id, name, value):
         if not (self._graph and node_id in self._graph.nodes):
             return
         node = self._graph.nodes[node_id]
         node.params[name] = value
+
+        # color_segment: đổi ROI Shape dropdown → đổi shape vẽ trên ảnh
+        if (node.tool.tool_id == "color_segment" and name == "roi_shape"
+                and hasattr(self, "_img_label")):
+            key = self._color_seg_shape_key(value)
+            if key is None:
+                # Full Image → xoá shape đã lưu, khoá vẽ
+                node.params.pop("_roi_shape_type", None)
+                node.params.pop("_roi_shape_data", None)
+                self._img_label.clear_shapes()
+                self._img_label.set_roi_locked(True)
+            else:
+                self._img_label.set_roi_locked(False)
+                self._img_label.set_shape_mode(key)
+                # Nếu shape đã lưu cùng loại thì khôi phục
+                saved = node.params.get("_roi_shape_data")
+                saved_t = node.params.get("_roi_shape_type")
+                if saved and saved_t == key:
+                    self._img_label.set_shape_data(key, dict(saved))
+                else:
+                    node.params.pop("_roi_shape_data", None)
+                    node.params.pop("_roi_shape_type", None)
+
         # Nếu có param khác phụ thuộc tên này → rebuild Params tab để cập nhật.
         # Defer qua event loop: rebuild ngay trong slot sẽ xoá chính widget
         # đang phát signal (vd QComboBox source_mode toggle Folder ↔ File
