@@ -138,7 +138,8 @@ class ParamRow(QWidget):
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(6)
         hl.addWidget(sl, 1)
-        spin.setMaximumWidth(72 if is_float else 60)
+        spin.setMinimumWidth(72 if is_float else 56)
+        spin.setMaximumWidth(96 if is_float else 70)
         hl.addWidget(spin)
 
         # Proxy setValue/value so external code (sync spinbox) still works.

@@ -931,6 +931,7 @@ def proc_color_segment(inputs, params):
     tol=params.get("tolerance",0)
     h_lo=max(0,h_lo-tol); h_hi=min(180,h_hi+tol)
     s_lo=max(0,s_lo-tol); s_hi=min(255,s_hi+tol)
+    v_lo=max(0,v_lo-tol); v_hi=min(255,v_hi+tol)
     hsv=cv2.cvtColor(_bgr(img),cv2.COLOR_BGR2HSV)
 
     # Handle hue wrap-around (e.g. red: 0-10 & 170-180)
