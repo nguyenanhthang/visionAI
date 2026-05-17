@@ -834,11 +834,16 @@ def proc_blob(inputs, params):
     is_pass = min_cnt <= len(blobs) <= max_cnt
     print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² {'PASS' if is_pass else 'FAIL'}")
 
-    # Không detect được → in giá trị max_area bằng chữ đỏ giữa ảnh để
-    # user thấy ngay ngưỡng đang đặt là gì (debug nhanh, không che ảnh).
+    # Không detect được → in area lớn nhất tìm thấy trong mask (chưa qua
+    # filter) bằng chữ đỏ giữa ảnh. Giúp biết blob to nhất bao nhiêu px²
+    # để chỉnh min_area / max_area cho đúng.
     if len(blobs) == 0:
         H, W = vis.shape[:2]
-        text = f"max area: {max_a:.0f} px2"
+        if contours:
+            max_found = max(cv2.contourArea(c) for c in contours)
+            text = f"max area: {max_found:.0f} px2"
+        else:
+            text = "max area: 0 px2 (mask empty)"
         font = cv2.FONT_HERSHEY_DUPLEX
         fs_no = _fs(0.9, s); th_no = _t(2, s)
         (tw, th), bl = cv2.getTextSize(text, font, fs_no, th_no)
