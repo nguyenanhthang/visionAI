@@ -614,6 +614,9 @@ class MainWindow(QMainWindow):
                 "  ● Full Image View — nhấn F11 hoặc Esc để thoát", 0)
         else:
             self.statusBar().clearMessage()
+        # Refit image sau khi layout settle (Qt cần 1 tick để resize)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._img_viewer._fit)
 
     def keyPressEvent(self, event):
         """Esc thoát Full Image View khi đang bật."""

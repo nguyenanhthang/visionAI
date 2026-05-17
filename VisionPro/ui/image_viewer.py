@@ -197,7 +197,9 @@ class ZoomableImageWidget(QWidget):
             self.setCursor(Qt.ArrowCursor)
 
     def resizeEvent(self, event):
-        if self._pixmap and self._scale < 0.1:
+        # Luôn refit khi widget thay đổi kích thước (vd Full Image View
+        # toggle, window resize) — tránh ảnh tràn ra ngoài viewport.
+        if self._pixmap is not None:
             self._fit_to_window()
         super().resizeEvent(event)
 
