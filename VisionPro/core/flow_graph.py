@@ -142,47 +142,90 @@ class FlowGraph:
 
     # ── Execute ────────────────────────────────────
     def execute(self, progress_cb=None) -> Dict[str, Any]:
-        order = self.topo_order()
-        total = len(order)
-        results = {}
+        """Run pipeline. Node độc lập (không phụ thuộc nhau) chạy parallel
+        qua ThreadPool — 2 branch song song (vd 2 Acquire Image) hoàn thành
+        gần bằng thời gian 1 branch vì OpenCV/numpy ops nhả GIL.
 
-        for i, nid in enumerate(order):
-            node = self.nodes[nid]
+        Single chain (A→B→C→D): chỉ 1 node chạy 1 lúc → speed như cũ.
+        Multi-branch (Acq1→…, Acq2→…): roots chạy đồng thời, successors
+        cũng đồng thời khi deps xong → tổng ≈ max(branch_durations).
+        """
+        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+        import threading
+
+        nodes = self.nodes
+        in_edges  = {nid: set() for nid in nodes}
+        out_edges = {nid: set() for nid in nodes}
+        for c in self.connections:
+            if c.src_id in nodes and c.dst_id in nodes:
+                in_edges[c.dst_id].add(c.src_id)
+                out_edges[c.src_id].add(c.dst_id)
+        remaining = {nid: set(deps) for nid, deps in in_edges.items()}
+
+        total = len(nodes)
+        if total == 0:
+            return {}
+        results: Dict[str, Any] = {}
+        done_count = 0
+        progress_lock = threading.Lock()
+
+        def run_one(nid: str):
+            node = nodes[nid]
             node.status = "running"
-
-            # Collect inputs from connected outputs
             inputs: Dict[str, Any] = {}
             for c in self.connections:
                 if c.dst_id == nid:
-                    src = self.nodes.get(c.src_id)
+                    src = nodes.get(c.src_id)
                     if src and c.src_port in src.outputs:
                         inputs[c.dst_port] = src.outputs[c.src_port]
-
-            # Set defaults for unconnected optional inputs
             for port in node.tool.inputs:
                 if port.name not in inputs:
                     inputs[port.name] = port.default
-
             t0 = time.perf_counter()
             try:
                 out = node.tool.process_fn(inputs, node.params)
                 node.outputs = out if out else {}
                 node.status = "pass"
-                # Detect pass/fail from output
                 if "pass" in node.outputs:
                     node.status = "pass" if node.outputs["pass"] else "fail"
             except Exception as e:
                 node.outputs = {}
                 node.status = "error"
                 node.error_msg = str(e)
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            node.last_run_ms = elapsed_ms
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            node.last_run_ms = elapsed
+            return nid, elapsed
 
-            results[nid] = {"status": node.status, "outputs": node.outputs,
-                            "elapsed_ms": elapsed_ms}
-            if progress_cb:
-                progress_cb(int((i + 1) / total * 100))
+        # Workers: cap ở 8 để không thrash CPU/RAM với pipeline lớn
+        max_workers = min(8, max(2, total))
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            in_flight = set()
+            # Submit initial ready (root nodes)
+            for nid in nodes:
+                if not remaining[nid]:
+                    in_flight.add(pool.submit(run_one, nid))
 
+            while in_flight:
+                done_set, in_flight = wait(in_flight,
+                                            return_when=FIRST_COMPLETED)
+                for fut in done_set:
+                    nid, elapsed = fut.result()
+                    node = nodes[nid]
+                    results[nid] = {"status": node.status,
+                                    "outputs": node.outputs,
+                                    "elapsed_ms": elapsed}
+                    with progress_lock:
+                        done_count += 1
+                        if progress_cb:
+                            progress_cb(int(done_count / total * 100))
+                    # Release successors whose deps are all completed
+                    for succ in out_edges.get(nid, ()):
+                        remaining[succ].discard(nid)
+                        if not remaining[succ]:
+                            in_flight.add(pool.submit(run_one, succ))
+        finally:
+            pool.shutdown(wait=True)
         return results
 
     def reset_status(self):
