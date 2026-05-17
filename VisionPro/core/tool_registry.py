@@ -742,6 +742,8 @@ def proc_blob(inputs, params):
     show_contours = bool(params.get("show_contours", True))
     show_bbox     = bool(params.get("show_bbox", True))
     show_centroid = bool(params.get("show_centroid", True))
+    contour_thick = int(params.get("contour_thickness", 2))
+    bbox_thick    = int(params.get("bbox_thickness", 1))
     show_labels   = bool(params.get("show_labels", False))
     label_dx      = int(params.get("label_dx", 6))
     label_dy      = int(params.get("label_dy", -6))
@@ -800,9 +802,9 @@ def proc_blob(inputs, params):
         # Draw
         box = cv2.boxPoints(rect).astype(np.int32)
         if show_contours:
-            cv2.drawContours(vis,[cnt],-1,(0,200,255),_t(2,s))
+            cv2.drawContours(vis,[cnt],-1,(0,200,255),_t(contour_thick,s))
         if show_bbox:
-            cv2.drawContours(vis,[box],-1,(255,180,0),_t(1,s))
+            cv2.drawContours(vis,[box],-1,(255,180,0),_t(bbox_thick,s))
         if show_centroid:
             cv2.circle(vis,(int(cx),int(cy)),_t(4,s),(0,255,80),-1)
         if show_labels:
@@ -1929,8 +1931,12 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("max_count","Max Count","int",1000,0,10000),
      P("show_contours","Show Contours","bool",True,
        tooltip="Vẽ contour vàng quanh từng blob."),
+     P("contour_thickness","Contour Thickness","int",2,1,12,use_slider=True,
+       tooltip="Độ dày nét contour (px, scale theo ảnh)."),
      P("show_bbox","Show BBox","bool",True,
        tooltip="Vẽ rotated bounding box cam."),
+     P("bbox_thickness","BBox Thickness","int",1,1,12,use_slider=True,
+       tooltip="Độ dày nét bounding box (px, scale theo ảnh)."),
      P("show_centroid","Show Centroid","bool",True,
        tooltip="Chấm xanh tại tâm blob."),
      P("show_labels","Show Labels","bool",False,
