@@ -1387,6 +1387,104 @@ def proc_distance_point(inputs, params):
     print(f"[Distance] {dist:.3f}mm {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"distance":dist,"pass":is_pass}
 
+
+def proc_distance_point_line(inputs, params):
+    """CogDistancePointLineTool — Khoảng cách (vuông góc) từ 1 điểm đến
+    1 đường thẳng. Đường thẳng định nghĩa theo 1 trong 2 mode:
+      - "Two Points":   (lx1, ly1) → (lx2, ly2)
+      - "Point + Angle": qua (lx1, ly1) hợp với trục X góc `line_angle` (độ)
+    Inputs port: px, py — điểm cần đo; lx1/ly1/lx2/ly2 hoặc line_angle.
+    Output:  distance (mm theo pixel_to_mm), signed_distance (có dấu — âm
+             nếu điểm bên trái đường nhìn từ p1→p2), foot_x/foot_y (toạ độ
+             chân đường vuông góc), pass.
+    """
+    img = inputs.get("image")
+    # Point
+    px = float(inputs.get("px", params.get("px", 0)))
+    py = float(inputs.get("py", params.get("py", 0)))
+    # Line — ưu tiên port; fallback params
+    mode = params.get("mode", "Two Points")
+    lx1 = float(inputs.get("lx1", params.get("lx1", 0)))
+    ly1 = float(inputs.get("ly1", params.get("ly1", 0)))
+    if mode == "Point + Angle":
+        ang = float(inputs.get("line_angle",
+                                params.get("line_angle", 0.0)))
+        rad = math.radians(ang)
+        # Điểm thứ 2 ở khoảng cách lớn để vẽ "vô tận"
+        lx2 = lx1 + math.cos(rad) * 1000.0
+        ly2 = ly1 + math.sin(rad) * 1000.0
+    else:
+        lx2 = float(inputs.get("lx2", params.get("lx2", 100)))
+        ly2 = float(inputs.get("ly2", params.get("ly2", 0)))
+
+    # Vector along line
+    vx = lx2 - lx1; vy = ly2 - ly1
+    vlen = math.hypot(vx, vy)
+    if vlen < 1e-6:
+        # Degenerate line → fall back to point-to-point từ p1
+        signed = math.hypot(px - lx1, py - ly1)
+        dist_px = abs(signed)
+        fx, fy = lx1, ly1
+    else:
+        # 2D cross product (vector từ p1 đến point) → signed distance
+        wx = px - lx1; wy = py - ly1
+        cross = vx * wy - vy * wx
+        signed = cross / vlen
+        dist_px = abs(signed)
+        # Foot point: projection
+        t = (wx * vx + wy * vy) / (vlen * vlen)
+        fx = lx1 + t * vx
+        fy = ly1 + t * vy
+
+    px2mm = params.get("pixel_to_mm", 1.0)
+    distance = dist_px * px2mm
+    signed_mm = signed * px2mm
+
+    min_d = params.get("min_dist", 0.0)
+    max_d = params.get("max_dist", 9999.0)
+    is_pass = min_d <= distance <= max_d
+
+    if img is not None:
+        vis = _bgr(img.copy())
+    else:
+        h_def = max(int(abs(py) + abs(ly2 - ly1) + 200), 200)
+        w_def = max(int(abs(px) + abs(lx2 - lx1) + 200), 400)
+        vis = np.zeros((h_def, w_def, 3), dtype=np.uint8)
+    s = _draw_scale(vis)
+    show_labels = bool(params.get("show_labels", False))
+
+    # Vẽ đường line dài qua p1,p2 (extend cả 2 đầu để thấy rõ)
+    if vlen >= 1e-6:
+        ux = vx / vlen; uy = vy / vlen
+        L = max(vis.shape[:2]) * 2
+        e1 = (int(lx1 - ux * L), int(ly1 - uy * L))
+        e2 = (int(lx2 + ux * L), int(ly2 + uy * L))
+        cv2.line(vis, e1, e2, (255, 180, 0), _t(2, s), cv2.LINE_AA)
+        # Endpoints của segment định nghĩa line
+        cv2.circle(vis, (int(lx1), int(ly1)), _t(5, s), (255, 180, 0), -1)
+        cv2.circle(vis, (int(lx2), int(ly2)), _t(5, s), (255, 180, 0), -1)
+    # Foot of perpendicular
+    cv2.circle(vis, (int(fx), int(fy)), _t(5, s), (0, 220, 255), -1)
+    # Perpendicular segment from point to foot
+    cv2.line(vis, (int(px), int(py)), (int(fx), int(fy)),
+              (0, 220, 255), _t(2, s), cv2.LINE_AA)
+    # Point marker
+    cv2.circle(vis, (int(px), int(py)), _t(6, s), (0, 100, 255), -1)
+    cv2.circle(vis, (int(px), int(py)), _t(6, s), (255, 255, 255), _t(1, s))
+
+    if show_labels:
+        midx = int((px + fx) / 2); midy = int((py + fy) / 2)
+        cv2.putText(vis, f"{distance:.3f}mm",
+                     (midx + int(8*s), midy - int(8*s)),
+                     cv2.FONT_HERSHEY_SIMPLEX, _fs(0.6, s),
+                     (0, 220, 255), _t(2, s))
+    print(f"[DistPL] d={distance:.3f}mm (signed={signed_mm:+.3f}) "
+          f"foot=({fx:.1f},{fy:.1f}) {'PASS' if is_pass else 'FAIL'}")
+    return {"image": vis, "distance": distance,
+            "signed_distance": signed_mm,
+            "foot_x": float(fx), "foot_y": float(fy),
+            "pass": is_pass}
+
 def proc_angle_lines(inputs, params):
     """CogAngleLineLineTool — Đo góc giữa 2 đường thẳng."""
     img=inputs.get("image")
@@ -2454,6 +2552,36 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("show_labels","Display: show labels on image","bool",False,
        tooltip="Bật để vẽ label '…mm' giữa 2 điểm lên ảnh output. Mặc định tắt.")],
     proc_distance_point, "CogDistancePointPointTool"),
+
+  ToolDef("dist_point_line","Distance Point-Line","Measurement",
+    "Khoảng cách vuông góc từ điểm đến đường thẳng — CogDistancePointLineTool",
+    "#134074","⊥",
+    [PortDef("image","image",required=False),
+     PortDef("px","number",required=False), PortDef("py","number",required=False),
+     PortDef("lx1","number",required=False), PortDef("ly1","number",required=False),
+     PortDef("lx2","number",required=False), PortDef("ly2","number",required=False),
+     PortDef("line_angle","number",required=False)],
+    [PortDef("image","image"), PortDef("distance","number"),
+     PortDef("signed_distance","number"),
+     PortDef("foot_x","number"), PortDef("foot_y","number"),
+     PortDef("pass","bool")],
+    [P("mode","Line Mode","enum","Two Points",
+       choices=["Two Points","Point + Angle"],
+       tooltip="Two Points: dùng lx1/ly1 + lx2/ly2. Point + Angle: lx1/ly1 + line_angle (nối từ Find Line)."),
+     P("px","Point X","int",0,0,8192),
+     P("py","Point Y","int",0,0,8192),
+     P("lx1","Line P1 X","int",0,0,8192),
+     P("ly1","Line P1 Y","int",100,0,8192),
+     P("lx2","Line P2 X","int",100,0,8192),
+     P("ly2","Line P2 Y","int",100,0,8192),
+     P("line_angle","Line Angle (°)","float",0.0,-180,180,step=0.1,
+       tooltip="Chỉ dùng khi mode = Point + Angle"),
+     P("pixel_to_mm","Pixel→mm","float",1.0,0.0001,1000,step=0.0001),
+     P("min_dist","Min (mm)","float",0.0,0,100000),
+     P("max_dist","Max (mm)","float",9999.0,0,100000),
+     P("show_labels","Display: show labels on image","bool",False,
+       tooltip="Bật để vẽ label '…mm' giữa điểm và chân đường vuông góc.")],
+    proc_distance_point_line, "CogDistancePointLineTool"),
 
   ToolDef("angle_lines","Angle Line-Line","Measurement",
     "Đo góc giữa 2 đường — CogAngleLineLineTool","#134074","∠",
