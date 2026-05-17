@@ -145,7 +145,9 @@ class InteractiveImageLabel(QLabel):
         self._render()
 
     def set_rect_from_params(self, x, y, w, h):
-        """Hiển thị rect khởi tạo từ params/port (image coords)."""
+        """Hiển thị rect khởi tạo từ params/port (image coords).
+        Đồng thời populate _shape_data để corner-resize / body-drag hoạt
+        động ngay (không cần user vẽ lại để kích hoạt edit handles)."""
         if self._arr is None:
             return
         ih, iw = self._arr.shape[:2]
@@ -157,6 +159,9 @@ class InteractiveImageLabel(QLabel):
         ww = int(w * self._scale)
         wh = int(h * self._scale)
         self._rect = QRect(wx, wy, ww, wh)
+        # _shape_data + _shape là source-of-truth cho edit/drag — đồng bộ luôn
+        self._shape = "rect"
+        self._shape_data = {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
         self._render()
 
     def set_readonly_rect(self, x, y, w, h):
@@ -1573,28 +1578,27 @@ class NodeDetailDialog(QDialog):
 
         if tool.tool_id == "crop_roi":
             self._roi_port_connected = self._check_roi_ports_connected()
+            # Luôn dùng mode "roi" để cho phép kéo/resize ROI trên canvas.
+            # Khi port kết nối: upstream là source-of-truth (sync rect sau mỗi
+            # run), nhưng user vẫn có thể kéo override → _drawn_roi.
+            self._img_label = InteractiveImageLabel(mode="roi")
+            self._img_label.roi_changed.connect(self._on_roi_changed)
             if self._roi_port_connected:
-                # Port đang kết nối → readonly, hiển thị rect từ port
-                mode_str = "readonly"
                 self._mode_hint.setText(
-                    "🔗  Port x/y/w/h đang được kết nối — ROI tự động theo upstream tool.")
+                    "🔗  Port x/y/w/h kết nối — auto-tracking theo upstream. "
+                    "Kéo rect trên ảnh để override (lưu vào _drawn_roi).")
             else:
-                # Không kết nối → vẽ thủ công
-                mode_str = "roi"
                 self._mode_hint.setText(
-                    "✏  Kéo chuột trên ảnh để vẽ vùng ROI thủ công  "
-                    "—  kết nối port x/y/w/h để tracking tự động.")
+                    "✏  Kéo chuột vẽ ROI; sau khi vẽ có thể kéo body để di "
+                    "chuyển hoặc kéo 4 góc để resize.")
             self._mode_hint.show()
-            self._img_label = InteractiveImageLabel(mode=mode_str)
-            if mode_str == "roi":
-                self._img_label.roi_changed.connect(self._on_roi_changed)
-                drawn = node.params.get("_drawn_roi")
-                if drawn:
-                    x2, y2, w2, h2 = drawn
-                else:
-                    x2 = node.params.get("x", 0); y2 = node.params.get("y", 0)
-                    w2 = node.params.get("crop_w", 320); h2 = node.params.get("crop_h", 240)
-                QTimer.singleShot(120, lambda: self._img_label.set_rect_from_params(x2, y2, w2, h2))
+            drawn = node.params.get("_drawn_roi")
+            if drawn:
+                x2, y2, w2, h2 = drawn
+            else:
+                x2 = node.params.get("x", 0); y2 = node.params.get("y", 0)
+                w2 = node.params.get("crop_w", 320); h2 = node.params.get("crop_h", 240)
+            QTimer.singleShot(120, lambda: self._img_label.set_rect_from_params(x2, y2, w2, h2))
 
         elif tool.tool_id in ("patmax", "patmax_align", "patfind"):
             # PatMax/PatFind → mở PatMaxDialog chuyên dụng
@@ -1819,6 +1823,11 @@ class NodeDetailDialog(QDialog):
                 ed = pr._editor
                 if hasattr(ed, "setValue"):
                     ed.blockSignals(True); ed.setValue(val); ed.blockSignals(False)
+
+        # Trigger rerun để output x/y/w/h cập nhật → downstream tools
+        # đang nhận x,y từ Crop ROI cũng tự re-process trong pipeline run.
+        if getattr(self, "_auto_run_cb", None) and self._auto_run_cb.isChecked():
+            self._auto_run_timer.start()
 
     def _on_reset_crop_image(self):
         """Reset Crop ROI về full ảnh nguồn — xoá _drawn_roi + set
@@ -2104,17 +2113,27 @@ class NodeDetailDialog(QDialog):
                        int(node.params.get("label_dy", 0)))
             self._img_label.set_label_rects(label_rects, anchors, cur_off)
 
-            # crop_roi: hiển thị rect
+            # crop_roi: hiển thị rect + sync spinbox từ output thực
             if node.tool.tool_id == "crop_roi":
-                if self._roi_port_connected:
-                    # Lấy giá trị thực từ output (sau khi proc_crop chạy)
-                    ox = node.outputs.get("x", 0); oy = node.outputs.get("y", 0)
-                    ow = node.outputs.get("w", 0); oh = node.outputs.get("h", 0)
-                    self._img_label.set_readonly_rect(ox, oy, ow, oh)
-                else:
-                    drawn = node.params.get("_drawn_roi")
-                    if drawn:
-                        self._img_label.set_rect_from_params(*drawn)
+                ox = int(node.outputs.get("x", node.params.get("x", 0)))
+                oy = int(node.outputs.get("y", node.params.get("y", 0)))
+                ow = int(node.outputs.get("w", node.params.get("crop_w", 0)))
+                oh = int(node.outputs.get("h", node.params.get("crop_h", 0)))
+                # Cập nhật rect đang hiển thị (nguồn truth = output thực,
+                # bất kể port có connect hay không — fix "spinbox hiện 0").
+                if ow > 0 and oh > 0:
+                    self._img_label.set_rect_from_params(ox, oy, ow, oh)
+                # Sync spinbox X/Y/Width/Height — block signals chống loop.
+                spinbox_map = (("x", ox), ("y", oy),
+                                ("crop_w", ow), ("crop_h", oh))
+                for name, val in spinbox_map:
+                    pr = getattr(self, "_param_rows", {}).get(name)
+                    if pr:
+                        ed = pr._editor
+                        if hasattr(ed, "setValue"):
+                            ed.blockSignals(True)
+                            ed.setValue(int(val))
+                            ed.blockSignals(False)
 
             # patmax/patfind: hiển thị output image từ engine
             elif node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
