@@ -1308,7 +1308,7 @@ class NodeDetailDialog(QDialog):
 
         self._auto_run_timer = QTimer(self)
         self._auto_run_timer.setSingleShot(True)
-        self._auto_run_timer.setInterval(120)
+        self._auto_run_timer.setInterval(40)
         self._auto_run_timer.timeout.connect(self._on_run)
 
         self._run_btn = QPushButton("▶  Run Node")

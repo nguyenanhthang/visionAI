@@ -951,7 +951,10 @@ def proc_color_segment(inputs, params):
     vis=_bgr(img.copy()); overlay=vis.copy()
     overlay[mask>0]=[0,220,80]; cv2.addWeighted(vis,0.55,overlay,0.45,0,vis)
     print(f"[ColorSeg] ratio={ratio:.3f} pixels={cnt} {'PASS' if is_pass else 'FAIL'}")
-    return {"image":vis,"mask":mask,"pass":is_pass,"pixel_ratio":ratio,"pixel_count":cnt}
+    out={"image":vis,"mask":mask,"pass":is_pass,"pixel_ratio":ratio,"pixel_count":cnt}
+    if params.get("show_mask",False):
+        out["_display_image"]=cv2.cvtColor(mask,cv2.COLOR_GRAY2BGR)
+    return out
 
 def proc_color_match(inputs, params):
     """CogColorMatchTool — So khớp màu trung bình trong ROI với màu tham chiếu."""
@@ -1839,7 +1842,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("tolerance","Tolerance","int",0,0,100,use_slider=True),
      P("morph_open","Morph Open","int",0,0,50,use_slider=True),
      P("min_ratio","Min Ratio","float",0.01,0,1,step=0.001,use_slider=True),
-     P("max_ratio","Max Ratio","float",1.0,0,1,step=0.001,use_slider=True)],
+     P("max_ratio","Max Ratio","float",1.0,0,1,step=0.001,use_slider=True),
+     P("show_mask","Show Mask","bool",False,
+       tooltip="Hiển thị mask nhị phân (trắng/đen) thay vì overlay xanh.")],
     proc_color_segment, "CogColorSegmenterTool"),
 
   ToolDef("color_match","Color Match","Color Analysis",
