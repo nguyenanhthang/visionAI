@@ -94,6 +94,43 @@ def _draw_pass_fail(img, is_pass, text=""):
 #  CATEGORY: ACQUIRE IMAGE
 # ═══════════════════════════════════════════════════════════════════
 
+# LRU cache (path → (mtime_ns, size, img)) cho proc_acquire_image. Tránh
+# decode PNG/JPG lặp lại khi cùng 1 file load nhiều lần (worst-case 20MP
+# PNG tốn ~200ms decode). Cap 16 entries — đủ cho folder mode cycle.
+_ACQUIRE_CACHE: "dict[str, tuple]" = {}
+_ACQUIRE_CACHE_MAX = 16
+
+
+def _load_image_cached(path: str):
+    """Return (img, w, h) hoặc (None, 0, 0). Cache theo (path, mtime, size)
+    để re-load file không đổi là instant; file bị overwrite → mtime đổi →
+    decode lại tự động. Dùng IMREAD_UNCHANGED để giữ gray nếu source gray
+    (skip expand 1→3 channels, decode nhanh hơn ~30%).
+    """
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None, 0, 0
+    cached = _ACQUIRE_CACHE.get(path)
+    if cached is not None and cached[0] == key:
+        img = cached[1]
+        h, w = img.shape[:2]
+        return img, w, h
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        # Fallback default (handle exotic formats)
+        img = cv2.imread(path)
+        if img is None:
+            return None, 0, 0
+    # Cap cache size — FIFO drop để giữ memory bounded với ảnh 20MP×16=~1GB
+    if len(_ACQUIRE_CACHE) >= _ACQUIRE_CACHE_MAX:
+        _ACQUIRE_CACHE.pop(next(iter(_ACQUIRE_CACHE)))
+    _ACQUIRE_CACHE[path] = (key, img)
+    h, w = img.shape[:2]
+    return img, w, h
+
+
 def proc_acquire_image(inputs, params):
     """CogAcqFifoTool — Acquire image từ file đơn hoặc folder (frame index).
 
@@ -117,9 +154,8 @@ def proc_acquire_image(inputs, params):
     if files:
         idx = int(params.get("frame_index", 0)) % len(files)
         path = os.path.join(folder, files[idx])
-        img = cv2.imread(path)
+        img, w, h = _load_image_cached(path)
         if img is not None:
-            h, w = img.shape[:2]
             # Auto-advance: lần Run kế tiếp sẽ sang ảnh kế tiếp (cycle)
             if params.get("auto_advance", True):
                 params["frame_index"] = (idx + 1) % len(files)
@@ -129,9 +165,8 @@ def proc_acquire_image(inputs, params):
 
     path = params.get("file_path", "")
     if path and os.path.exists(path):
-        img = cv2.imread(path)
+        img, w, h = _load_image_cached(path)
         if img is not None:
-            h, w = img.shape[:2]
             return {"image": img, "width": w, "height": h,
                     "acquired": True, "frame_number": 0,
                     "file_name": os.path.basename(path), "frame_count": 1}
