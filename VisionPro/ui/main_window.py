@@ -274,6 +274,11 @@ class MainWindow(QMainWindow):
         av = view_m.addAction("Switch to Image Viewer"); av.setShortcut("Tab")
         av.triggered.connect(lambda: self._center_tabs.setCurrentIndex(
             1 if self._center_tabs.currentIndex() == 0 else 0))
+        view_m.addSeparator()
+        self._act_full_view = view_m.addAction("Full Image View")
+        self._act_full_view.setShortcut("F11")
+        self._act_full_view.setCheckable(True)
+        self._act_full_view.toggled.connect(self._toggle_full_image_view)
 
         yolo_m = mb.addMenu("YOLO")
         act_yolo = yolo_m.addAction("🤖 Open YOLO Studio")
@@ -588,6 +593,19 @@ class MainWindow(QMainWindow):
     def _set_status(self, text: str, color: str):
         sb = self.statusBar()
         sb.showMessage(f"  ● {text}", 0)
+
+    def _toggle_full_image_view(self, checked: bool):
+        """Full Image View: ẩn tool library + properties panel, force tab
+        sang Image Viewer. Results panel (PASS/FAIL/Yield) vẫn ở dưới.
+        F11 toggle on/off."""
+        self._tool_lib.setVisible(not checked)
+        self._props.setVisible(not checked)
+        if checked:
+            # Switch sang Image Viewer tab
+            for i in range(self._center_tabs.count()):
+                if "Image" in self._center_tabs.tabText(i):
+                    self._center_tabs.setCurrentIndex(i)
+                    break
 
     def _tick(self):
         zoom = int(getattr(self._canvas, '_zoom', 1.0) * 100)
