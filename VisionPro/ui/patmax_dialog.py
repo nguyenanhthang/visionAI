@@ -881,6 +881,12 @@ class PatMaxDialog(QDialog):
         # Khoá vẽ ROI mới — chỉ cho edit shape hiện có / origin / extras.
         # Unlock khi user đổi shape, đổi ROI mode, hoặc Reset Image.
         self._img_label.set_roi_locked(True)
+        # Ref X/Y hiển thị = ROI.origin + ref.offset → khi user di ROI,
+        # refresh list để cột (ix, iy) cập nhật theo (không phải đợi train).
+        try:
+            self._refresh_references_list()
+        except Exception:
+            pass
 
     def _on_shape_drawn(self, shape_type: str, data: dict):
         self._current_shape = shape_type
@@ -1810,7 +1816,12 @@ class PatMaxDialog(QDialog):
             w.setEnabled(enabled)
 
     def _roi_origin_xy(self) -> Tuple[float, float]:
-        """ROI top-left (image coords) — dùng để convert pattern-local ↔ image."""
+        """ROI top-left (image coords) — dùng để convert pattern-local ↔ image.
+        Ưu tiên ROI vừa vẽ (_current_roi) để Ref X/Y trên list khớp với rect
+        đang hiển thị trên canvas, không phải train_roi cũ. Khi chưa có
+        current_roi (vd: chưa vẽ lần nào), fall back train_roi."""
+        if self._current_roi:
+            return (float(self._current_roi[0]), float(self._current_roi[1]))
         if self._model and self._model.train_roi:
             return (float(self._model.train_roi[0]),
                     float(self._model.train_roi[1]))

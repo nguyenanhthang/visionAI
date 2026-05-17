@@ -1515,12 +1515,11 @@ def proc_crop(inputs, params):
     port_w = inputs.get("w")
     port_h = inputs.get("h")
 
-    # _drawn_roi = vùng user kéo/vẽ trên canvas (explicit action) — wins
-    # over port để cho phép override auto-tracking. Reset Image xoá nó
-    # để quay về port tracking.
+    # Default từ _drawn_roi (vẽ tay) hoặc params spinbox.
+    # Khi port kết nối → port luôn thắng (auto-tracking ưu tiên). _drawn_roi
+    # chỉ dùng khi port port tương ứng không có giá trị.
     drawn = params.get("_drawn_roi")
-    has_drawn = bool(drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4)
-    if has_drawn:
+    if drawn and isinstance(drawn, (list, tuple)) and len(drawn) == 4:
         dx, dy, dw, dh = [int(v) for v in drawn]
         manual_src = "MANUAL ROI"
     else:
@@ -1536,14 +1535,11 @@ def proc_crop(inputs, params):
         dh = int(params.get("crop_h", ih))
         manual_src = "PARAMS"
 
-    # Priority: _drawn_roi (user) > port (upstream tracking) > params.
-    if has_drawn:
-        x, y, cw, ch = dx, dy, dw, dh
-    else:
-        x  = int(float(port_x)) if port_x is not None else dx
-        y  = int(float(port_y)) if port_y is not None else dy
-        cw = int(float(port_w)) if port_w is not None else dw
-        ch = int(float(port_h)) if port_h is not None else dh
+    # Per-port override: port > drawn > params.
+    x  = int(float(port_x)) if port_x is not None else dx
+    y  = int(float(port_y)) if port_y is not None else dy
+    cw = int(float(port_w)) if port_w is not None else dw
+    ch = int(float(port_h)) if port_h is not None else dh
 
     tracked_ports = [n for n, v in [("x", port_x), ("y", port_y),
                                      ("w", port_w), ("h", port_h)]
