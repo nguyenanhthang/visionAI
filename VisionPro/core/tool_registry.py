@@ -1437,25 +1437,37 @@ def proc_area(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_image_convert(inputs, params):
-    """CogImageConvertTool — Chuyển đổi định dạng ảnh."""
-    img=inputs.get("image")
-    if img is None: return {"image":None}
-    mode=params.get("mode","Grayscale")
-    if mode=="Grayscale":      out=_bgr(_gray(img))
-    elif mode=="BGR to RGB":   out=cv2.cvtColor(_bgr(img),cv2.COLOR_BGR2RGB)
-    elif mode=="Invert":       out=cv2.bitwise_not(_bgr(img))
-    elif mode=="HSV":          out=cv2.cvtColor(_bgr(img),cv2.COLOR_BGR2HSV)
-    elif mode=="LAB":          out=cv2.cvtColor(_bgr(img),cv2.COLOR_BGR2LAB)
-    elif mode=="YCrCb":        out=cv2.cvtColor(_bgr(img),cv2.COLOR_BGR2YCrCb)
-    else:                      out=_bgr(img)
-    return {"image":out}
+    """CogImageConvertTool — Chuyển đổi định dạng ảnh.
+    Grayscale mode trả ảnh 1-channel (downstream _gray/_bgr xử lý được);
+    bỏ double-convert BGR→GRAY→BGR thừa của bản cũ.
+    """
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    mode = params.get("mode", "Grayscale")
+    if mode == "Grayscale":
+        # Single channel — Image Viewer dùng Format_Grayscale8 trực tiếp
+        out = _gray(img) if len(img.shape) == 3 else img
+    else:
+        bgr = _bgr(img)
+        if   mode == "BGR to RGB": out = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        elif mode == "Invert":     out = cv2.bitwise_not(bgr)
+        elif mode == "HSV":        out = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        elif mode == "LAB":        out = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+        elif mode == "YCrCb":      out = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
+        else:                       out = bgr
+    return {"image": out}
+
 
 def proc_sharpen(inputs, params):
-    img=inputs.get("image")
-    if img is None: return {"image":None}
-    s=params.get("strength",1.0)
-    k=np.array([[0,-1,0],[-1,4+s,-1],[0,-1,0]],dtype=np.float32)
-    return {"image":np.clip(cv2.filter2D(img,-1,k),0,255).astype(np.uint8)}
+    """Sharpen 3×3 kernel. filter2D với ddepth=-1 đã clip uint8 → bỏ
+    np.clip + astype thừa (save 1 pass qua ảnh)."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    s = params.get("strength", 1.0)
+    k = np.array([[0, -1, 0], [-1, 4+s, -1], [0, -1, 0]], dtype=np.float32)
+    return {"image": cv2.filter2D(img, -1, k)}
 
 def proc_morphology(inputs, params):
     img=inputs.get("image")
@@ -1605,11 +1617,11 @@ def proc_crop(inputs, params):
     # Crop ảnh thực sự (clean — không có overlay) — cho downstream qua `roi_image`
     roi = img[y:y + ch, x:x + cw].copy()
 
-    # `image` output = ảnh GỐC pass-through (clean, không vẽ gì) —
-    #                  để downstream xử lý trên ảnh sạch.
-    # `display_image` output = ảnh GỐC + bounding box overlay —
-    #                          cho node panel hiển thị vị trí ROI.
-    clean = _bgr(img.copy())
+    # `image` output = ảnh GỐC pass-through (không copy thừa, chỉ ensure BGR
+    # nếu cần). `_display_image` = COPY + bounding box overlay cho node panel.
+    # Trước đây làm 2 copy (clean.copy() + disp.copy()) cho ảnh 20MP =
+    # ~60MB thừa; giờ chỉ 1 copy cho display.
+    clean = _bgr(img)              # no-copy nếu img đã BGR
     disp = clean.copy()
     s = _draw_scale(disp)
     col = (0, 255, 180) if tracked_ports else (0, 212, 255)
