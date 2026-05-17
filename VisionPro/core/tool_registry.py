@@ -100,6 +100,79 @@ def _draw_pass_fail(img, is_pass, text=""):
 _ACQUIRE_CACHE: "dict[str, tuple]" = {}
 _ACQUIRE_CACHE_MAX = 16
 
+# Background decode pool — prefetch next folder frames để hide decode
+# latency cho 20MP PNG (~150-240ms/frame) khi cycle qua folder.
+import threading as _threading
+_ACQUIRE_LOCK = _threading.Lock()
+_PREFETCH_THREAD: "Optional[_threading.Thread]" = None
+_PREFETCH_QUEUE: "list[str]" = []
+_PREFETCH_DEPTH = 2  # số frame nhìn trước
+
+
+def _decode_into_cache(path: str) -> bool:
+    """Decode 1 file và đẩy vào cache. Return True nếu thực sự decode
+    (cache miss), False nếu đã có sẵn / lỗi đọc."""
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return False
+    with _ACQUIRE_LOCK:
+        cached = _ACQUIRE_CACHE.get(path)
+        if cached is not None and cached[0] == key:
+            return False
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        img = cv2.imread(path)
+        if img is None:
+            return False
+    with _ACQUIRE_LOCK:
+        if len(_ACQUIRE_CACHE) >= _ACQUIRE_CACHE_MAX:
+            _ACQUIRE_CACHE.pop(next(iter(_ACQUIRE_CACHE)))
+        _ACQUIRE_CACHE[path] = (key, img)
+    return True
+
+
+def _prefetch_worker():
+    """Decode tuần tự các file trong queue. Khi queue rỗng → thread exit."""
+    while True:
+        with _ACQUIRE_LOCK:
+            if not _PREFETCH_QUEUE:
+                return
+            path = _PREFETCH_QUEUE.pop(0)
+        try:
+            _decode_into_cache(path)
+        except Exception:
+            pass
+
+
+def _kick_prefetch(paths: "list[str]"):
+    """Append paths vào prefetch queue, spawn worker thread nếu chưa chạy.
+    Worker chạy tuần tự (1 thread) → tránh cv2 contention + đỡ I/O thrashing.
+    """
+    global _PREFETCH_THREAD
+    if not paths:
+        return
+    with _ACQUIRE_LOCK:
+        for p in paths:
+            if p and p not in _PREFETCH_QUEUE:
+                _PREFETCH_QUEUE.append(p)
+        if _PREFETCH_THREAD is not None and _PREFETCH_THREAD.is_alive():
+            return
+        _PREFETCH_THREAD = _threading.Thread(
+            target=_prefetch_worker, daemon=True)
+    _PREFETCH_THREAD.start()
+
+
+def acquire_prefetch(paths):
+    """Public API — yêu cầu prefetch 1 hoặc nhiều file vào cache nền.
+    Properties panel / file picker có thể gọi ngay khi user chọn file để
+    decode bắt đầu trong lúc user còn nhìn UI, → khi Run thì cache hit.
+    """
+    if isinstance(paths, str):
+        paths = [paths]
+    _kick_prefetch([p for p in (paths or []) if p])
+
 
 def _load_image_cached(path: str):
     """Return (img, w, h) hoặc (None, 0, 0). Cache theo (path, mtime, size)
@@ -112,21 +185,23 @@ def _load_image_cached(path: str):
         key = (st.st_mtime_ns, st.st_size)
     except OSError:
         return None, 0, 0
-    cached = _ACQUIRE_CACHE.get(path)
-    if cached is not None and cached[0] == key:
-        img = cached[1]
-        h, w = img.shape[:2]
-        return img, w, h
+    with _ACQUIRE_LOCK:
+        cached = _ACQUIRE_CACHE.get(path)
+        if cached is not None and cached[0] == key:
+            img = cached[1]
+            h, w = img.shape[:2]
+            return img, w, h
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None:
         # Fallback default (handle exotic formats)
         img = cv2.imread(path)
         if img is None:
             return None, 0, 0
-    # Cap cache size — FIFO drop để giữ memory bounded với ảnh 20MP×16=~1GB
-    if len(_ACQUIRE_CACHE) >= _ACQUIRE_CACHE_MAX:
-        _ACQUIRE_CACHE.pop(next(iter(_ACQUIRE_CACHE)))
-    _ACQUIRE_CACHE[path] = (key, img)
+    with _ACQUIRE_LOCK:
+        # Cap cache size — FIFO drop để giữ memory bounded với ảnh 20MP×16=~1GB
+        if len(_ACQUIRE_CACHE) >= _ACQUIRE_CACHE_MAX:
+            _ACQUIRE_CACHE.pop(next(iter(_ACQUIRE_CACHE)))
+        _ACQUIRE_CACHE[path] = (key, img)
     h, w = img.shape[:2]
     return img, w, h
 
@@ -159,6 +234,16 @@ def proc_acquire_image(inputs, params):
             # Auto-advance: lần Run kế tiếp sẽ sang ảnh kế tiếp (cycle)
             if params.get("auto_advance", True):
                 params["frame_index"] = (idx + 1) % len(files)
+            # Prefetch _PREFETCH_DEPTH frame kế tiếp trong background — khi
+            # user Run lần sau, frame đã sẵn trong cache (0ms decode).
+            prefetch_paths = []
+            for k in range(1, _PREFETCH_DEPTH + 1):
+                j = (idx + k) % len(files)
+                p = os.path.join(folder, files[j])
+                if p != path:
+                    prefetch_paths.append(p)
+            if prefetch_paths:
+                _kick_prefetch(prefetch_paths)
             return {"image": img, "width": w, "height": h,
                     "acquired": True, "frame_number": idx,
                     "file_name": files[idx], "frame_count": len(files)}

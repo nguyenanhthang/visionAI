@@ -154,12 +154,33 @@ class ParamRow(QWidget):
             "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.tif);;All Files (*)")
         if path:
             le.setText(path)
+            # Kick background decode ngay → khi user bấm Run, ảnh đã hot
+            # trong cache (save ~150-240ms cho ảnh 20MP).
+            try:
+                from core.tool_registry import acquire_prefetch
+                acquire_prefetch(path)
+            except Exception:
+                pass
 
     def _browse_folder(self, le: QLineEdit):
         path = QFileDialog.getExistingDirectory(
             self, "Select Image Folder", le.text() or "")
         if path:
             le.setText(path)
+            # Prefetch vài file đầu tiên trong folder để Run đầu nhanh.
+            try:
+                import os
+                from core.tool_registry import (acquire_prefetch,
+                                                  _PREFETCH_DEPTH)
+                exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+                files = sorted(
+                    f for f in os.listdir(path)
+                    if f.lower().endswith(exts)
+                    and os.path.isfile(os.path.join(path, f))
+                )[:_PREFETCH_DEPTH + 1]
+                acquire_prefetch([os.path.join(path, f) for f in files])
+            except Exception:
+                pass
 
 
 class NodeInfoWidget(QWidget):
