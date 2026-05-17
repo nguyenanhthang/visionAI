@@ -598,7 +598,7 @@ class MainWindow(QMainWindow):
     def _toggle_full_image_view(self, checked: bool):
         """Full Image View: chỉ hiện Image Viewer canvas + Inspection Results.
         Ẩn tool library, properties panel, toolbar trên cùng và tab bar.
-        Menu bar giữ lại để user toggle về (F11 / View → Full Image View).
+        Menu bar giữ lại để user toggle về (F11 / Esc / View → Full Image View).
         """
         self._tool_lib.setVisible(not checked)
         self._props.setVisible(not checked)
@@ -610,6 +610,18 @@ class MainWindow(QMainWindow):
                 if "Image" in self._center_tabs.tabText(i):
                     self._center_tabs.setCurrentIndex(i)
                     break
+            self.statusBar().showMessage(
+                "  ● Full Image View — nhấn F11 hoặc Esc để thoát", 0)
+        else:
+            self.statusBar().clearMessage()
+
+    def keyPressEvent(self, event):
+        """Esc thoát Full Image View khi đang bật."""
+        from PySide6.QtCore import Qt
+        if event.key() == Qt.Key_Escape and self._act_full_view.isChecked():
+            self._act_full_view.setChecked(False)
+            return
+        super().keyPressEvent(event)
 
     def _tick(self):
         zoom = int(getattr(self._canvas, '_zoom', 1.0) * 100)
