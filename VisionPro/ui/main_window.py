@@ -124,7 +124,8 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        root.addWidget(self._build_toolbar())
+        self._toolbar = self._build_toolbar()
+        root.addWidget(self._toolbar)
 
         # ── Outer horizontal split: [library | center | props] ───
         outer = QSplitter(Qt.Horizontal)
@@ -595,13 +596,16 @@ class MainWindow(QMainWindow):
         sb.showMessage(f"  ● {text}", 0)
 
     def _toggle_full_image_view(self, checked: bool):
-        """Full Image View: ẩn tool library + properties panel, force tab
-        sang Image Viewer. Results panel (PASS/FAIL/Yield) vẫn ở dưới.
-        F11 toggle on/off."""
+        """Full Image View: chỉ hiện Image Viewer canvas + Inspection Results.
+        Ẩn tool library, properties panel, toolbar trên cùng và tab bar.
+        Menu bar giữ lại để user toggle về (F11 / View → Full Image View).
+        """
         self._tool_lib.setVisible(not checked)
         self._props.setVisible(not checked)
+        self._toolbar.setVisible(not checked)
+        # Ẩn tab bar khi full view (chỉ còn Image Viewer hiển thị)
+        self._center_tabs.tabBar().setVisible(not checked)
         if checked:
-            # Switch sang Image Viewer tab
             for i in range(self._center_tabs.count()):
                 if "Image" in self._center_tabs.tabText(i):
                     self._center_tabs.setCurrentIndex(i)
