@@ -1155,15 +1155,51 @@ def proc_sharpen(inputs, params):
 def proc_morphology(inputs, params):
     img=inputs.get("image")
     if img is None: return {"image":None,"mask":None}
-    op={"Erode":cv2.MORPH_ERODE,"Dilate":cv2.MORPH_DILATE,"Open":cv2.MORPH_OPEN,
-        "Close":cv2.MORPH_CLOSE,"Gradient":cv2.MORPH_GRADIENT,
-        "Top Hat":cv2.MORPH_TOPHAT,"Black Hat":cv2.MORPH_BLACKHAT}.get(params.get("operation","Open"),cv2.MORPH_OPEN)
-    sh={"Rect":cv2.MORPH_RECT,"Ellipse":cv2.MORPH_ELLIPSE,"Cross":cv2.MORPH_CROSS}.get(params.get("shape","Ellipse"),cv2.MORPH_ELLIPSE)
-    k=max(1,params.get("kernel_size",3))
-    kernel=cv2.getStructuringElement(sh,(k,k))
     g=_gray(img)
-    result=cv2.morphologyEx(g,op,kernel,iterations=max(1,params.get("iterations",1)))
-    return {"image":_bgr(result),"mask":result}
+
+    # Tiền xử lý tuỳ chọn
+    if params.get("invert_input", False):
+        g = cv2.bitwise_not(g)
+    if params.get("auto_binarize", False):
+        _, g = cv2.threshold(g, 0, 255,
+                             cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+
+    op_name = params.get("operation", "Open")
+    op_map = {"Erode":cv2.MORPH_ERODE,"Dilate":cv2.MORPH_DILATE,
+              "Open":cv2.MORPH_OPEN,"Close":cv2.MORPH_CLOSE,
+              "Gradient":cv2.MORPH_GRADIENT,
+              "Top Hat":cv2.MORPH_TOPHAT,"Black Hat":cv2.MORPH_BLACKHAT}
+    sh={"Rect":cv2.MORPH_RECT,"Ellipse":cv2.MORPH_ELLIPSE,
+        "Cross":cv2.MORPH_CROSS}.get(params.get("shape","Ellipse"),
+                                     cv2.MORPH_ELLIPSE)
+    k=max(1,int(params.get("kernel_size",3)))
+    iters=max(1,int(params.get("iterations",1)))
+    kernel=cv2.getStructuringElement(sh,(k,k))
+
+    # Combo ops: hai phép liên tiếp với cùng kernel/iter
+    if op_name == "Open+Close":
+        out = cv2.morphologyEx(g, cv2.MORPH_OPEN, kernel, iterations=iters)
+        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, kernel, iterations=iters)
+    elif op_name == "Close+Open":
+        out = cv2.morphologyEx(g, cv2.MORPH_CLOSE, kernel, iterations=iters)
+        out = cv2.morphologyEx(out, cv2.MORPH_OPEN, kernel, iterations=iters)
+    else:
+        op = op_map.get(op_name, cv2.MORPH_OPEN)
+        out = cv2.morphologyEx(g, op, kernel, iterations=iters)
+
+    result = {"image": _bgr(out), "mask": out}
+
+    # Overlay: nguồn gốc + vùng kết quả tô xanh (so sánh trực quan)
+    if params.get("show_overlay", False):
+        base = _bgr(img if img.ndim == 3 else _bgr(_gray(img)))
+        if base.shape[:2] != out.shape[:2]:
+            base = cv2.resize(base, (out.shape[1], out.shape[0]))
+        overlay = base.copy()
+        overlay[out > 0] = [0, 220, 80]
+        vis = cv2.addWeighted(base, 0.5, overlay, 0.5, 0)
+        result["_display_image"] = vis
+
+    return result
 
 def proc_threshold(inputs, params):
     img=inputs.get("image")
@@ -1983,13 +2019,39 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_threshold, ""),
 
   ToolDef("morphology","Morphology","Image Processing",
-    "Biến đổi hình thái học","#2c3e50","🔲",
+    "Biến đổi hình thái: Erode/Dilate/Open/Close — lọc nhiễu, vá lỗ, tách object trên mask nhị phân",
+    "#2c3e50","🔲",
     [PortDef("image","image")],[PortDef("image","image"),PortDef("mask","image")],
     [P("operation","Operation","enum","Open",
-       choices=["Erode","Dilate","Open","Close","Gradient","Top Hat","Black Hat"]),
-     P("shape","Shape","enum","Ellipse",choices=["Rect","Ellipse","Cross"]),
-     P("kernel_size","Kernel Size","int",3,1,51,step=2),
-     P("iterations","Iterations","int",1,1,20)],
+       choices=["Erode","Dilate","Open","Close","Gradient",
+                "Top Hat","Black Hat","Open+Close","Close+Open"],
+       tooltip="• Erode: co vùng sáng — xoá đốm trắng nhỏ, làm mảnh nét.\n"
+               "• Dilate: phình vùng sáng — vá lỗ đen, làm dày nét.\n"
+               "• Open  = Erode → Dilate — xoá noise trắng nhưng giữ hình.\n"
+               "• Close = Dilate → Erode — vá lỗ đen bên trong object.\n"
+               "• Gradient: viền (Dilate − Erode) — trích biên.\n"
+               "• Top Hat: ảnh − Open — nổi đốm sáng nhỏ.\n"
+               "• Black Hat: Close − ảnh — nổi đốm tối nhỏ.\n"
+               "• Open+Close: xoá noise rồi vá lỗ (mask sạch).\n"
+               "• Close+Open: vá lỗ rồi xoá noise."),
+     P("shape","Kernel Shape","enum","Ellipse",
+       choices=["Rect","Ellipse","Cross"],
+       tooltip="Hình kernel:\n• Ellipse: mượt, tự nhiên (mặc định).\n"
+               "• Rect: góc cạnh, giữ cạnh thẳng.\n• Cross: chỉ 4 hướng, nhẹ."),
+     P("kernel_size","Kernel Size","int",3,1,51,step=2,use_slider=True,
+       tooltip="Kích thước kernel (pixel). Lớn = tác động mạnh hơn. "
+               "Khuyến nghị số lẻ (3,5,7…)."),
+     P("iterations","Iterations","int",1,1,20,use_slider=True,
+       tooltip="Lặp phép morph N lần — tương đương kernel lớn hơn nhưng tinh chỉnh được."),
+     P("auto_binarize","Auto Binarize (Otsu)","bool",False,
+       tooltip="Tự động ngưỡng Otsu trước morph. Bật khi input là ảnh xám/màu "
+               "(chưa phải mask nhị phân)."),
+     P("invert_input","Invert Input","bool",False,
+       tooltip="Đảo trắng ↔ đen trước khi morph. Dùng khi object là pixel đen "
+               "trên nền trắng (vì morph thao tác trên vùng sáng)."),
+     P("show_overlay","Show Overlay","bool",False,
+       tooltip="Hiển thị overlay xanh của kết quả đè lên ảnh gốc — dễ so sánh "
+               "vùng nào bị thay đổi.")],
     proc_morphology, ""),
 
   ToolDef("gaussian_blur","Gaussian Blur","Image Processing",
