@@ -512,8 +512,10 @@ class ImageViewerPanel(QWidget):
             node = self._graph.nodes.get(terminal_id)
             if node is None:
                 continue
-            img = node.outputs.get("_display_image") \
-                  or node.outputs.get("image")
+            # KHÔNG dùng `a or b` cho numpy array — ValueError ambiguous.
+            img = node.outputs.get("_display_image")
+            if img is None:
+                img = node.outputs.get("image")
             if img is not None:
                 view.set_image(img)
             term_node = self._graph.nodes.get(terminal_id)
