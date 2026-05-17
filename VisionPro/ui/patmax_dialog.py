@@ -881,12 +881,6 @@ class PatMaxDialog(QDialog):
         # Khoá vẽ ROI mới — chỉ cho edit shape hiện có / origin / extras.
         # Unlock khi user đổi shape, đổi ROI mode, hoặc Reset Image.
         self._img_label.set_roi_locked(True)
-        # Ref X/Y hiển thị = ROI.origin + ref.offset → khi user di ROI,
-        # refresh list để cột (ix, iy) cập nhật theo (không phải đợi train).
-        try:
-            self._refresh_references_list()
-        except Exception:
-            pass
 
     def _on_shape_drawn(self, shape_type: str, data: dict):
         self._current_shape = shape_type

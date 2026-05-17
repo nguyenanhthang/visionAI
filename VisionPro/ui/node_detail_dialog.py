@@ -1578,20 +1578,24 @@ class NodeDetailDialog(QDialog):
 
         if tool.tool_id == "crop_roi":
             self._roi_port_connected = self._check_roi_ports_connected()
-            # Luôn dùng mode "roi" để cho phép kéo/resize ROI trên canvas.
-            # Khi port kết nối: upstream là source-of-truth (sync rect sau mỗi
-            # run), nhưng user vẫn có thể kéo override → _drawn_roi.
-            self._img_label = InteractiveImageLabel(mode="roi")
-            self._img_label.roi_changed.connect(self._on_roi_changed)
             if self._roi_port_connected:
+                # Port kết nối → readonly. Drag không có tác dụng (port luôn
+                # thắng trong proc_crop), nên không cho user drag để khỏi
+                # confuse. Rect hiển thị từ output thực sau mỗi run.
+                mode_str = "readonly"
                 self._mode_hint.setText(
-                    "🔗  Port x/y/w/h kết nối — auto-tracking theo upstream. "
-                    "Kéo rect trên ảnh để override (lưu vào _drawn_roi).")
+                    "🔗  Port x/y/w/h kết nối — ROI auto-tracking theo upstream "
+                    "(không kéo được; ngắt port để vẽ thủ công).")
             else:
+                # Không kết nối → vẽ + drag thủ công
+                mode_str = "roi"
                 self._mode_hint.setText(
-                    "✏  Kéo chuột vẽ ROI; sau khi vẽ có thể kéo body để di "
-                    "chuyển hoặc kéo 4 góc để resize.")
+                    "✏  Kéo vẽ ROI; sau khi vẽ kéo body để di chuyển hoặc "
+                    "4 góc để resize.")
             self._mode_hint.show()
+            self._img_label = InteractiveImageLabel(mode=mode_str)
+            if mode_str == "roi":
+                self._img_label.roi_changed.connect(self._on_roi_changed)
             drawn = node.params.get("_drawn_roi")
             if drawn:
                 x2, y2, w2, h2 = drawn
