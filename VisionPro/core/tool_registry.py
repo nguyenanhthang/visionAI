@@ -770,43 +770,24 @@ def proc_blob(inputs, params):
                     }.get(params.get("label_font","Simplex"),cv2.FONT_HERSHEY_SIMPLEX)
     blobs = []; centroids = []; total_area = 0.0
     label_rects = []   # mỗi entry: (x, y, w, h) trong toạ độ ảnh — hit test drag
-    show_rejected = bool(params.get("show_rejected", False))
-    rejected = {"area": 0, "circularity": 0, "elongation": 0, "moments": 0}
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < min_a or area > max_a:
-            rejected["area"] += 1
-            if show_rejected:
-                cv2.drawContours(vis, [cnt], -1, (60, 60, 200),
-                                  _t(max(1, contour_thick - 1), s))
-            continue
+        if area < min_a or area > max_a: continue
 
         perimeter = cv2.arcLength(cnt, True)
         circularity = (4*math.pi*area/(perimeter**2)) if perimeter>0 else 0
-        if not (min_circ <= circularity <= max_circ):
-            rejected["circularity"] += 1
-            if show_rejected:
-                cv2.drawContours(vis, [cnt], -1, (60, 60, 200),
-                                  _t(max(1, contour_thick - 1), s))
-            continue
+        if not (min_circ <= circularity <= max_circ): continue
 
         M = cv2.moments(cnt)
-        if M["m00"] == 0:
-            rejected["moments"] += 1
-            continue
+        if M["m00"] == 0: continue
         cx = M["m10"]/M["m00"]; cy = M["m01"]/M["m00"]
 
         # Bounding box & orientation
         rect = cv2.minAreaRect(cnt)
         (bx,by),(bw,bh),angle_deg = rect
         elongation = max(bw,bh)/max(min(bw,bh),0.001)
-        if not (min_elo <= elongation <= max_elo):
-            rejected["elongation"] += 1
-            if show_rejected:
-                cv2.drawContours(vis, [cnt], -1, (60, 60, 200),
-                                  _t(max(1, contour_thick - 1), s))
-            continue
+        if not (min_elo <= elongation <= max_elo): continue
 
         # Convex hull & convexity
         hull       = cv2.convexHull(cnt)
@@ -851,57 +832,26 @@ def proc_blob(inputs, params):
     min_cnt = params.get("min_count", 1)
     max_cnt = params.get("max_count", 1000)
     is_pass = min_cnt <= len(blobs) <= max_cnt
-    total_cnt = len(contours)
-    total_rej = sum(rejected.values())
-    print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² "
-          f"contours={total_cnt} rejected={rejected} "
-          f"{'PASS' if is_pass else 'FAIL'}")
+    print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² {'PASS' if is_pass else 'FAIL'}")
 
-    # Diagnostic overlay khi không bắt được blob nào
+    # Không detect được → in giá trị max_area bằng chữ đỏ giữa ảnh để
+    # user thấy ngay ngưỡng đang đặt là gì (debug nhanh, không che ảnh).
     if len(blobs) == 0:
         H, W = vis.shape[:2]
+        text = f"max area: {max_a:.0f} px2"
         font = cv2.FONT_HERSHEY_DUPLEX
-        fs2 = _fs(0.8, s); th2 = _t(2, s)
-        msg1 = "NO BLOB DETECTED"
-        # Tính reason chính
-        if total_cnt == 0:
-            reason = "Mask trong => kiem tra threshold/HSV upstream"
-        else:
-            top = max(rejected, key=rejected.get)
-            reason_map = {
-                "area": f"Tat ca bi loc boi area ({rejected['area']}/{total_cnt}) "
-                        f"=> giam min_area / tang max_area",
-                "circularity": f"Bi loc circularity ({rejected['circularity']}/{total_cnt}) "
-                               f"=> noi rong [min,max] circularity",
-                "elongation": f"Bi loc elongation ({rejected['elongation']}/{total_cnt}) "
-                              f"=> noi rong [min,max] elongation",
-                "moments": "Contour suy bien (m00=0)",
-            }
-            reason = reason_map.get(top, f"contours={total_cnt} rejected={rejected}")
-        (tw1, th1), _ = cv2.getTextSize(msg1, font, fs2, th2)
-        (tw2, th2_h), _ = cv2.getTextSize(reason, font, _fs(0.5, s), _t(1, s))
-        pad = int(12 * s)
-        bw_d = max(tw1, tw2) + pad * 2
-        bh_d = th1 + th2_h + pad * 3
-        x0 = (W - bw_d) // 2; y0 = (H - bh_d) // 2
-        cv2.rectangle(vis, (x0, y0), (x0 + bw_d, y0 + bh_d), (0, 0, 0), -1)
-        cv2.rectangle(vis, (x0, y0), (x0 + bw_d, y0 + bh_d), (0, 0, 220), th2)
-        cv2.putText(vis, msg1, (x0 + pad, y0 + pad + th1),
-                    font, fs2, (0, 0, 255), th2, cv2.LINE_AA)
-        cv2.putText(vis, reason, (x0 + pad, y0 + pad * 2 + th1 + th2_h),
-                    font, _fs(0.5, s), (0, 200, 255), _t(1, s), cv2.LINE_AA)
+        fs_no = _fs(0.9, s); th_no = _t(2, s)
+        (tw, th), bl = cv2.getTextSize(text, font, fs_no, th_no)
+        tx = (W - tw) // 2; ty = (H + th) // 2
+        cv2.putText(vis, text, (tx, ty), font, fs_no, (0, 0, 255),
+                    th_no, cv2.LINE_AA)
 
-    out = {"image":vis,"count":len(blobs),"pass":is_pass,
-           "total_area":total_area,"blobs":blobs,"centroids":centroids,
-           # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
-           # khi user kéo label trên canvas. Không expose qua port.
-           "_label_rects": label_rects,
-           "_label_centroids": [(float(cx2), float(cy2)) for (cx2, cy2) in centroids]}
-    # Diagnostic — show_mask=True hiển thị mask thay vì overlay → debug
-    # vì sao không bắt được blob (nhiễu? đứt đoạn? quá nhỏ?).
-    if params.get("show_mask", False):
-        out["_display_image"] = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-    return out
+    return {"image":vis,"count":len(blobs),"pass":is_pass,
+            "total_area":total_area,"blobs":blobs,"centroids":centroids,
+            # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
+            # khi user kéo label trên canvas. Không expose qua port.
+            "_label_rects": label_rects,
+            "_label_centroids": [(float(cx2), float(cy2)) for (cx2, cy2) in centroids]}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1665,6 +1615,79 @@ def proc_display(inputs,params):
         cv2.putText(vis,label,(int(10*s),int(35*s)),cv2.FONT_HERSHEY_SIMPLEX,_fs(1.0,s),col,_t(2,s))
     return {"image":vis}
 
+def proc_message(inputs, params):
+    """Message — hiển thị text khác nhau dựa trên port pass (bool).
+    Không cần image input: tự tạo canvas, hoặc vẽ overlay lên image
+    nếu được nối port image."""
+    passed = inputs.get("pass", None)
+    img = inputs.get("image")
+
+    msg_pass = params.get("msg_pass", "PASS")
+    msg_fail = params.get("msg_fail", "FAIL")
+    msg_none = params.get("msg_none", "NO INPUT")
+
+    if passed is True:
+        text = msg_pass; col_name = params.get("color_pass", "Green")
+    elif passed is False:
+        text = msg_fail; col_name = params.get("color_fail", "Red")
+    else:
+        text = msg_none; col_name = params.get("color_none", "Yellow")
+
+    color = {"Yellow":(0,200,255),"Cyan":(255,255,0),
+             "Green":(0,220,80),"Red":(0,60,255),
+             "White":(255,255,255),"Magenta":(255,0,255),
+             "Orange":(0,140,255),"Blue":(255,80,0)
+            }.get(col_name, (0,200,255))
+    font_map = {"Simplex":cv2.FONT_HERSHEY_SIMPLEX,
+                "Plain":cv2.FONT_HERSHEY_PLAIN,
+                "Duplex":cv2.FONT_HERSHEY_DUPLEX,
+                "Complex":cv2.FONT_HERSHEY_COMPLEX,
+                "Triplex":cv2.FONT_HERSHEY_TRIPLEX,
+                "Script Simplex":cv2.FONT_HERSHEY_SCRIPT_SIMPLEX,
+                "Script Complex":cv2.FONT_HERSHEY_SCRIPT_COMPLEX}
+    font = font_map.get(params.get("font", "Duplex"), cv2.FONT_HERSHEY_DUPLEX)
+
+    # Canvas: dùng image nếu có, không thì tạo canvas đen 640x180
+    if img is not None and isinstance(img, np.ndarray):
+        vis = _bgr(img.copy())
+    else:
+        vis = np.zeros((180, 640, 3), dtype=np.uint8)
+    s = _draw_scale(vis)
+    H, W = vis.shape[:2]
+
+    font_size = float(params.get("font_size", 1.2))
+    thickness = int(params.get("thickness", 3))
+    fs_val = _fs(font_size, s); th_val = _t(thickness, s)
+    (tw, th), bl = cv2.getTextSize(text, font, fs_val, th_val)
+
+    position = params.get("position", "Top-Left")
+    pad = int(16 * s)
+    if position == "Top-Left":
+        tx, ty = pad, pad + th
+    elif position == "Top-Right":
+        tx, ty = W - tw - pad, pad + th
+    elif position == "Top-Center":
+        tx, ty = (W - tw) // 2, pad + th
+    elif position == "Bottom-Left":
+        tx, ty = pad, H - pad - bl
+    elif position == "Bottom-Right":
+        tx, ty = W - tw - pad, H - pad - bl
+    elif position == "Bottom-Center":
+        tx, ty = (W - tw) // 2, H - pad - bl
+    else:  # Center
+        tx, ty = (W - tw) // 2, (H + th) // 2
+
+    if params.get("show_background", True):
+        bg_pad = int(8 * s)
+        cv2.rectangle(vis,
+                      (tx - bg_pad, ty - th - bg_pad),
+                      (tx + tw + bg_pad, ty + bl + bg_pad),
+                      (0, 0, 0), -1)
+    cv2.putText(vis, text, (tx, ty), font, fs_val, color, th_val, cv2.LINE_AA)
+    print(f"[Message] pass={passed} text='{text}'")
+    return {"image": vis, "text": text, "pass": passed}
+
+
 def proc_save_image(inputs,params):
     """CogSaveImageTool — Lưu ảnh ra file."""
     img=inputs.get("image")
@@ -1998,13 +2021,6 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("pixel_to_mm2","px²→mm²","float",1.0,0.0001,1e6,step=0.0001),
      P("min_count","Min Count","int",1,0,10000),
      P("max_count","Max Count","int",1000,0,10000),
-     P("show_mask","Show Mask (debug)","bool",False,
-       tooltip="Hiển thị mask nhị phân thay vì overlay — dùng để debug khi "
-               "không detect được blob (xem mask có nhiễu/đứt đoạn không)."),
-     P("show_rejected","Show Rejected Blobs","bool",False,
-       tooltip="Vẽ contour bị loại (do area/circularity/elongation) bằng nét "
-               "xanh đậm — để biết chỉnh ngưỡng nào cho đúng. Khi count=0, "
-               "overlay đỏ ở giữa ảnh sẽ chỉ rõ lý do bị loại nhiều nhất."),
      P("show_contours","Show Contours","bool",True,
        tooltip="Vẽ contour quanh từng blob."),
      P("contour_color","Contour Color","enum","Yellow",
@@ -2367,6 +2383,34 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("ty","Text Y","int",30,0,8192),P("font_scale","Font Scale","float",0.8,0.1,5,step=0.1),
      P("show_result","Show PASS/FAIL","bool",True)],
     proc_display,"CogRecordDisplayTool"),
+
+  ToolDef("message","Message","Output & Display",
+    "Hiển thị message khác nhau theo port pass (PASS/FAIL/NONE). "
+    "Có thể nối port image của tool khác để overlay lên ảnh.",
+    "#0d1117","💬",
+    [PortDef("pass","bool",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("text","any"),PortDef("pass","bool")],
+    [P("msg_pass","Text khi PASS","str","PASS"),
+     P("msg_fail","Text khi FAIL","str","FAIL"),
+     P("msg_none","Text khi chưa có port","str","NO INPUT"),
+     P("color_pass","Color PASS","enum","Green",
+       choices=["Yellow","Cyan","Green","Red","White","Magenta","Orange","Blue"]),
+     P("color_fail","Color FAIL","enum","Red",
+       choices=["Yellow","Cyan","Green","Red","White","Magenta","Orange","Blue"]),
+     P("color_none","Color NONE","enum","Yellow",
+       choices=["Yellow","Cyan","Green","Red","White","Magenta","Orange","Blue"]),
+     P("position","Position","enum","Top-Left",
+       choices=["Top-Left","Top-Center","Top-Right","Center",
+                "Bottom-Left","Bottom-Center","Bottom-Right"]),
+     P("font","Font","enum","Duplex",
+       choices=["Simplex","Plain","Duplex","Complex","Triplex",
+                "Script Simplex","Script Complex"]),
+     P("font_size","Font Size","float",1.2,0.2,5.0,step=0.05,use_slider=True),
+     P("thickness","Thickness","int",3,1,12,use_slider=True),
+     P("show_background","Show Background","bool",True,
+       tooltip="Vẽ nền đen sau text để dễ đọc.")],
+    proc_message, ""),
 
   ToolDef("save_image","Save Image","Output & Display",
     "Lưu ảnh ra file — CogSaveImageTool","#0d1117","💾",
