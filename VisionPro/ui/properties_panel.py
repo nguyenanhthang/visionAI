@@ -4,17 +4,36 @@ Fix: QScrollArea.setWidget() xóa widget cũ → không tái dùng placeholder.
      Thay bằng _make_placeholder() tạo mới mỗi lần cần.
 """
 from __future__ import annotations
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                 QLineEdit, QSpinBox, QDoubleSpinBox,
                                 QComboBox, QCheckBox, QPushButton, QSlider,
-                                QScrollArea, QFrame, QTabWidget, QFileDialog)
+                                QScrollArea, QFrame, QTabWidget, QFileDialog,
+                                QDialog, QDialogButtonBox)
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage
 
 from core.flow_graph import FlowGraph, NodeInstance
 from core.tool_registry import ToolDef, ParamDef
+
+
+# ── ROI param set detection ───────────────────────────────────────────
+def _detect_roi_kind(tool: ToolDef) -> Optional[str]:
+    """Return ROI kind cho tool dựa trên tên params:
+       - "rect_xywh"      : params có x, y, w, h
+       - "rect_x1y1x2y2"  : params có x1, y1, x2, y2
+       - "point_pick"     : params có pick_x, pick_y
+       - None             : không phải tool có ROI vẽ được
+    """
+    names = {p.name for p in tool.params}
+    if {"x", "y", "w", "h"} <= names:
+        return "rect_xywh"
+    if {"x1", "y1", "x2", "y2"} <= names:
+        return "rect_x1y1x2y2"
+    if {"pick_x", "pick_y"} <= names:
+        return "point_pick"
+    return None
 
 
 def _make_placeholder(text: str) -> QLabel:
@@ -489,6 +508,26 @@ class PropertiesPanel(QWidget):
         cl.setContentsMargins(10, 10, 10, 10)
         cl.setSpacing(6)
 
+        # Nếu tool có ROI params → nút Draw ROI bằng mouse drag
+        roi_kind = _detect_roi_kind(tool)
+        if roi_kind is not None:
+            btn = QPushButton({
+                "rect_xywh":     "🖱  Draw ROI (drag rectangle)",
+                "rect_x1y1x2y2": "🖱  Draw ROI band (drag rectangle)",
+                "point_pick":    "🖱  Pick point on image (click)",
+            }[roi_kind])
+            btn.setStyleSheet(
+                "QPushButton{background:#0f3460;color:#00d4ff;"
+                "border:1px solid #1e2d45;border-radius:4px;"
+                "padding:8px;font-weight:600;font-size:12px;}"
+                "QPushButton:hover{background:#00d4ff;color:#000;}")
+            btn.clicked.connect(
+                lambda: self._open_roi_dialog(node, roi_kind))
+            cl.addWidget(btn)
+            sep_top = QFrame(); sep_top.setFrameShape(QFrame.HLine)
+            sep_top.setStyleSheet("color:#1e2d45;")
+            cl.addWidget(sep_top)
+
         for param in tool.params:
             # Conditional visibility
             if getattr(param, "visible_if", None):
@@ -513,6 +552,63 @@ class PropertiesPanel(QWidget):
         cl.addWidget(note)
         cl.addStretch()
         self._params_scroll.setWidget(container)
+
+    def _open_roi_dialog(self, node: NodeInstance, kind: str):
+        """Mở ROIDrawDialog với ảnh upstream → user kéo chuột vẽ ROI →
+        ghi kết quả vào params. Tìm ảnh upstream từ connected input port
+        'image' của node; fallback acquire image node trong graph nếu node
+        chưa có upstream image."""
+        img = self._find_upstream_image(node)
+        if img is None:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Draw ROI",
+                "Chưa có ảnh upstream. Hãy Run pipeline trước để load ảnh.")
+            return
+        dlg = ROIDrawDialog(img, kind, dict(node.params), self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        result = dlg.get_result()
+        # Cập nhật từng param + emit signal (trigger refresh UI + persist)
+        for k, v in result.items():
+            node.params[k] = v
+        self.params_changed.emit(node.node_id)
+        # Rebuild params tab để spinbox phản ánh giá trị mới
+        QTimer.singleShot(0, lambda nid=node.node_id: self._refresh_node_safe(nid))
+
+    def _refresh_node_safe(self, node_id: str):
+        """Re-render params tab cho node_id nếu nó còn đang được show."""
+        if not self._graph or node_id not in self._graph.nodes:
+            return
+        if self._current_node_id == node_id:
+            self._build_params_tab(self._graph.nodes[node_id])
+
+    def _find_upstream_image(self, node: NodeInstance):
+        """Tìm numpy image gần nhất cho node:
+          1. Output của upstream node connect tới input 'image' của node này
+          2. Output của node tự nó (nếu đã chạy rồi)
+          3. Bất kỳ Acquire Image node nào trong graph (last-resort)
+        """
+        import numpy as np
+        if self._graph is None:
+            return None
+        # 1. Upstream qua image port
+        for c in self._graph.connections:
+            if c.dst_id == node.node_id and c.dst_port == "image":
+                src = self._graph.nodes.get(c.src_id)
+                if src and isinstance(src.outputs.get(c.src_port), np.ndarray):
+                    return src.outputs[c.src_port]
+        # 2. Output của chính node
+        out = node.outputs.get("image")
+        if isinstance(out, np.ndarray):
+            return out
+        # 3. Bất kỳ acquire image nào
+        for n in self._graph.nodes.values():
+            if n.tool.tool_id in ("acquire_image", "camera_acquire"):
+                im = n.outputs.get("image")
+                if isinstance(im, np.ndarray):
+                    return im
+        return None
 
     def _on_param_changed(self, node_id: str, name: str, value: Any):
         if not (self._graph and node_id in self._graph.nodes):
@@ -547,3 +643,125 @@ class PropertiesPanel(QWidget):
                 return
         self._img_preview.set_image(None)
         self._prev_info.setText("")
+
+
+# ── ROI Draw Dialog ───────────────────────────────────────────────────
+class ROIDrawDialog(QDialog):
+    """Dialog cho phép kéo chuột vẽ ROI trên ảnh upstream.
+
+    kind:
+      - "rect_xywh"     → rectangle drag, trả {x, y, w, h}
+      - "rect_x1y1x2y2" → rectangle drag, trả {x1, y1, x2, y2}
+                           (top-left / bottom-right corners)
+      - "point_pick"    → single click, trả {pick_x, pick_y}
+    """
+
+    def __init__(self, image, kind: str, current: dict, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._result: dict = {}
+        self.setWindowTitle("🖱  Draw ROI on Image")
+        self.resize(1000, 700)
+        self.setStyleSheet("QDialog{background:#0a0e1a;color:#e2e8f0;}")
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(6)
+
+        # Hint label
+        hint = {
+            "rect_xywh":     "Kéo chuột để vẽ hình chữ nhật. Esc huỷ.",
+            "rect_x1y1x2y2": "Kéo chuột vẽ hình chữ nhật — 2 góc map sang (x1,y1)→(x2,y2).",
+            "point_pick":    "Click chuột để chọn pixel.",
+        }.get(kind, "Kéo chuột để vẽ.")
+        hl = QLabel(hint)
+        hl.setStyleSheet("color:#00d4ff;font-size:11px;padding:4px 6px;")
+        lay.addWidget(hl)
+
+        # Image label (reuse InteractiveImageLabel)
+        from ui.node_detail_dialog import InteractiveImageLabel
+        mode = "pick" if kind == "point_pick" else "roi"
+        self._label = InteractiveImageLabel(mode=mode)
+        self._scroll = _QScroll()
+        self._scroll.setWidget(self._label)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet(
+            "QScrollArea{background:#050810;border:1px solid #1e2d45;}")
+        self._label.set_scroll_area(self._scroll)
+        if image is not None:
+            self._label.set_image(image)
+            # Pre-populate hiện ROI nếu có
+            if kind == "rect_xywh":
+                x = int(current.get("x", 0)); y = int(current.get("y", 0))
+                w = int(current.get("w", 50)); h = int(current.get("h", 50))
+                if w > 0 and h > 0:
+                    self._label.set_rect_from_params(x, y, w, h)
+            elif kind == "rect_x1y1x2y2":
+                x1 = int(current.get("x1", 0)); y1 = int(current.get("y1", 0))
+                x2 = int(current.get("x2", 100)); y2 = int(current.get("y2", 100))
+                x = min(x1, x2); y = min(y1, y2)
+                w = abs(x2 - x1); h = abs(y2 - y1)
+                if w > 0 and h > 0:
+                    self._label.set_rect_from_params(x, y, w, h)
+            elif kind == "point_pick":
+                # InteractiveImageLabel pick mode — pre-pos chưa support
+                pass
+        lay.addWidget(self._scroll, 1)
+
+        # Buttons
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.setStyleSheet(
+            "QPushButton{background:#1e2d45;color:#e2e8f0;border:none;"
+            "border-radius:4px;padding:6px 14px;font-weight:600;}"
+            "QPushButton:hover{background:#00d4ff;color:#000;}")
+        bb.accepted.connect(self._on_accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+        # Track latest rect/pick từ label signals
+        self._latest_rect: Optional[Tuple[int, int, int, int]] = None
+        if kind == "point_pick":
+            self._label.pixel_picked.connect(self._on_picked)
+            self._picked: Optional[Tuple[int, int]] = None
+            # Initialize từ current params nếu có
+            if current.get("pick_x") is not None and current.get("pick_y") is not None:
+                self._picked = (int(current["pick_x"]), int(current["pick_y"]))
+        else:
+            self._label.roi_changed.connect(self._on_roi_changed)
+            # Initialize từ current params
+            if kind == "rect_xywh":
+                self._latest_rect = (
+                    int(current.get("x", 0)), int(current.get("y", 0)),
+                    int(current.get("w", 0)), int(current.get("h", 0)))
+            elif kind == "rect_x1y1x2y2":
+                x1 = int(current.get("x1", 0)); y1 = int(current.get("y1", 0))
+                x2 = int(current.get("x2", 0)); y2 = int(current.get("y2", 0))
+                self._latest_rect = (
+                    min(x1, x2), min(y1, y2),
+                    abs(x2 - x1), abs(y2 - y1))
+
+    def _on_picked(self, x: int, y: int):
+        self._picked = (int(x), int(y))
+
+    def _on_roi_changed(self, x: int, y: int, w: int, h: int):
+        self._latest_rect = (int(x), int(y), int(w), int(h))
+
+    def _on_accept(self):
+        if self._kind == "point_pick":
+            if self._picked is None:
+                self.reject(); return
+            self._result = {"pick_x": int(self._picked[0]),
+                            "pick_y": int(self._picked[1])}
+            self.accept(); return
+        if self._latest_rect is None or self._latest_rect[2] <= 0:
+            self.reject(); return
+        x, y, w, h = self._latest_rect
+        if self._kind == "rect_xywh":
+            self._result = {"x": int(x), "y": int(y),
+                            "w": int(w), "h": int(h)}
+        else:  # rect_x1y1x2y2
+            self._result = {"x1": int(x), "y1": int(y),
+                            "x2": int(x + w), "y2": int(y + h)}
+        self.accept()
+
+    def get_result(self) -> dict:
+        return dict(self._result)

@@ -741,11 +741,14 @@ def proc_caliper(inputs, params):
     s = _draw_scale(vis)
     show_labels = bool(params.get("show_labels", False))
 
-    # ROI line từ params
-    x1 = params.get("x1", img.shape[1]//4)
-    y1 = params.get("y1", img.shape[0]//2)
-    x2 = params.get("x2", img.shape[1]*3//4)
-    y2 = params.get("y2", img.shape[0]//2)
+    # ROI line — input port nếu connect, else params
+    def _roi(k, default):
+        v = inputs.get(k)
+        return int(v) if v is not None else int(params.get(k, default))
+    x1 = _roi("x1", img.shape[1]//4)
+    y1 = _roi("y1", img.shape[0]//2)
+    x2 = _roi("x2", img.shape[1]*3//4)
+    y2 = _roi("y2", img.shape[0]//2)
     width_px = params.get("caliper_width", 20)
     polarity = params.get("polarity","Either")  # Dark→Light | Light→Dark | Either
     filter_half = max(1, params.get("filter_half_size", 2))
@@ -836,9 +839,15 @@ def proc_caliper_multi(inputs, params):
         return {"image":None,"edges":[],"count":0,"pass":False}
     gray = _gray(img); vis = _bgr(img.copy())
     s = _draw_scale(vis)
-    x1=params.get("x1",0); y1=params.get("y1",img.shape[0]//2)
-    x2=params.get("x2",img.shape[1]); y2=params.get("y2",img.shape[0]//2)
-    length=int(math.hypot(x2-x1,y2-y1))
+    # ROI line — input port nếu connect, else params
+    def _roi(k, default):
+        v = inputs.get(k)
+        return int(v) if v is not None else int(params.get(k, default))
+    x1 = _roi("x1", 0)
+    y1 = _roi("y1", img.shape[0]//2)
+    x2 = _roi("x2", img.shape[1])
+    y2 = _roi("y2", img.shape[0]//2)
+    length = int(math.hypot(x2-x1, y2-y1))
     if length<4:
         return {"image":vis,"edges":[],"count":0,"pass":False}
     xs=np.clip(np.linspace(x1,x2,length).astype(int),0,gray.shape[1]-1)
@@ -1022,11 +1031,14 @@ def proc_find_line(inputs, params):
     h, w = gray.shape
     t1 = params.get("canny_low", 50); t2 = params.get("canny_high", 150)
 
-    # ROI band (full-res coord)
-    rx1 = max(0, int(params.get("x1", 0)))
-    ry1 = max(0, int(params.get("y1", h//2 - 30)))
-    rx2 = min(w, int(params.get("x2", w)))
-    ry2 = min(h, int(params.get("y2", h//2 + 30)))
+    # ROI band — input port nếu connect, else params (full-res coord)
+    def _roi(k, default):
+        v = inputs.get(k)
+        return int(v) if v is not None else int(params.get(k, default))
+    rx1 = max(0, _roi("x1", 0))
+    ry1 = max(0, _roi("y1", h//2 - 30))
+    rx2 = min(w, _roi("x2", w))
+    ry2 = min(h, _roi("y2", h//2 + 30))
     if rx2 <= rx1 or ry2 <= ry1:
         return {"image": vis, "found": False, "angle": 0.0, "distance": 0.0,
                 "point_x": float(w/2), "point_y": float(h/2), "pass": False}
@@ -1124,7 +1136,12 @@ def proc_color_picker(inputs, params):
     img=inputs.get("image")
     if img is None:
         return {"image":None,"color_hsv":None,"h":0,"s":0,"v":0,"r":0,"g":0,"b":0}
-    bgr=_bgr(img); x=params.get("pick_x",0); y=params.get("pick_y",0)
+    bgr=_bgr(img)
+    # Pick point — input port nếu connect (vd track theo PatMax), else params
+    vx = inputs.get("pick_x")
+    vy = inputs.get("pick_y")
+    x = int(vx) if vx is not None else int(params.get("pick_x", 0))
+    y = int(vy) if vy is not None else int(params.get("pick_y", 0))
     H2,W2=bgr.shape[:2]
     x=max(0,min(x,W2-1)); y=max(0,min(y,H2-1))
     B,G,R=int(bgr[y,x,0]),int(bgr[y,x,1]),int(bgr[y,x,2])
@@ -1274,8 +1291,12 @@ def proc_color_match(inputs, params):
     if img is None:
         return {"image":None,"pass":False,"delta_e":0.0,"mean_r":0,"mean_g":0,"mean_b":0}
     bgr=_bgr(img)
-    x=params.get("x",0); y=params.get("y",0)
-    w=params.get("w",50); h=params.get("h",50)
+    # ROI rect — input port nếu connect, else params
+    def _roi(k, default):
+        v = inputs.get(k)
+        return int(v) if v is not None else int(params.get(k, default))
+    x = _roi("x", 0); y = _roi("y", 0)
+    w = _roi("w", 50); h = _roi("h", 50)
     H2,W2=bgr.shape[:2]
     x=max(0,min(x,W2-1)); y=max(0,min(y,H2-1))
     w=max(1,min(w,W2-x)); h=max(1,min(h,H2-y))
@@ -2340,7 +2361,9 @@ TOOL_REGISTRY: List[ToolDef] = [
   # ── CALIPER ─────────────────────────────────────────────────────
   ToolDef("caliper","Caliper","Caliper",
     "Đo cạnh & khoảng cách 2 cạnh sub-pixel — CogCaliperTool","#1b4332","📐",
-    [PortDef("image","image")],
+    [PortDef("image","image"),
+     PortDef("x1","number",required=False), PortDef("y1","number",required=False),
+     PortDef("x2","number",required=False), PortDef("y2","number",required=False)],
     [PortDef("image","image"),PortDef("edge1_pos","number"),PortDef("edge2_pos","number"),
      PortDef("width","number"),PortDef("pass","bool"),PortDef("edges_found","number")],
     [P("x1","X1","int",100,0,8192,tooltip="Điểm đầu caliper"),
@@ -2363,7 +2386,9 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   ToolDef("caliper_multi","Caliper Multi-Edge","Caliper",
     "Tìm tất cả cạnh trong vùng — CogCaliperTool","#1b4332","📏",
-    [PortDef("image","image")],
+    [PortDef("image","image"),
+     PortDef("x1","number",required=False), PortDef("y1","number",required=False),
+     PortDef("x2","number",required=False), PortDef("y2","number",required=False)],
     [PortDef("image","image"),PortDef("edges","any"),
      PortDef("count","number"),PortDef("pass","bool")],
     [P("x1","X1","int",0,0,8192),P("y1","Y1","int",240,0,8192),
@@ -2435,7 +2460,9 @@ TOOL_REGISTRY: List[ToolDef] = [
   # ── EDGE / LINE / CIRCLE ────────────────────────────────────────
   ToolDef("find_line","Find Line","Edge & Geometry",
     "Tìm đường thẳng từ edge — CogFindLineTool","#134074","〰",
-    [PortDef("image","image")],
+    [PortDef("image","image"),
+     PortDef("x1","number",required=False), PortDef("y1","number",required=False),
+     PortDef("x2","number",required=False), PortDef("y2","number",required=False)],
     [PortDef("image","image"),PortDef("found","bool"),PortDef("angle","number"),
      PortDef("distance","number"),PortDef("point_x","number"),
      PortDef("point_y","number"),PortDef("pass","bool")],
@@ -2468,7 +2495,9 @@ TOOL_REGISTRY: List[ToolDef] = [
   # ── COLOR ───────────────────────────────────────────────────────
   ToolDef("color_picker","Color Picker","Color Analysis",
     "Click chuột lấy màu → xuất HSV range","#6b2737","🎨",
-    [PortDef("image","image")],
+    [PortDef("image","image"),
+     PortDef("pick_x","number",required=False),
+     PortDef("pick_y","number",required=False)],
     [PortDef("image","image"),PortDef("color_hsv","any"),
      PortDef("h","number"),PortDef("s","number"),PortDef("v","number"),
      PortDef("r","number"),PortDef("g","number"),PortDef("b","number")],
@@ -2507,7 +2536,9 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   ToolDef("color_match","Color Match","Color Analysis",
     "So khớp màu trung bình ROI — CogColorMatchTool","#6b2737","🎭",
-    [PortDef("image","image")],
+    [PortDef("image","image"),
+     PortDef("x","number",required=False), PortDef("y","number",required=False),
+     PortDef("w","number",required=False), PortDef("h","number",required=False)],
     [PortDef("image","image"),PortDef("pass","bool"),PortDef("delta_e","number"),
      PortDef("mean_r","number"),PortDef("mean_g","number"),PortDef("mean_b","number")],
     [P("x","ROI X","int",0,0,8192),P("y","ROI Y","int",0,0,8192),
