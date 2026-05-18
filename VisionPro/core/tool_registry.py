@@ -890,15 +890,24 @@ def proc_blob(inputs, params):
                 "blobs":[],"centroids":[]}
 
     gray = _gray(img)
+    ds_param = int(params.get("downscale", 0) or 0)
     if mask is None:
+        # Downscale gray trước threshold → findContours chạy trên ảnh nhỏ
+        small_gray, ds = _auto_downscale(gray, ds_param)
         thresh_val = params.get("threshold", 128)
         inv = params.get("invert", False)
         t   = cv2.THRESH_BINARY_INV if inv else cv2.THRESH_BINARY
         if params.get("auto_threshold", True):
             t |= cv2.THRESH_OTSU; thresh_val = 0
-        _, mask = cv2.threshold(gray, thresh_val, 255, t)
+        _, mask_small = cv2.threshold(small_gray, thresh_val, 255, t)
+    else:
+        # User cung cấp mask full-res → downscale luôn để findContours nhanh
+        small_gray, ds = _auto_downscale(_gray(mask), ds_param)
+        # threshold lại để nhị phân hoá (mask có thể là grayscale 0-255)
+        _, mask_small = cv2.threshold(small_gray, 127, 255, cv2.THRESH_BINARY)
 
-    contours, hier = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, hier = cv2.findContours(mask_small, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
     scale    = params.get("pixel_to_mm2", 1.0)
     min_a    = params.get("min_area", 50.0)
     max_a    = params.get("max_area", 1e8)
@@ -940,29 +949,35 @@ def proc_blob(inputs, params):
                     }.get(params.get("label_font","Simplex"),cv2.FONT_HERSHEY_SIMPLEX)
     blobs = []; centroids = []; total_area = 0.0
     label_rects = []   # mỗi entry: (x, y, w, h) trong toạ độ ảnh — hit test drag
+    ds_sq = ds * ds  # tỉ lệ area downscale → full-res
 
     for cnt in contours:
-        area = cv2.contourArea(cnt)
+        area_ds = cv2.contourArea(cnt)
+        area = area_ds * ds_sq                  # full-res pixels²
         if area < min_a or area > max_a: continue
 
-        perimeter = cv2.arcLength(cnt, True)
+        perimeter_ds = cv2.arcLength(cnt, True)
+        perimeter = perimeter_ds * ds
         circularity = (4*math.pi*area/(perimeter**2)) if perimeter>0 else 0
         if not (min_circ <= circularity <= max_circ): continue
 
         M = cv2.moments(cnt)
         if M["m00"] == 0: continue
-        cx = M["m10"]/M["m00"]; cy = M["m01"]/M["m00"]
+        cx = (M["m10"]/M["m00"]) * ds
+        cy = (M["m01"]/M["m00"]) * ds
 
-        # Bounding box & orientation
+        # Bounding box & orientation (rect ở downscale space → ×ds)
         rect = cv2.minAreaRect(cnt)
-        (bx,by),(bw,bh),angle_deg = rect
-        elongation = max(bw,bh)/max(min(bw,bh),0.001)
+        (bx, by), (bw_ds, bh_ds), angle_deg = rect
+        bw = bw_ds * ds
+        bh = bh_ds * ds
+        elongation = max(bw, bh) / max(min(bw, bh), 0.001)
         if not (min_elo <= elongation <= max_elo): continue
 
-        # Convex hull & convexity
-        hull       = cv2.convexHull(cnt)
-        hull_area  = cv2.contourArea(hull)
-        convexity  = area/hull_area if hull_area>0 else 0
+        # Convex hull & convexity (ratio nên không cần scale)
+        hull = cv2.convexHull(cnt)
+        hull_area_ds = cv2.contourArea(hull)
+        convexity = area_ds / hull_area_ds if hull_area_ds > 0 else 0
 
         area_mm = area * scale
         total_area += area_mm
@@ -976,12 +991,14 @@ def proc_blob(inputs, params):
         blobs.append(blob_info)
         centroids.append((float(cx),float(cy)))
 
-        # Draw
-        box = cv2.boxPoints(rect).astype(np.int32)
+        # Draw — scale contour + bbox lên full-res
+        cnt_full = (cnt * ds).astype(np.int32) if ds > 1 else cnt
+        box_full = cv2.boxPoints(((bx*ds, by*ds), (bw, bh),
+                                    angle_deg)).astype(np.int32)
         if show_contours:
-            cv2.drawContours(vis,[cnt],-1,contour_color,_t(contour_thick,s))
+            cv2.drawContours(vis,[cnt_full],-1,contour_color,_t(contour_thick,s))
         if show_bbox:
-            cv2.drawContours(vis,[box],-1,bbox_color,_t(bbox_thick,s))
+            cv2.drawContours(vis,[box_full],-1,bbox_color,_t(bbox_thick,s))
         if show_centroid:
             cv2.circle(vis,(int(cx),int(cy)),_t(4,s),centroid_color,-1)
         if show_labels:
@@ -1226,10 +1243,17 @@ def _draw_shape_outline(vis: np.ndarray, shape_type: str,
 
 
 def proc_color_segment(inputs, params):
-    """CogColorSegmenterTool — Phân đoạn màu HSV, xuất mask + ratio."""
+    """CogColorSegmenterTool — Phân đoạn màu HSV, xuất mask + ratio.
+
+    Auto downscale: BGR→HSV + inRange + morph chạy trên ảnh ~1.5MP
+    (param `downscale`: 0=auto, ≥1=force). Ratio scale-invariant, mask
+    output resize lại full-res. Pixel count báo theo full-res space.
+    """
     img=inputs.get("image")
     if img is None:
         return {"image":None,"mask":None,"pass":False,"pixel_ratio":0.0,"pixel_count":0}
+    bgr = _bgr(img)
+    H, W = bgr.shape[:2]
     picked=inputs.get("color_hsv",None)
     if picked and isinstance(picked,(list,tuple)) and len(picked)==6:
         h_lo,s_lo,v_lo,h_hi,s_hi,v_hi=[int(x) for x in picked]
@@ -1241,45 +1265,77 @@ def proc_color_segment(inputs, params):
     h_lo=max(0,h_lo-tol); h_hi=min(180,h_hi+tol)
     s_lo=max(0,s_lo-tol); s_hi=min(255,s_hi+tol)
     v_lo=max(0,v_lo-tol); v_hi=min(255,v_hi+tol)
-    hsv=cv2.cvtColor(_bgr(img),cv2.COLOR_BGR2HSV)
+
+    # Downscale BGR trước cvtColor — tiết kiệm cả cvtColor + inRange
+    ds_param = int(params.get("downscale", 0) or 0)
+    if ds_param > 0:
+        ds = max(1, ds_param)
+    else:
+        ds = max(1, int(round((H * W / _DETECT_TARGET_PX) ** 0.5)))
+    if ds > 1:
+        bgr_small = cv2.resize(bgr, None, fx=1.0/ds, fy=1.0/ds,
+                                interpolation=cv2.INTER_AREA)
+    else:
+        bgr_small = bgr
+    hsv_small = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
 
     # Handle hue wrap-around (e.g. red: 0-10 & 170-180)
     if h_lo <= h_hi:
-        mask=cv2.inRange(hsv,np.array([h_lo,s_lo,v_lo]),np.array([h_hi,s_hi,v_hi]))
+        mask_small=cv2.inRange(hsv_small,np.array([h_lo,s_lo,v_lo]),
+                                np.array([h_hi,s_hi,v_hi]))
     else:
-        m1=cv2.inRange(hsv,np.array([0,s_lo,v_lo]),np.array([h_hi,s_hi,v_hi]))
-        m2=cv2.inRange(hsv,np.array([h_lo,s_lo,v_lo]),np.array([180,s_hi,v_hi]))
-        mask=cv2.bitwise_or(m1,m2)
+        m1=cv2.inRange(hsv_small,np.array([0,s_lo,v_lo]),np.array([h_hi,s_hi,v_hi]))
+        m2=cv2.inRange(hsv_small,np.array([h_lo,s_lo,v_lo]),np.array([180,s_hi,v_hi]))
+        mask_small=cv2.bitwise_or(m1,m2)
 
     k=params.get("morph_open",0)
     if k>0:
-        mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,
-                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(k,k)))
+        # Kernel size scale theo ds để giữ semantic (kernel ý nghĩa full-res)
+        kk = max(1, int(round(k / max(1, ds))))
+        mask_small=cv2.morphologyEx(mask_small,cv2.MORPH_OPEN,
+                                     cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(kk,kk)))
 
-    # ROI shape: chỉ tính trong vùng vẽ; ratio = inside/area_of_shape
-    H, W = mask.shape[:2]
+    # ROI shape: build mask ở full-res rồi resize xuống small để bitwise_and.
+    # ratio = inside/area_of_shape (đều ở small space → tỉ lệ giữ nguyên).
     roi_shape_type = params.get("_roi_shape_type")
     roi_shape_data = params.get("_roi_shape_data")
-    roi_mask = _shape_to_mask(roi_shape_type, roi_shape_data, H, W)
-    if roi_mask is not None:
-        mask = cv2.bitwise_and(mask, roi_mask)
-        denom = int(np.count_nonzero(roi_mask)) or 1
+    roi_mask_full = _shape_to_mask(roi_shape_type, roi_shape_data, H, W)
+    if roi_mask_full is not None:
+        if ds > 1:
+            roi_mask_small = cv2.resize(
+                roi_mask_full, (mask_small.shape[1], mask_small.shape[0]),
+                interpolation=cv2.INTER_NEAREST)
+        else:
+            roi_mask_small = roi_mask_full
+        mask_small = cv2.bitwise_and(mask_small, roi_mask_small)
+        denom_small = int(np.count_nonzero(roi_mask_small)) or 1
     else:
-        denom = mask.size
+        denom_small = mask_small.size
 
-    cnt=int(np.count_nonzero(mask)); ratio=cnt/denom
+    cnt_small = int(np.count_nonzero(mask_small))
+    ratio = cnt_small / denom_small               # scale-invariant
+    cnt = cnt_small * (ds * ds)                   # full-res pixel count
     min_r=params.get("min_ratio",0.01); max_r=params.get("max_ratio",1.0)
     is_pass=min_r<=ratio<=max_r
-    vis=_bgr(img.copy()); overlay=vis.copy()
+
+    # Resize mask về full-res cho output port + visualization.
+    if ds > 1:
+        mask = cv2.resize(mask_small, (W, H),
+                          interpolation=cv2.INTER_NEAREST)
+    else:
+        mask = mask_small
+
+    vis=bgr.copy(); overlay=vis.copy()
     overlay[mask>0]=[0,220,80]; cv2.addWeighted(vis,0.55,overlay,0.45,0,vis)
-    if roi_mask is not None:
+    if roi_mask_full is not None:
         # Làm tối phần ngoài ROI để dễ thấy vùng đang xét
         dim = (vis * 0.35).astype(np.uint8)
-        vis = np.where(roi_mask[..., None] > 0, vis, dim)
+        vis = np.where(roi_mask_full[..., None] > 0, vis, dim)
         _draw_shape_outline(vis, roi_shape_type, roi_shape_data,
                             color=(0, 200, 255),
                             thick=max(1, int(round(_draw_scale(vis) * 2))))
-    print(f"[ColorSeg] ratio={ratio:.3f} pixels={cnt}/{denom} {'PASS' if is_pass else 'FAIL'}")
+    print(f"[ColorSeg] ratio={ratio:.3f} pixels={cnt}/{denom_small*ds*ds} "
+          f"ds={ds} {'PASS' if is_pass else 'FAIL'}")
     out={"image":vis,"mask":mask,"pass":is_pass,"pixel_ratio":ratio,"pixel_count":cnt}
     if params.get("show_mask",False):
         out["_display_image"]=cv2.cvtColor(mask,cv2.COLOR_GRAY2BGR)
@@ -2421,6 +2477,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("pixel_to_mm2","px²→mm²","float",1.0,0.0001,1e6,step=0.0001),
      P("min_count","Min Count","int",1,0,10000),
      P("max_count","Max Count","int",1000,0,10000),
+     P("downscale","Coarse Downscale","int",0,0,16,
+       tooltip="0=auto target ~1.5MP. ≥1 force tỉ lệ. Giảm DS× → giảm "
+               "DS²× thời gian threshold+findContours. Toạ độ/area scale "
+               "ngược về full-res cho overlay & output."),
      P("show_contours","Show Contours","bool",True,
        tooltip="Vẽ contour quanh từng blob."),
      P("contour_color","Contour Color","enum","Yellow",
@@ -2523,6 +2583,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("morph_open","Morph Open","int",0,0,50,use_slider=True),
      P("min_ratio","Min Ratio","float",0.01,0,1,step=0.001,use_slider=True),
      P("max_ratio","Max Ratio","float",1.0,0,1,step=0.001,use_slider=True),
+     P("downscale","Coarse Downscale","int",0,0,16,
+       tooltip="0=auto target ~1.5MP. HSV cvtColor+inRange+morph chạy trên "
+               "ảnh nhỏ; mask resize ngược về full-res. Cho ảnh 20MP: "
+               "~80ms → ~6ms."),
      P("show_mask","Show Mask","bool",False,
        tooltip="Hiển thị mask nhị phân (trắng/đen) thay vì overlay xanh."),
      P("roi_shape","ROI Shape","enum","Full Image",
