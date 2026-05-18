@@ -622,14 +622,15 @@ class ImageViewerPanel(QWidget):
         elif n <= 6:  cols = (n + 1) // 2
         else:         cols = 3
 
-        from PySide6.QtWidgets import QVBoxLayout as _QV, QHBoxLayout as _QH
+        from PySide6.QtWidgets import (QVBoxLayout as _QV, QHBoxLayout as _QH,
+                                       QToolButton, QMenu)
         for i, (root_id, default_nid) in enumerate(cells_plan):
             cell = QWidget()
             cell_lay = _QV(cell)
             cell_lay.setContentsMargins(0, 0, 0, 0)
             cell_lay.setSpacing(0)
 
-            # Header: pipeline label (Acquire/Camera Image) + node combo + status
+            # Header: pipeline label + node combo + per-cell Results button + status
             hdr = QWidget()
             hdr.setStyleSheet(
                 "background:#060a14;border-bottom:1px solid #1e2d45;")
@@ -650,12 +651,38 @@ class ImageViewerPanel(QWidget):
                                              selection-background-color:#1a2236;}
             """)
             cb.setToolTip(
-                "Chọn node hiển thị trong ô này — list gom cả Acquire Image "
+                "Chọn base node hiển thị trong ô — list gom cả Acquire Image "
                 "và Camera Image branches.")
             self._populate_cell_combo(cb, default_nid)
             cb.currentIndexChanged.connect(
                 lambda _idx, idx=i: self._on_multi_cell_changed(idx))
             hl.addWidget(cb, 1)
+
+            # Per-cell Results button: pick overlay results để composite lên
+            # base của ô này. Menu group theo pipeline (Acquire/Camera) như
+            # global Results, nhưng selection độc lập cho từng ô.
+            cell_results_btn = QToolButton()
+            cell_results_btn.setText("📊")
+            cell_results_btn.setPopupMode(QToolButton.InstantPopup)
+            cell_results_btn.setFixedHeight(22)
+            cell_results_btn.setToolTip(
+                "Pick result(s) để composite lên ô này. Tick 1+ item → "
+                "overlay annotation lên base image của pipeline. Không tick "
+                "gì → chỉ hiện base node (combo bên trái).")
+            cell_results_btn.setStyleSheet("""
+                QToolButton{background:#111827;border:1px solid #1e2d45;
+                            border-radius:3px;color:#94a3b8;font-size:11px;
+                            padding:0 6px;font-weight:600;}
+                QToolButton:hover{background:#1a2236;color:#00d4ff;}
+                QToolButton::menu-indicator{image:none;}
+            """)
+            cell_menu = QMenu(cell_results_btn)
+            cell_menu.setStyleSheet(
+                "QMenu{background:#0d1220;border:1px solid #1e2d45;"
+                "padding:4px;color:#e2e8f0;}"
+                "QMenu::separator{height:1px;background:#1e2d45;margin:4px 6px;}")
+            cell_results_btn.setMenu(cell_menu)
+            hl.addWidget(cell_results_btn)
 
             status_lbl = QLabel("●")
             status_lbl.setStyleSheet("color:#64748b;font-size:11px;")
@@ -668,11 +695,18 @@ class ImageViewerPanel(QWidget):
 
             r, c = divmod(i, cols)
             self._multi_grid.addWidget(cell, r, c)
-            self._multi_views.append({
+            entry = {
                 "root": root_id, "cell_widget": cell,
                 "view": view, "combo": cb, "status": status_lbl,
                 "root_lbl": root_lbl,
-            })
+                "cell_overlays": {},
+                "cell_results_btn": cell_results_btn,
+                "cell_menu": cell_menu,
+            }
+            self._multi_views.append(entry)
+            # Rebuild menu khi mở → reflect graph hiện tại + checked state
+            cell_menu.aboutToShow.connect(
+                lambda _entry=entry: self._rebuild_cell_results_menu(_entry))
         self._refresh_multi_views()
 
     def _populate_cell_combo(self, cb: QComboBox, default_nid: Optional[str]):
@@ -714,14 +748,118 @@ class ImageViewerPanel(QWidget):
         if 0 <= cell_idx < len(self._multi_views):
             self._push_multi_cell(self._multi_views[cell_idx])
 
+    def _rebuild_cell_results_menu(self, entry):
+        """Rebuild menu Results của 1 cell — checkbox group theo Acquire /
+        Camera pipeline, selection được track per-cell trong
+        `entry['cell_overlays']`. Reuse logic của global Results menu."""
+        from PySide6.QtWidgets import QWidgetAction, QCheckBox, QLabel
+        from PySide6.QtGui import QAction
+        menu = entry['cell_menu']
+        menu.clear()
+        if not self._graph:
+            wa = QWidgetAction(menu)
+            lbl = QLabel("  (No pipeline)  ")
+            lbl.setStyleSheet("color:#64748b; padding:8px;")
+            wa.setDefaultWidget(lbl)
+            menu.addAction(wa)
+            return
+
+        # Header
+        wa_hdr = QWidgetAction(menu)
+        hdr = QLabel("  Overlay riêng cho ô này  ")
+        hdr.setStyleSheet(
+            "color:#00d4ff; font-size:10px; font-weight:700; "
+            "letter-spacing:1px; padding:6px 8px;")
+        wa_hdr.setDefaultWidget(hdr)
+        menu.addAction(wa_hdr)
+        menu.addSeparator()
+
+        # Group nodes theo pipeline — cùng logic với global menu để user
+        # quen mặt: tool nào thuộc Acquire / Camera flow nhanh chóng tìm thấy.
+        roots = self._enumerate_branch_roots()
+        groups: List[tuple] = []
+        accounted: set = set()
+        for root in roots:
+            section_label = self._root_pipeline_label(root)
+            tools = []
+            for nid in self._branch_image_nodes(root):
+                if nid in accounted:
+                    continue
+                accounted.add(nid)
+                node = self._graph.nodes.get(nid)
+                if (node is None
+                        or getattr(node.tool, "category", "") == "Acquire Image"):
+                    continue
+                tools.append((nid, node))
+            if tools:
+                groups.append((section_label, tools))
+        others = [(nid, n) for nid, n in self._graph.nodes.items()
+                  if any(p.name == "image" for p in n.tool.outputs)
+                  and nid not in accounted
+                  and getattr(n.tool, "category", "") != "Acquire Image"]
+        others.sort(key=lambda x: x[0])
+        if others:
+            groups.append(("Other", others))
+
+        if not groups:
+            wa = QWidgetAction(menu)
+            lbl = QLabel("  (Chưa có tool nào trong pipeline)  ")
+            lbl.setStyleSheet("color:#64748b; padding:8px;")
+            wa.setDefaultWidget(lbl)
+            menu.addAction(wa)
+        else:
+            for gi, (sl, items) in enumerate(groups):
+                if gi > 0:
+                    menu.addSeparator()
+                wa_sec = QWidgetAction(menu)
+                sec_lbl = QLabel(f"  ── {sl} ──  ")
+                sec_lbl.setStyleSheet(
+                    "color:#94a3b8; font-size:10px; font-weight:600; "
+                    "padding:4px 8px; background:#0d1220;")
+                wa_sec.setDefaultWidget(sec_lbl)
+                menu.addAction(wa_sec)
+                for nid, node in items:
+                    wa = QWidgetAction(menu)
+                    cb = QCheckBox(f"  {node.tool.icon}  {node.tool.name}  "
+                                    f"({node.tool.tool_id})")
+                    cb.setChecked(entry['cell_overlays'].get(nid, False))
+                    cb.setStyleSheet(
+                        "QCheckBox{color:#e2e8f0; font-size:11px; padding:4px 8px;}"
+                        "QCheckBox::indicator{width:14px; height:14px;}")
+                    cb.toggled.connect(
+                        lambda on, _nid=nid, _entry=entry:
+                            self._on_cell_overlay_toggled(_entry, _nid, on))
+                    wa.setDefaultWidget(cb)
+                    menu.addAction(wa)
+
+        menu.addSeparator()
+        act_clear = QAction("✗  Clear All", menu)
+        act_clear.triggered.connect(
+            lambda _checked=False, _entry=entry: self._clear_cell_overlays(_entry))
+        menu.addAction(act_clear)
+
+    def _on_cell_overlay_toggled(self, entry, node_id: str, on: bool):
+        entry['cell_overlays'][node_id] = on
+        self._update_cell_results_btn(entry)
+        self._push_multi_cell(entry)
+
+    def _clear_cell_overlays(self, entry):
+        entry['cell_overlays'] = {}
+        self._update_cell_results_btn(entry)
+        self._push_multi_cell(entry)
+
+    def _update_cell_results_btn(self, entry):
+        n = sum(1 for v in entry['cell_overlays'].values() if v)
+        btn = entry['cell_results_btn']
+        btn.setText("📊" if n == 0 else f"📊 ({n})")
+
     def _push_multi_cell(self, entry):
         """Load ảnh + status của node đang chọn trong ô vào view; cập nhật
-        header để reflect pipeline gốc (Acquire Image / Camera Image) của
-        node đang xem (vì combo gộp cả 2 pipeline, source có thể đổi)."""
+        header để reflect pipeline gốc. Nếu cell có overlay items ticked
+        (📊 button), composite chúng lên base image của pipeline."""
         nid = entry["combo"].currentData()
         node = self._graph.nodes.get(nid) if self._graph and nid else None
 
-        # Update header label theo pipeline gốc của node đang chọn
         pipeline_root = self._node_pipeline_root(nid) if nid else None
         if pipeline_root:
             label = self._root_pipeline_label(pipeline_root)
@@ -732,17 +870,46 @@ class ImageViewerPanel(QWidget):
 
         if node is None:
             return
-        img = node.outputs.get("_display_image")
+
+        def _vis_of(n):
+            v = n.outputs.get("_display_image")
+            if v is None:
+                v = n.outputs.get("image")
+            return v
+
+        active = [oid for oid, on in entry.get('cell_overlays', {}).items()
+                  if on and oid in self._graph.nodes]
+
+        img = None
+        if active:
+            # Base = ảnh Acquire của pipeline ô này (file hoặc camera root).
+            base_root = pipeline_root or entry["root"]
+            base_node = self._graph.nodes.get(base_root)
+            base = base_node.outputs.get("image") if base_node else None
+            if base is not None and isinstance(base, np.ndarray):
+                import cv2
+                comp = base.copy()
+                if comp.ndim == 2:
+                    comp = cv2.cvtColor(comp, cv2.COLOR_GRAY2BGR)
+                for oid in active:
+                    on_node = self._graph.nodes[oid]
+                    before = self._node_input_image(on_node)
+                    after = _vis_of(on_node)
+                    if before is not None and after is not None:
+                        comp = self._overlay_diff(comp, before, after)
+                img = comp
         if img is None:
-            img = node.outputs.get("image")
+            img = _vis_of(node)
         if img is not None:
             entry["view"].set_image(img)
+
         status = getattr(node, "status", "—") or "—"
         color = {"pass": "#39ff14", "fail": "#ff3860",
                  "error": "#ff3860", "running": "#ffd700"}.get(status, "#64748b")
         entry["status"].setStyleSheet(
             f"color:{color};font-size:13px;font-weight:bold;")
         entry["status"].setToolTip(status.upper())
+        self._update_cell_results_btn(entry)
 
     def _refresh_multi_views(self):
         """Push ảnh mới nhất lên từng ô. Cũng resync combo items khi graph
