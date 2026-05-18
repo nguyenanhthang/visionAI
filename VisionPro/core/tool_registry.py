@@ -1021,8 +1021,20 @@ def proc_blob(inputs, params):
     is_pass = min_cnt <= len(blobs) <= max_cnt
     print(f"[Blob] count={len(blobs)} total_area={total_area:.2f}mm² {'PASS' if is_pass else 'FAIL'}")
 
+    # Scalar shortcuts của blob ĐẦU TIÊN (lớn nhất hay đầu danh sách tuỳ
+    # contour order) — để nối thẳng vào dist_point / display / message …
+    first = blobs[0] if blobs else {}
+    cx0 = float(first.get("cx", 0.0))
+    cy0 = float(first.get("cy", 0.0))
+    area0 = float(first.get("area", 0.0))
+    bbox_w0 = float(first.get("bbox_w", 0.0))
+    bbox_h0 = float(first.get("bbox_h", 0.0))
+    angle0 = float(first.get("angle", 0.0))
+
     return {"image":vis,"count":len(blobs),"pass":is_pass,
             "total_area":total_area,"blobs":blobs,"centroids":centroids,
+            "cx": cx0, "cy": cy0, "area": area0,
+            "bbox_w": bbox_w0, "bbox_h": bbox_h0, "angle": angle0,
             # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
             # khi user kéo label trên canvas. Không expose qua port.
             "_label_rects": label_rects,
@@ -2461,7 +2473,11 @@ TOOL_REGISTRY: List[ToolDef] = [
     "#2d6a4f","🔵",
     [PortDef("image","image"),PortDef("mask","image",required=False)],
     [PortDef("image","image"),PortDef("count","number"),PortDef("pass","bool"),
-     PortDef("total_area","number"),PortDef("blobs","any"),PortDef("centroids","any")],
+     PortDef("total_area","number"),PortDef("blobs","any"),PortDef("centroids","any"),
+     # Scalar shortcuts của blob đầu tiên — nối thẳng vào dist_point/display/…
+     PortDef("cx","number"),PortDef("cy","number"),PortDef("area","number"),
+     PortDef("bbox_w","number"),PortDef("bbox_h","number"),
+     PortDef("angle","number")],
     [P("auto_threshold","Auto Threshold (Otsu)","bool",True,
        tooltip="Chỉ áp dụng khi KHÔNG có port mask kết nối. Có mask → bỏ qua."),
      P("threshold","Manual Threshold","int",128,0,255),
