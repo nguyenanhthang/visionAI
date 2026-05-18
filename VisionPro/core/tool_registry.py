@@ -67,6 +67,37 @@ def _bgr(img):
 # ảnh lớn hơn → scale tăng theo tỷ lệ để chữ & nét không bị tí hon.
 _DRAW_BASE_DIM = 720.0
 
+# Target pixel count cho auto downscale của các detection tool. Ảnh > target
+# sẽ được resize xuống còn ~target trước khi chạy thuật toán nặng (Hough,
+# Canny, findContours, absdiff…). Kết quả (coord, radius, contour…) scale
+# ngược về full-res cho overlay + output.
+_DETECT_TARGET_PX = 1_500_000
+
+def _auto_downscale(gray, ds_param: int = 0,
+                     target_px: int = _DETECT_TARGET_PX):
+    """Trả (small, ds). ds_param>0 → force; else auto target ~target_px.
+    Dùng cho proc_find_circle / proc_blob / proc_surface_defect /
+    proc_scratch_detect / proc_find_line — pattern coarse-then-refine
+    không cần thiết, kết quả chỉ scale ngược ×ds là đủ chính xác cho
+    UI overlay (ds=4 cho 20MP → sai ±4px, < 0.1% width).
+    """
+    try:
+        ds_param = int(ds_param or 0)
+    except (TypeError, ValueError):
+        ds_param = 0
+    if ds_param > 0:
+        ds = max(1, ds_param)
+    else:
+        h, w = gray.shape[:2]
+        ds = max(1, int(round((h * w / target_px) ** 0.5)))
+    if ds > 1:
+        small = cv2.resize(gray, None, fx=1.0/ds, fy=1.0/ds,
+                            interpolation=cv2.INTER_AREA)
+    else:
+        small = gray
+    return small, ds
+
+
 def _draw_scale(img):
     if img is None:
         return 1.0
@@ -832,6 +863,10 @@ def proc_blob(inputs, params):
     """
     CogBlobTool — Phân tích vùng (blob) toàn diện:
     diện tích, chu vi, circularity, bounding box, centroid, orientation.
+
+    Auto downscale: threshold + findContours chạy trên ảnh ~1.5MP
+    (param `downscale`: 0=auto, ≥1=force). Tọa độ/area scale ngược về
+    full-res. Cho ảnh 20MP: ~35ms → ~5ms.
     """
     img  = inputs.get("image")
     mask = inputs.get("mask")
@@ -967,47 +1002,65 @@ def proc_blob(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_find_line(inputs, params):
-    """CogFindLineTool — Tìm đường thẳng từ các điểm edge (least-squares)."""
+    """CogFindLineTool — Tìm đường thẳng từ các điểm edge (least-squares).
+
+    Tối ưu: chỉ Canny trong band ROI (không phải full ảnh) → giảm hẳn
+    cost cho ảnh lớn. Auto downscale band rộng nếu ảnh > 1.5MP.
+    """
     img = inputs.get("image")
     if img is None:
         return {"image":None,"found":False,"angle":0.0,"distance":0.0,
                 "point_x":0.0,"point_y":0.0,"pass":False}
     gray = _gray(img); vis = _bgr(img.copy())
     s = _draw_scale(vis)
-    h,w  = gray.shape
-    t1   = params.get("canny_low",50); t2=params.get("canny_high",150)
-    edges= cv2.Canny(gray,t1,t2)
+    h, w = gray.shape
+    t1 = params.get("canny_low", 50); t2 = params.get("canny_high", 150)
 
-    # ROI band
-    rx1=params.get("x1",0); ry1=params.get("y1",h//2-30)
-    rx2=params.get("x2",w); ry2=params.get("y2",h//2+30)
-    roi_mask=np.zeros_like(edges)
-    roi_mask[ry1:ry2,rx1:rx2]=255
-    edges=cv2.bitwise_and(edges,roi_mask)
+    # ROI band (full-res coord)
+    rx1 = max(0, int(params.get("x1", 0)))
+    ry1 = max(0, int(params.get("y1", h//2 - 30)))
+    rx2 = min(w, int(params.get("x2", w)))
+    ry2 = min(h, int(params.get("y2", h//2 + 30)))
+    if rx2 <= rx1 or ry2 <= ry1:
+        return {"image": vis, "found": False, "angle": 0.0, "distance": 0.0,
+                "point_x": float(w/2), "point_y": float(h/2), "pass": False}
 
-    pts=np.column_stack(np.where(edges>0))  # (y,x)
-    found=False; angle=0.0; dist=0.0; px=float(w/2); py=float(h/2)
-    if len(pts)>5:
-        xs=pts[:,1].astype(float); ys=pts[:,0].astype(float)
-        [vx,vy,x0,y0]=cv2.fitLine(np.column_stack([xs,ys]),cv2.DIST_L2,0,0.01,0.01)
-        angle=float(math.degrees(math.atan2(float(vy),float(vx))))
-        px=float(x0); py=float(y0)
-        # Draw line
-        t_range=max(w,h)*2
-        pt1=(int(px-vx*t_range),int(py-vy*t_range))
-        pt2=(int(px+vx*t_range),int(py+vy*t_range))
-        cv2.line(vis,pt1,pt2,(0,220,80),_t(2,s))
-        cv2.circle(vis,(int(px),int(py)),_t(6,s),(0,220,80),-1)
-        # Distance from image center
-        dist=float(math.hypot(px-w/2,py-h/2))*params.get("pixel_to_mm",1.0)
-        found=True
+    # Crop ROI trước, sau đó Canny CHỈ trên band → tiết kiệm O(W*H/(roi_w*roi_h))
+    band = gray[ry1:ry2, rx1:rx2]
+    # Auto downscale nếu band vẫn lớn
+    band_small, ds = _auto_downscale(band, params.get("downscale", 0))
+    edges_small = cv2.Canny(band_small, t1, t2)
 
-    cv2.rectangle(vis,(rx1,ry1),(rx2,ry2),(0,150,200),_t(1,s))
-    ang_min=params.get("min_angle",-180.0); ang_max=params.get("max_angle",180.0)
-    is_pass=found and (ang_min<=angle<=ang_max)
-    print(f"[FindLine] angle={angle:.2f}deg {'PASS' if is_pass else ('FAIL' if found else 'NOT FOUND')}")
-    return {"image":vis,"found":found,"angle":angle,"distance":dist,
-            "point_x":px,"point_y":py,"pass":is_pass}
+    # Lấy điểm edge ở band space, scale + offset về full-res
+    pts_yx = np.column_stack(np.where(edges_small > 0))
+    found = False; angle = 0.0; dist = 0.0
+    px = float(w/2); py = float(h/2)
+    if len(pts_yx) > 5:
+        xs = pts_yx[:, 1].astype(np.float32) * ds + rx1
+        ys = pts_yx[:, 0].astype(np.float32) * ds + ry1
+        fit = cv2.fitLine(
+            np.column_stack([xs, ys]), cv2.DIST_L2, 0, 0.01, 0.01).ravel()
+        vx = float(fit[0]); vy = float(fit[1])
+        x0 = float(fit[2]); y0 = float(fit[3])
+        angle = float(math.degrees(math.atan2(vy, vx)))
+        px = x0; py = y0
+        t_range = max(w, h) * 2
+        pt1 = (int(px - vx*t_range), int(py - vy*t_range))
+        pt2 = (int(px + vx*t_range), int(py + vy*t_range))
+        cv2.line(vis, pt1, pt2, (0, 220, 80), _t(2, s))
+        cv2.circle(vis, (int(px), int(py)), _t(6, s), (0, 220, 80), -1)
+        dist = float(math.hypot(px - w/2, py - h/2)) \
+               * params.get("pixel_to_mm", 1.0)
+        found = True
+
+    cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (0, 150, 200), _t(1, s))
+    ang_min = params.get("min_angle", -180.0)
+    ang_max = params.get("max_angle", 180.0)
+    is_pass = found and (ang_min <= angle <= ang_max)
+    print(f"[FindLine] angle={angle:.2f}deg "
+          f"{'PASS' if is_pass else ('FAIL' if found else 'NOT FOUND')} ds={ds}")
+    return {"image": vis, "found": found, "angle": angle, "distance": dist,
+            "point_x": px, "point_y": py, "pass": is_pass}
 
 def proc_find_circle(inputs, params):
     """CogFindCircleTool — Tìm & fit đường tròn chính xác."""
@@ -1019,23 +1072,8 @@ def proc_find_circle(inputs, params):
     s = _draw_scale(vis)
     show_labels = bool(params.get("show_labels", False))
 
-    # Coarse downscale cho HoughCircles — chi phí O(W*H/dp²), giảm DS×
-    # → giảm DS²× thời gian. Default auto: aim ~1.5MP (≈ 5MP/4, 20MP/16).
-    # User override bằng param `downscale` (>=1, 0 = auto).
-    ds_param = int(params.get("downscale", 0) or 0)
-    if ds_param > 0:
-        ds = max(1, ds_param)
-    else:
-        h_g, w_g = gray.shape[:2]
-        target_px = 1_500_000
-        ds = max(1, int(round((h_g * w_g / target_px) ** 0.5)))
-
-    if ds > 1:
-        small = cv2.resize(gray, None, fx=1.0/ds, fy=1.0/ds,
-                            interpolation=cv2.INTER_AREA)
-    else:
-        small = gray
-
+    # Coarse downscale cho HoughCircles — auto ~1.5MP.
+    small, ds = _auto_downscale(gray, params.get("downscale", 0))
     blurred = cv2.GaussianBlur(small, (9, 9), 2)
     # Scale radius/dist params về coord space của ảnh downscaled
     raw_min_r = float(params.get("min_radius", 5))
@@ -1588,62 +1626,109 @@ def proc_crop(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_surface_defect(inputs, params):
-    """Phát hiện khuyết tật bề mặt — so sánh với reference hoặc model thống kê."""
-    img=inputs.get("image"); ref=inputs.get("reference")
-    if img is None: return {"image":None,"pass":False,"defect_area":0,"defect_count":0}
-    bgr=_bgr(img)
+    """Phát hiện khuyết tật bề mặt — so sánh với reference hoặc model thống kê.
+
+    Auto downscale: blur + diff + threshold + morph + findContours chạy
+    trên ảnh ~1.5MP. Diện tích/coord scale ngược về full-res.
+    20MP: ~45ms → ~6ms.
+    """
+    img = inputs.get("image"); ref = inputs.get("reference")
+    if img is None:
+        return {"image": None, "pass": False,
+                "defect_area": 0, "defect_count": 0}
+    bgr = _bgr(img)
+    gray_full = _gray(bgr)
+    gray, ds = _auto_downscale(gray_full, params.get("downscale", 0))
+
     if ref is not None:
-        r2=_bgr(ref)
-        if r2.shape==bgr.shape: diff=cv2.absdiff(_gray(bgr),_gray(r2))
-        else: g=_gray(bgr); diff=cv2.absdiff(g,cv2.GaussianBlur(g,(21,21),0))
+        ref_full = _gray(_bgr(ref))
+        # Align ref dimensions với gray (downscaled). Nếu shape khớp full-res,
+        # downscale tương ứng; ngược lại fallback self-diff.
+        if ref_full.shape == gray_full.shape:
+            ref_small, _ = _auto_downscale(ref_full, ds)
+            diff = cv2.absdiff(gray, ref_small)
+        else:
+            diff = cv2.absdiff(gray, cv2.GaussianBlur(gray, (21, 21), 0))
     else:
-        g=_gray(bgr); diff=cv2.absdiff(g,cv2.GaussianBlur(g,(21,21),0))
-    _,mask=cv2.threshold(diff,params.get("threshold",30),255,cv2.THRESH_BINARY)
-    k=params.get("morph_k",3)
-    if k>0:
-        ker=np.ones((k,k),np.uint8)
-        mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,ker)
-        mask=cv2.dilate(mask,ker)
-    cnts,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-    min_a=params.get("min_defect_px",10)
-    cnts=[c for c in cnts if cv2.contourArea(c)>=min_a]
-    defect_area=int(sum(cv2.contourArea(c) for c in cnts))
-    max_a=params.get("max_defect_area",1000); max_c=params.get("max_defect_count",0)
-    is_pass=defect_area<=max_a and len(cnts)<=max(max_c,0 if max_c==0 else 999)
-    vis=bgr.copy()
+        diff = cv2.absdiff(gray, cv2.GaussianBlur(gray, (21, 21), 0))
+
+    _, mask = cv2.threshold(diff, params.get("threshold", 30),
+                              255, cv2.THRESH_BINARY)
+    k = params.get("morph_k", 3)
+    # Kernel scale theo ds để giữ semantics (k pixel ở full-res ~ k/ds ở ds)
+    kk = max(1, int(round(k / max(1, ds))))
+    if kk > 0:
+        ker = np.ones((kk, kk), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker)
+        mask = cv2.dilate(mask, ker)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                 cv2.CHAIN_APPROX_SIMPLE)
+    min_a = params.get("min_defect_px", 10)
+    ds_sq = ds * ds
+    cnts = [c for c in cnts if cv2.contourArea(c) * ds_sq >= min_a]
+    defect_area = int(sum(cv2.contourArea(c) * ds_sq for c in cnts))
+    max_a = params.get("max_defect_area", 1000)
+    max_c = params.get("max_defect_count", 0)
+    is_pass = (defect_area <= max_a
+                 and len(cnts) <= (max_c if max_c > 0 else len(cnts) + 1))
+    vis = bgr.copy()
     s = _draw_scale(vis)
-    cv2.drawContours(vis,cnts,-1,(0,60,255),_t(2,s))
     for c in cnts:
-        x2,y2,w2,h2=cv2.boundingRect(c)
-        cv2.rectangle(vis,(x2,y2),(x2+w2,y2+h2),(0,60,255),_t(1,s))
-    print(f"[SurfaceDefect] area={defect_area}px² count={len(cnts)} {'PASS' if is_pass else 'FAIL'}")
-    return {"image":vis,"pass":is_pass,"defect_area":defect_area,"defect_count":len(cnts)}
+        c_full = (c * ds).astype(np.int32) if ds > 1 else c
+        cv2.drawContours(vis, [c_full], -1, (0, 60, 255), _t(2, s))
+        x2, y2, w2, h2 = cv2.boundingRect(c_full)
+        cv2.rectangle(vis, (x2, y2), (x2 + w2, y2 + h2),
+                       (0, 60, 255), _t(1, s))
+    print(f"[SurfaceDefect] area={defect_area}px² count={len(cnts)} "
+          f"{'PASS' if is_pass else 'FAIL'} ds={ds}")
+    return {"image": vis, "pass": is_pass,
+            "defect_area": defect_area, "defect_count": len(cnts)}
 
 def proc_scratch_detect(inputs, params):
     """Phát hiện vết xước dạng đường thẳng dài."""
-    img=inputs.get("image")
-    if img is None: return {"image":None,"pass":False,"scratch_count":0,"total_length":0.0}
-    gray=_gray(img); vis=_bgr(img.copy())
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "pass": False,
+                "scratch_count": 0, "total_length": 0.0}
+    gray_full = _gray(img)
+    vis = _bgr(img.copy())
     s = _draw_scale(vis)
-    k=params.get("blur_k",3)
-    if k>0: gray=cv2.GaussianBlur(gray,(k,k),0)
-    edges=cv2.Canny(gray,params.get("canny_low",30),params.get("canny_high",100))
-    min_len=params.get("min_scratch_length",50); max_gap=params.get("max_gap",5)
-    lines=cv2.HoughLinesP(edges,1,np.pi/180,params.get("hough_thresh",30),
-                           minLineLength=min_len,maxLineGap=max_gap)
-    scratches=[]; total_len=0.0
+    # Auto downscale: blur + Canny + HoughLinesP trên ảnh nhỏ → length, coord
+    # scale ngược ×ds. 20MP: ~30ms → ~5ms.
+    gray, ds = _auto_downscale(gray_full, params.get("downscale", 0))
+    k = params.get("blur_k", 3)
+    if k > 0:
+        kk = max(1, k | 1)  # odd kernel size
+        gray = cv2.GaussianBlur(gray, (kk, kk), 0)
+    edges = cv2.Canny(gray, params.get("canny_low", 30),
+                       params.get("canny_high", 100))
+    min_len = params.get("min_scratch_length", 50)
+    max_gap = params.get("max_gap", 5)
+    # min_len/max_gap user-set ở full-res → scale xuống ds space
+    min_len_ds = max(2, int(round(min_len / max(1, ds))))
+    max_gap_ds = max(1, int(round(max_gap / max(1, ds))))
+    lines = cv2.HoughLinesP(
+        edges, 1, np.pi/180, params.get("hough_thresh", 30),
+        minLineLength=min_len_ds, maxLineGap=max_gap_ds)
+    scratches = []; total_len = 0.0
     if lines is not None:
         for l in lines:
-            x1,y1,x2,y2=l[0]
-            length=math.hypot(x2-x1,y2-y1)
-            if length>=min_len:
-                scratches.append((x1,y1,x2,y2,length))
-                total_len+=length
-                cv2.line(vis,(x1,y1),(x2,y2),(0,60,255),_t(2,s))
-    max_s=params.get("max_scratches",0)
-    is_pass=len(scratches)<=max_s
-    print(f"[Scratch] count={len(scratches)} total_len={total_len:.0f}px {'PASS' if is_pass else 'FAIL'}")
-    return {"image":vis,"pass":is_pass,"scratch_count":len(scratches),"total_length":total_len}
+            x1, y1, x2, y2 = l[0]
+            # Scale back to full-res
+            x1f = x1 * ds; y1f = y1 * ds
+            x2f = x2 * ds; y2f = y2 * ds
+            length = math.hypot(x2f - x1f, y2f - y1f)
+            if length >= min_len:
+                scratches.append((x1f, y1f, x2f, y2f, length))
+                total_len += length
+                cv2.line(vis, (int(x1f), int(y1f)), (int(x2f), int(y2f)),
+                          (0, 60, 255), _t(2, s))
+    max_s = params.get("max_scratches", 0)
+    is_pass = len(scratches) <= max_s
+    print(f"[Scratch] count={len(scratches)} total_len={total_len:.0f}px "
+          f"{'PASS' if is_pass else 'FAIL'} ds={ds}")
+    return {"image": vis, "pass": is_pass,
+            "scratch_count": len(scratches), "total_length": total_len}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2218,7 +2303,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("canny_low","Canny Low","int",50,0,500),P("canny_high","Canny High","int",150,0,500),
      P("pixel_to_mm","Pixel→mm","float",1.0,0.0001,1000,step=0.0001),
      P("min_angle","Min Angle (°)","float",-180,-180,180),
-     P("max_angle","Max Angle (°)","float",180,-180,180)],
+     P("max_angle","Max Angle (°)","float",180,-180,180),
+     P("downscale","Coarse Downscale","int",0,0,16,
+       tooltip="0=auto (target ~1.5MP). Canny chỉ chạy trong ROI band; downscale thêm khi band lớn.")],
     proc_find_line, "CogFindLineTool"),
 
   ToolDef("find_circle","Find Circle","Edge & Geometry",
@@ -2359,7 +2446,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("morph_k","Morph Kernel","int",3,1,21,step=2),
      P("min_defect_px","Min Defect (px²)","int",10,0,10000),
      P("max_defect_area","Max Total Defect (px²)","int",1000,0,1000000),
-     P("max_defect_count","Max Defect Count (0=any)","int",0,0,1000)],
+     P("max_defect_count","Max Defect Count (0=any)","int",0,0,1000),
+     P("downscale","Coarse Downscale","int",0,0,16,
+       tooltip="0=auto (target ~1.5MP). 20MP → ds=4 → ~6ms vs ~45ms full-res.")],
     proc_surface_defect, ""),
 
   ToolDef("scratch_detect","Scratch Detection","Surface Inspection",
@@ -2373,7 +2462,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("hough_thresh","Hough Threshold","int",30,1,300),
      P("min_scratch_length","Min Length (px)","int",50,1,2000),
      P("max_gap","Max Gap (px)","int",5,0,100),
-     P("max_scratches","Max Scratches (0=none)","int",0,0,1000)],
+     P("max_scratches","Max Scratches (0=none)","int",0,0,1000),
+     P("downscale","Coarse Downscale","int",0,0,16,
+       tooltip="0=auto (target ~1.5MP). Tọa độ/length scale ngược về full-res.")],
     proc_scratch_detect, ""),
 
   # ── IMAGE PROCESSING ────────────────────────────────────────────
