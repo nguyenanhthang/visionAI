@@ -310,7 +310,14 @@ class ImageViewerPanel(QWidget):
         tl.addWidget(self._btn_results)
 
         # Multi-view toggle — auto split khung khi có nhiều input branches.
-        self._btn_multi = tb_btn("⊞", "Toggle multi-view (mỗi Acquire Image 1 ô)")
+        # • 2+ Acquire/Camera roots → 1 ô per root (mỗi pipeline 1 view).
+        # • 1 root → auto-expand thành nhiều ô (mỗi node trong branch 1 ô).
+        # • Mỗi ô có combo độc lập chọn node từ bất kỳ branch nào (Acquire
+        #   hoặc Camera), header hiển thị pipeline gốc của node đang xem.
+        self._btn_multi = tb_btn(
+            "⊞",
+            "Toggle multi-view — mỗi Acquire Image / Camera Image pipeline 1 ô; "
+            "chọn node nào trong combo để hiển thị result tương ứng.")
         self._btn_multi.setCheckable(True)
         self._btn_multi.toggled.connect(self._on_multi_toggled)
         tl.addWidget(self._btn_multi)
@@ -330,7 +337,11 @@ class ImageViewerPanel(QWidget):
         self._multi_grid = QGridLayout(self._multi_container)
         self._multi_grid.setContentsMargins(0, 0, 0, 0)
         self._multi_grid.setSpacing(2)
-        self._multi_views: List[tuple] = []  # [(root_id, view_widget, label), ...]
+        # Mỗi entry là dict {root, cell_widget, view, combo, status, root_lbl}.
+        # `root` = default Acquire/Camera root cho ô (dùng để fallback combo
+        # khi node đang chọn bị xóa); user có thể switch combo sang node thuộc
+        # bất kỳ pipeline nào, header sẽ cập nhật theo.
+        self._multi_views: List[dict] = []
         self._view_stack.addWidget(self._multi_container)
 
         lay.addWidget(self._view_stack, 1)
@@ -414,20 +425,76 @@ class ImageViewerPanel(QWidget):
         else:
             self._view_stack.setCurrentIndex(0)
 
+    # Tool IDs nhận diện 2 loại "Acquire Image" pipeline:
+    #   acquire_image  → file-based (folder/file load) → header "Acquire Image"
+    #   camera_acquire → camera-based (OpenCV/HikRobot) → header "Camera Image"
+    _FILE_ACQUIRE_ID = "acquire_image"
+    _CAMERA_ACQUIRE_ID = "camera_acquire"
+
     def _enumerate_branch_roots(self) -> List[str]:
-        """Find pipeline root nodes — node có image output nhưng KHÔNG nhận
-        image input (vd Acquire Image / Camera Acquire). Mỗi root = 1 branch.
+        """Pipeline roots = node category 'Acquire Image' (tool_id
+        `acquire_image` cho file, `camera_acquire` cho camera). Sort: file
+        trước, camera sau, stable theo node_id trong mỗi nhóm.
+
+        Lọc category thay vì 'has image-out & no image-in' để tránh leak các
+        tool có image-input optional (vd Area Measure nối qua `mask`/
+        `contours` thay vì port `image`) thành false-positive root.
         """
         if self._graph is None:
             return []
-        img_dst_nodes = {c.dst_id for c in self._graph.connections
-                         if c.dst_port == "image"}
-        roots = []
-        for nid, node in self._graph.nodes.items():
-            out_names = {p.name for p in node.tool.outputs}
-            if "image" in out_names and nid not in img_dst_nodes:
-                roots.append(nid)
+        roots = [nid for nid, node in self._graph.nodes.items()
+                 if getattr(node.tool, "category", "") == "Acquire Image"]
+
+        def _order(nid: str) -> int:
+            tid = self._graph.nodes[nid].tool.tool_id
+            if tid == self._FILE_ACQUIRE_ID:
+                return 0
+            if tid == self._CAMERA_ACQUIRE_ID:
+                return 1
+            return 2
+
+        roots.sort(key=lambda nid: (_order(nid), nid))
         return roots
+
+    def _root_pipeline_label(self, root_id: str) -> str:
+        """Header label cho pipeline gốc — 'Acquire Image' (file) hoặc
+        'Camera Image' (camera). Dùng cho cell header trong multi-view và
+        section trong combo dropdown."""
+        node = self._graph.nodes.get(root_id) if self._graph else None
+        if node is None:
+            return "?"
+        if node.tool.tool_id == self._CAMERA_ACQUIRE_ID:
+            return "Camera Image"
+        if node.tool.tool_id == self._FILE_ACQUIRE_ID:
+            return "Acquire Image"
+        return node.tool.name
+
+    def _node_pipeline_root(self, node_id: str) -> Optional[str]:
+        """Tìm Acquire/Camera root mà node thuộc về (đi ngược upstream theo
+        port `image`). Trả None nếu node không thuộc pipeline Acquire/Camera
+        nào (vd dangling tool)."""
+        if self._graph is None or node_id not in self._graph.nodes:
+            return None
+        roots = set(self._enumerate_branch_roots())
+        if node_id in roots:
+            return node_id
+        visited = set()
+        cur = node_id
+        for _ in range(64):
+            if cur in visited:
+                break
+            visited.add(cur)
+            if cur in roots:
+                return cur
+            upstream = None
+            for c in self._graph.connections:
+                if c.dst_id == cur and c.dst_port == "image":
+                    upstream = c.src_id
+                    break
+            if upstream is None:
+                return None
+            cur = upstream
+        return None
 
     def _branch_terminal(self, root_id: str) -> str:
         """BFS xuôi dòng từ root theo image connections → trả về node cuối
@@ -483,13 +550,29 @@ class ImageViewerPanel(QWidget):
                     queue.append(dst)
         return result
 
-    def _rebuild_multi_grid(self):
-        """Detect branches và xây grid các ZoomableImageWidget. Mỗi ô có
-        dropdown chọn node của branch để user tùy xem (default = terminal).
+    def _plan_multi_cells(self, roots: List[str]) -> List[tuple]:
+        """Quyết định cells = list (root_default, node_default). Rules:
+          • 2+ Acquire/Camera roots → 1 ô per root, default = terminal.
+          • 1 root → auto-expand: 1 ô per image node trong branch
+            (root + downstream). Multi-view stays useful kể cả khi pipeline
+            chỉ có 1 source.
+        Cap ở 9 cells để tránh grid quá đông.
         """
+        if not roots:
+            return []
+        if len(roots) >= 2:
+            return [(r, self._branch_terminal(r)) for r in roots][:9]
+        root = roots[0]
+        nodes = self._branch_image_nodes(root) or [root]
+        return [(root, nid) for nid in nodes][:9]
+
+    def _rebuild_multi_grid(self):
+        """Detect Acquire/Camera branches và build grid ZoomableImageWidget.
+        Mỗi ô có combo chọn node từ BẤT KỲ Acquire/Camera branch nào — user
+        có thể tự chọn 'view nào' (Acquire Image hoặc Camera Image) cho từng
+        ô độc lập."""
         # Clear old widgets
         for cell in self._multi_views:
-            cell["root"]  # keep linter happy
             cell["cell_widget"].setParent(None)
             cell["cell_widget"].deleteLater()
         self._multi_views = []
@@ -498,30 +581,31 @@ class ImageViewerPanel(QWidget):
         if not roots:
             return
 
-        # Grid layout: 1 root → 1×1; 2 → 1×2; 3-4 → 2×2; 5-6 → 2×3; 7-9 → 3×3
-        n = len(roots)
+        cells_plan = self._plan_multi_cells(roots)
+        n = len(cells_plan)
+        if n == 0:
+            return
+
+        # Grid layout: 1 → 1×1; 2 → 1×2; 3-4 → 2×2; 5-6 → 2×3; 7-9 → 3×3
         if n <= 1:    cols = 1
         elif n <= 2:  cols = 2
         elif n <= 6:  cols = (n + 1) // 2
         else:         cols = 3
 
         from PySide6.QtWidgets import QVBoxLayout as _QV, QHBoxLayout as _QH
-        for i, root_id in enumerate(roots):
+        for i, (root_id, default_nid) in enumerate(cells_plan):
             cell = QWidget()
             cell_lay = _QV(cell)
             cell_lay.setContentsMargins(0, 0, 0, 0)
             cell_lay.setSpacing(0)
 
-            # Header: root label + node dropdown + status badge
+            # Header: pipeline label (Acquire/Camera Image) + node combo + status
             hdr = QWidget()
             hdr.setStyleSheet(
                 "background:#060a14;border-bottom:1px solid #1e2d45;")
             hl = _QH(hdr)
             hl.setContentsMargins(6, 3, 6, 3); hl.setSpacing(6)
-            root_node = self._graph.nodes.get(root_id)
-            root_name = root_node.tool.name if root_node else "?"
-            root_lbl = QLabel(f"<b>{root_name}</b>  →")
-            root_lbl.setStyleSheet("color:#64748b;font-size:10px;")
+            root_lbl = QLabel("")
             root_lbl.setTextFormat(Qt.RichText)
             hl.addWidget(root_lbl)
 
@@ -535,19 +619,12 @@ class ImageViewerPanel(QWidget):
                                              border:1px solid #1e2d45;
                                              selection-background-color:#1a2236;}
             """)
-            branch_nodes = self._branch_image_nodes(root_id)
-            terminal_id = self._branch_terminal(root_id)
-            for nid in branch_nodes:
-                node = self._graph.nodes.get(nid)
-                if not node:
-                    continue
-                cb.addItem(f"{node.tool.icon} {node.tool.name}", nid)
-            # Default select terminal
-            for j in range(cb.count()):
-                if cb.itemData(j) == terminal_id:
-                    cb.setCurrentIndex(j); break
+            cb.setToolTip(
+                "Chọn node hiển thị trong ô này — list gom cả Acquire Image "
+                "và Camera Image branches.")
+            self._populate_cell_combo(cb, default_nid)
             cb.currentIndexChanged.connect(
-                lambda _idx, rid=root_id: self._on_multi_node_changed(rid))
+                lambda _idx, idx=i: self._on_multi_cell_changed(idx))
             hl.addWidget(cb, 1)
 
             status_lbl = QLabel("●")
@@ -564,21 +641,65 @@ class ImageViewerPanel(QWidget):
             self._multi_views.append({
                 "root": root_id, "cell_widget": cell,
                 "view": view, "combo": cb, "status": status_lbl,
+                "root_lbl": root_lbl,
             })
         self._refresh_multi_views()
 
-    def _on_multi_node_changed(self, root_id: str):
-        """User pick node khác cho 1 ô → load image của node đó."""
-        for entry in self._multi_views:
-            if entry["root"] != root_id:
-                continue
-            self._push_multi_cell(entry)
-            return
+    def _populate_cell_combo(self, cb: QComboBox, default_nid: Optional[str]):
+        """Fill combo với tất cả image nodes từ MỌI Acquire/Camera branch,
+        group theo pipeline. Đặt mặc định ở `default_nid` nếu có."""
+        cb.blockSignals(True)
+        cb.clear()
+        roots = self._enumerate_branch_roots()
+        for root in roots:
+            label = self._root_pipeline_label(root)
+            # Section separator để user phân biệt pipelines trong dropdown
+            if cb.count() > 0:
+                cb.insertSeparator(cb.count())
+            head_idx = cb.count()
+            cb.addItem(f"── {label} ──", None)
+            # Disable head row (visual section header only)
+            model = cb.model()
+            from PySide6.QtCore import Qt as _Qt
+            item = model.item(head_idx)
+            if item is not None:
+                item.setFlags(item.flags() & ~_Qt.ItemIsEnabled
+                              & ~_Qt.ItemIsSelectable)
+                item.setData("color:#64748b;font-style:italic;",
+                             _Qt.ToolTipRole)
+            for nid in self._branch_image_nodes(root):
+                node = self._graph.nodes.get(nid)
+                if not node:
+                    continue
+                cb.addItem(f"  {node.tool.icon} {node.tool.name}", nid)
+        # Default select
+        if default_nid is not None:
+            for j in range(cb.count()):
+                if cb.itemData(j) == default_nid:
+                    cb.setCurrentIndex(j); break
+        cb.blockSignals(False)
+
+    def _on_multi_cell_changed(self, cell_idx: int):
+        """User pick node khác cho ô `cell_idx` → load image + sync header."""
+        if 0 <= cell_idx < len(self._multi_views):
+            self._push_multi_cell(self._multi_views[cell_idx])
 
     def _push_multi_cell(self, entry):
-        """Load ảnh + status của node đang chọn trong ô vào view."""
+        """Load ảnh + status của node đang chọn trong ô vào view; cập nhật
+        header để reflect pipeline gốc (Acquire Image / Camera Image) của
+        node đang xem (vì combo gộp cả 2 pipeline, source có thể đổi)."""
         nid = entry["combo"].currentData()
         node = self._graph.nodes.get(nid) if self._graph and nid else None
+
+        # Update header label theo pipeline gốc của node đang chọn
+        pipeline_root = self._node_pipeline_root(nid) if nid else None
+        if pipeline_root:
+            label = self._root_pipeline_label(pipeline_root)
+        else:
+            label = self._root_pipeline_label(entry["root"])
+        entry["root_lbl"].setText(f"<b>{label}</b>  →")
+        entry["root_lbl"].setStyleSheet("color:#64748b;font-size:10px;")
+
         if node is None:
             return
         img = node.outputs.get("_display_image")
@@ -594,38 +715,31 @@ class ImageViewerPanel(QWidget):
         entry["status"].setToolTip(status.upper())
 
     def _refresh_multi_views(self):
-        """Push ảnh mới nhất của node đang chọn lên từng ô. Cũng cập nhật
-        items của combo nếu node mới được thêm vào branch."""
+        """Push ảnh mới nhất lên từng ô. Cũng resync combo items khi graph
+        thay đổi (node mới được thêm/xóa)."""
         if self._graph is None:
             return
+        # Snapshot tất cả image nodes hiện tại từ mọi Acquire/Camera root
+        roots = self._enumerate_branch_roots()
+        current_ids = []
+        for r in roots:
+            for nid in self._branch_image_nodes(r):
+                if nid not in current_ids:
+                    current_ids.append(nid)
+
         for entry in self._multi_views:
-            # Sync combo items với branch hiện tại (graph có thể đổi)
-            branch_nodes = self._branch_image_nodes(entry["root"])
             existing_ids = [entry["combo"].itemData(j)
-                             for j in range(entry["combo"].count())]
-            if list(existing_ids) != list(branch_nodes):
+                             for j in range(entry["combo"].count())
+                             if entry["combo"].itemData(j) is not None]
+            if list(existing_ids) != list(current_ids):
                 prev = entry["combo"].currentData()
-                entry["combo"].blockSignals(True)
-                entry["combo"].clear()
-                for nid in branch_nodes:
-                    node = self._graph.nodes.get(nid)
-                    if not node:
-                        continue
-                    entry["combo"].addItem(
-                        f"{node.tool.icon} {node.tool.name}", nid)
-                # Restore previous selection nếu còn tồn tại
-                restored = False
-                for j in range(entry["combo"].count()):
-                    if entry["combo"].itemData(j) == prev:
-                        entry["combo"].setCurrentIndex(j)
-                        restored = True; break
-                if not restored:
-                    # Fallback về terminal
+                self._populate_cell_combo(entry["combo"], prev)
+                # Nếu prev không còn tồn tại, fallback về terminal của root
+                if entry["combo"].currentData() != prev:
                     term = self._branch_terminal(entry["root"])
                     for j in range(entry["combo"].count()):
                         if entry["combo"].itemData(j) == term:
                             entry["combo"].setCurrentIndex(j); break
-                entry["combo"].blockSignals(False)
             self._push_multi_cell(entry)
 
     # ── Internal ─────────────────────────────────────────────────
