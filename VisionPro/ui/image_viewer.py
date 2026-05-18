@@ -290,8 +290,9 @@ class ImageViewerPanel(QWidget):
         self._btn_results.setPopupMode(QToolButton.InstantPopup)
         self._btn_results.setFixedHeight(28)
         self._btn_results.setToolTip(
-            "Composite Results — pick tools để overlay annotation lên ảnh gốc. "
-            "Khi không tick gì → chỉ hiện output của node đang chọn.")
+            "Results — pick tools để hiển thị. Single view: composite "
+            "annotation lên ảnh gốc Acquire. Multi-view (⊞): mỗi item ticked "
+            "= 1 ô riêng. Không tick gì → auto theo Acquire/Camera pipeline.")
         self._btn_results.setStyleSheet("""
             QToolButton{background:#111827;border:1px solid #1e2d45;
                         border-radius:4px;color:#94a3b8;font-size:11px;
@@ -316,8 +317,8 @@ class ImageViewerPanel(QWidget):
         #   hoặc Camera), header hiển thị pipeline gốc của node đang xem.
         self._btn_multi = tb_btn(
             "⊞",
-            "Toggle multi-view — mỗi Acquire Image / Camera Image pipeline 1 ô; "
-            "chọn node nào trong combo để hiển thị result tương ứng.")
+            "Toggle multi-view — tick item nào trong Results menu thì item đó "
+            "thành 1 ô. Không tick gì → auto 1 ô per Acquire/Camera pipeline.")
         self._btn_multi.setCheckable(True)
         self._btn_multi.toggled.connect(self._on_multi_toggled)
         tl.addWidget(self._btn_multi)
@@ -566,6 +567,39 @@ class ImageViewerPanel(QWidget):
         nodes = self._branch_image_nodes(root) or [root]
         return [(root, nid) for nid in nodes][:9]
 
+    def _multi_cells_plan(self) -> List[tuple]:
+        """Cells trong multi-view = list (root_id, node_id).
+        Priority:
+          1. User tick item trong Results menu → mỗi item ticked = 1 ô. Cho
+             phép user explicit chọn "tách result này thành từng view".
+          2. Không tick gì → fallback auto theo Acquire/Camera roots (giữ
+             multi-view useful khi user chưa pick result nào).
+        Sort theo BFS order trong pipeline (Acquire/Camera roots upstream
+        first). Cap ở 9 ô.
+        """
+        if self._graph is None:
+            return []
+        selected = [nid for nid, on in self._selected_overlays.items()
+                    if on and nid in self._graph.nodes]
+        if not selected:
+            return self._plan_multi_cells(self._enumerate_branch_roots())
+
+        # Topological order: BFS từ mọi Acquire/Camera root, nodes ngoài
+        # pipeline (vd Image Convert đứng độc lập) xếp cuối theo node_id.
+        master: List[str] = []
+        for root in self._enumerate_branch_roots():
+            for nid in self._branch_image_nodes(root):
+                if nid not in master:
+                    master.append(nid)
+        order = {nid: i for i, nid in enumerate(master)}
+        selected.sort(key=lambda nid: (order.get(nid, 10**9), nid))
+
+        cells = []
+        for nid in selected:
+            root = self._node_pipeline_root(nid) or nid
+            cells.append((root, nid))
+        return cells[:9]
+
     def _rebuild_multi_grid(self):
         """Detect Acquire/Camera branches và build grid ZoomableImageWidget.
         Mỗi ô có combo chọn node từ BẤT KỲ Acquire/Camera branch nào — user
@@ -577,11 +611,7 @@ class ImageViewerPanel(QWidget):
             cell["cell_widget"].deleteLater()
         self._multi_views = []
 
-        roots = self._enumerate_branch_roots()
-        if not roots:
-            return
-
-        cells_plan = self._plan_multi_cells(roots)
+        cells_plan = self._multi_cells_plan()
         n = len(cells_plan)
         if n == 0:
             return
@@ -766,9 +796,14 @@ class ImageViewerPanel(QWidget):
             menu.addAction(wa)
             return
 
-        # Header — base image
+        # Header — mode-dependent caption: single view = composite mode,
+        # multi-view = mỗi item ticked thành 1 ô riêng.
         wa_hdr = QWidgetAction(menu)
-        hdr = QLabel("  Base: ảnh gốc (Acquire Image)  ")
+        if self._btn_multi.isChecked():
+            hdr_text = "  Multi-view: mỗi item ticked = 1 ô  "
+        else:
+            hdr_text = "  Base: ảnh gốc (Acquire Image) + overlay  "
+        hdr = QLabel(hdr_text)
         hdr.setStyleSheet(
             "color:#00d4ff; font-size:10px; font-weight:700; "
             "letter-spacing:1px; padding:6px 8px;")
@@ -816,7 +851,12 @@ class ImageViewerPanel(QWidget):
     def _on_overlay_toggled(self, node_id: str, on: bool):
         self._selected_overlays[node_id] = on
         self._update_results_btn_text()
-        self.refresh_current()
+        if self._btn_multi.isChecked():
+            # Multi-view: số ô = số item ticked → cần rebuild grid để add/
+            # remove cell, không chỉ refresh nội dung.
+            self._rebuild_multi_grid()
+        else:
+            self.refresh_current()
 
     def _set_all_overlays(self, on: bool):
         if not self._graph:
@@ -826,7 +866,10 @@ class ImageViewerPanel(QWidget):
                     and getattr(n.tool, "category", "") != "Acquire Image":
                 self._selected_overlays[nid] = on
         self._update_results_btn_text()
-        self.refresh_current()
+        if self._btn_multi.isChecked():
+            self._rebuild_multi_grid()
+        else:
+            self.refresh_current()
 
     def _update_results_btn_text(self):
         n = sum(1 for v in self._selected_overlays.values() if v)

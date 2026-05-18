@@ -161,6 +161,11 @@ class MainWindow(QMainWindow):
         self._img_viewer.set_graph(self._graph)
         self._center_tabs.addTab(self._img_viewer, "👁  Image Viewer")
 
+        # Properties panel chứa tabs Info/Params/Output/Preview liên quan tới
+        # node — không cần thiết khi user đang xem ảnh. Ẩn panel khi sang tab
+        # Image Viewer, show lại khi quay về Pipeline Canvas.
+        self._center_tabs.currentChanged.connect(self._on_center_tab_changed)
+
         center_split.addWidget(self._center_tabs)
 
         # Bottom — results
@@ -595,17 +600,35 @@ class MainWindow(QMainWindow):
         sb = self.statusBar()
         sb.showMessage(f"  ● {text}", 0)
 
+    def _on_center_tab_changed(self, idx: int):
+        """Ẩn Properties panel (Info/Params/Output/Preview) khi user sang tab
+        Image Viewer — các tab đó liên quan tới node properties, không cần
+        thiết lúc xem ảnh. Show lại khi quay về Pipeline Canvas.
+        Full Image View vẫn override (giữ panel ẩn bất kể tab nào)."""
+        # Trong Full Image View, panel đã bị ẩn bởi _toggle_full_image_view;
+        # đừng đè lên.
+        if getattr(self, "_act_full_view", None) is not None \
+                and self._act_full_view.isChecked():
+            return
+        widget = self._center_tabs.widget(idx)
+        is_image_viewer = widget is getattr(self, "_img_viewer", None)
+        self._props.setVisible(not is_image_viewer)
+        if is_image_viewer:
+            # Refit ảnh sau khi layout settle (Qt cần 1 tick để resize)
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self._img_viewer._fit)
+
     def _toggle_full_image_view(self, checked: bool):
         """Full Image View: chỉ hiện Image Viewer canvas + Inspection Results.
         Ẩn tool library, properties panel, toolbar trên cùng và tab bar.
         Menu bar giữ lại để user toggle về (F11 / Esc / View → Full Image View).
         """
         self._tool_lib.setVisible(not checked)
-        self._props.setVisible(not checked)
         self._toolbar.setVisible(not checked)
         # Ẩn tab bar khi full view (chỉ còn Image Viewer hiển thị)
         self._center_tabs.tabBar().setVisible(not checked)
         if checked:
+            self._props.setVisible(False)
             for i in range(self._center_tabs.count()):
                 if "Image" in self._center_tabs.tabText(i):
                     self._center_tabs.setCurrentIndex(i)
@@ -613,7 +636,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "  ● Full Image View — nhấn F11 hoặc Esc để thoát", 0)
         else:
+            # Khi thoát Full View, để _on_center_tab_changed quyết định
+            # Properties panel hiện/ẩn dựa vào tab hiện tại (giữ Properties
+            # ẩn nếu user vẫn đang ở Image Viewer tab).
             self.statusBar().clearMessage()
+            self._on_center_tab_changed(self._center_tabs.currentIndex())
         # Refit image sau khi layout settle (Qt cần 1 tick để resize)
         from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self._img_viewer._fit)
