@@ -811,32 +811,70 @@ class ImageViewerPanel(QWidget):
         menu.addAction(wa_hdr)
         menu.addSeparator()
 
-        # List tất cả node có image output (loại Acquire — đó là base)
-        nodes = [(nid, n) for nid, n in self._graph.nodes.items()
-                 if "image" in n.outputs
-                 and getattr(n.tool, "category", "") != "Acquire Image"]
-        # Sắp theo thứ tự topo (đơn giản: theo node_id để stable)
-        nodes.sort(key=lambda x: x[0])
+        # Group nodes theo pipeline (Acquire Image / Camera Image) — dễ tìm
+        # tool nào thuộc flow nào. Trong mỗi group sort theo BFS order
+        # (xuôi dòng từ root), phản ánh đúng flow execution.
+        roots = self._enumerate_branch_roots()
+        groups: List[tuple] = []   # [(section_label, [(nid, node), ...])]
+        accounted: set = set()
+        for root in roots:
+            section_label = self._root_pipeline_label(root)
+            tools = []
+            for nid in self._branch_image_nodes(root):
+                if nid in accounted:
+                    continue
+                accounted.add(nid)
+                node = self._graph.nodes.get(nid)
+                if (node is None
+                        or getattr(node.tool, "category", "") == "Acquire Image"):
+                    # Skip root acquire/camera node (đó là base, không phải tool)
+                    continue
+                tools.append((nid, node))
+            if tools:
+                groups.append((section_label, tools))
 
-        if not nodes:
+        # Nodes không thuộc Acquire/Camera flow nào (vd dangling tool) → group
+        # "Other" để vẫn cho user pick được. Check tool output port (static)
+        # thay vì n.outputs (chỉ có sau khi pipeline run).
+        others = [(nid, n) for nid, n in self._graph.nodes.items()
+                  if any(p.name == "image" for p in n.tool.outputs)
+                  and nid not in accounted
+                  and getattr(n.tool, "category", "") != "Acquire Image"]
+        others.sort(key=lambda x: x[0])
+        if others:
+            groups.append(("Other", others))
+
+        total_tools = sum(len(items) for _, items in groups)
+        if total_tools == 0:
             wa = QWidgetAction(menu)
             lbl = QLabel("  (Chưa có tool nào trong pipeline)  ")
             lbl.setStyleSheet("color:#64748b; padding:8px;")
             wa.setDefaultWidget(lbl)
             menu.addAction(wa)
         else:
-            for nid, node in nodes:
-                wa = QWidgetAction(menu)
-                cb = QCheckBox(f"  {node.tool.icon}  {node.tool.name}  "
-                                f"({node.tool.tool_id})")
-                cb.setChecked(self._selected_overlays.get(nid, False))
-                cb.setStyleSheet(
-                    "QCheckBox{color:#e2e8f0; font-size:11px; padding:4px 8px;}"
-                    "QCheckBox::indicator{width:14px; height:14px;}")
-                cb.toggled.connect(
-                    lambda on, _nid=nid: self._on_overlay_toggled(_nid, on))
-                wa.setDefaultWidget(cb)
-                menu.addAction(wa)
+            for gi, (section_label, items) in enumerate(groups):
+                if gi > 0:
+                    menu.addSeparator()
+                # Section header — pipeline gốc (Acquire Image / Camera Image)
+                wa_sec = QWidgetAction(menu)
+                sec_lbl = QLabel(f"  ── {section_label} ──  ")
+                sec_lbl.setStyleSheet(
+                    "color:#94a3b8; font-size:10px; font-weight:600; "
+                    "padding:4px 8px; background:#0d1220;")
+                wa_sec.setDefaultWidget(sec_lbl)
+                menu.addAction(wa_sec)
+                for nid, node in items:
+                    wa = QWidgetAction(menu)
+                    cb = QCheckBox(f"  {node.tool.icon}  {node.tool.name}  "
+                                    f"({node.tool.tool_id})")
+                    cb.setChecked(self._selected_overlays.get(nid, False))
+                    cb.setStyleSheet(
+                        "QCheckBox{color:#e2e8f0; font-size:11px; padding:4px 8px;}"
+                        "QCheckBox::indicator{width:14px; height:14px;}")
+                    cb.toggled.connect(
+                        lambda on, _nid=nid: self._on_overlay_toggled(_nid, on))
+                    wa.setDefaultWidget(cb)
+                    menu.addAction(wa)
 
         menu.addSeparator()
         # Quick actions
