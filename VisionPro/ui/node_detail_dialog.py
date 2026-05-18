@@ -1906,6 +1906,23 @@ class NodeDetailDialog(QDialog):
                 extras[idx]["y"] = float(new_local_y)
         # Đánh dấu PatMax node dirty → graph run sẽ pick up
         src.params["_patmax_model"] = model
+
+        # Re-run upstream PatMax NGAY để outputs có giá trị ref mới — nếu
+        # không, Crop ROI re-run kế tiếp sẽ đọc PatMax outputs CŨ → snap-back.
+        try:
+            up_inputs = {}
+            for c2 in self._graph.connections:
+                if c2.dst_id == src.node_id:
+                    src2 = self._graph.nodes.get(c2.src_id)
+                    if src2 and c2.src_port in src2.outputs:
+                        up_inputs[c2.dst_port] = src2.outputs[c2.src_port]
+            for port in src.tool.inputs:
+                up_inputs.setdefault(port.name, port.default)
+            out = src.tool.process_fn(up_inputs, src.params)
+            src.outputs = out if out else {}
+        except Exception:
+            pass
+
         # Refresh open PatMax dialog nếu có (để Ref list + canvas marker update)
         if self.parent() is not None:
             for w in self.parent().children() if hasattr(self.parent(), "children") else []:
