@@ -748,10 +748,37 @@ class ImageViewerPanel(QWidget):
         if 0 <= cell_idx < len(self._multi_views):
             self._push_multi_cell(self._multi_views[cell_idx])
 
+    def _cell_pipeline_root(self, entry) -> Optional[str]:
+        """Pipeline gốc của ô = pipeline của base node đang chọn ở combo
+        (nếu node thuộc Acquire/Camera branch), fallback về entry['root']."""
+        nid = entry["combo"].currentData() if "combo" in entry else None
+        if nid:
+            r = self._node_pipeline_root(nid)
+            if r is not None:
+                return r
+        return entry.get("root")
+
+    def _cell_branch_tools(self, entry) -> List[tuple]:
+        """List (nid, node) các tool thuộc pipeline của ô — exclude Acquire
+        root (đó là base, không phải tool overlay)."""
+        if self._graph is None:
+            return []
+        root = self._cell_pipeline_root(entry)
+        if root is None:
+            return []
+        tools = []
+        for nid in self._branch_image_nodes(root):
+            node = self._graph.nodes.get(nid)
+            if (node is None
+                    or getattr(node.tool, "category", "") == "Acquire Image"):
+                continue
+            tools.append((nid, node))
+        return tools
+
     def _rebuild_cell_results_menu(self, entry):
-        """Rebuild menu Results của 1 cell — checkbox group theo Acquire /
-        Camera pipeline, selection được track per-cell trong
-        `entry['cell_overlays']`. Reuse logic của global Results menu."""
+        """Menu Results của 1 cell — CHỈ list tool thuộc pipeline của ô đó
+        (Acquire Image branch HOẶC Camera Image branch, tùy combo base
+        node). Tránh user phải scroll tìm tool giữa nhiều pipeline."""
         from PySide6.QtWidgets import QWidgetAction, QCheckBox, QLabel
         from PySide6.QtGui import QAction
         menu = entry['cell_menu']
@@ -764,9 +791,13 @@ class ImageViewerPanel(QWidget):
             menu.addAction(wa)
             return
 
-        # Header
+        root = self._cell_pipeline_root(entry)
+        section_label = (self._root_pipeline_label(root) if root
+                         else "—")
+
+        # Header — ghi rõ ô đang là pipeline nào
         wa_hdr = QWidgetAction(menu)
-        hdr = QLabel("  Overlay riêng cho ô này  ")
+        hdr = QLabel(f"  Overlay cho {section_label}  ")
         hdr.setStyleSheet(
             "color:#00d4ff; font-size:10px; font-weight:700; "
             "letter-spacing:1px; padding:6px 8px;")
@@ -774,63 +805,29 @@ class ImageViewerPanel(QWidget):
         menu.addAction(wa_hdr)
         menu.addSeparator()
 
-        # Group nodes theo pipeline — cùng logic với global menu để user
-        # quen mặt: tool nào thuộc Acquire / Camera flow nhanh chóng tìm thấy.
-        roots = self._enumerate_branch_roots()
-        groups: List[tuple] = []
-        accounted: set = set()
-        for root in roots:
-            section_label = self._root_pipeline_label(root)
-            tools = []
-            for nid in self._branch_image_nodes(root):
-                if nid in accounted:
-                    continue
-                accounted.add(nid)
-                node = self._graph.nodes.get(nid)
-                if (node is None
-                        or getattr(node.tool, "category", "") == "Acquire Image"):
-                    continue
-                tools.append((nid, node))
-            if tools:
-                groups.append((section_label, tools))
-        others = [(nid, n) for nid, n in self._graph.nodes.items()
-                  if any(p.name == "image" for p in n.tool.outputs)
-                  and nid not in accounted
-                  and getattr(n.tool, "category", "") != "Acquire Image"]
-        others.sort(key=lambda x: x[0])
-        if others:
-            groups.append(("Other", others))
-
-        if not groups:
+        tools = self._cell_branch_tools(entry)
+        if not tools:
             wa = QWidgetAction(menu)
-            lbl = QLabel("  (Chưa có tool nào trong pipeline)  ")
+            msg = ("(Pipeline chưa có tool nào)" if root
+                   else "(Pick base node ở combo trước)")
+            lbl = QLabel(f"  {msg}  ")
             lbl.setStyleSheet("color:#64748b; padding:8px;")
             wa.setDefaultWidget(lbl)
             menu.addAction(wa)
         else:
-            for gi, (sl, items) in enumerate(groups):
-                if gi > 0:
-                    menu.addSeparator()
-                wa_sec = QWidgetAction(menu)
-                sec_lbl = QLabel(f"  ── {sl} ──  ")
-                sec_lbl.setStyleSheet(
-                    "color:#94a3b8; font-size:10px; font-weight:600; "
-                    "padding:4px 8px; background:#0d1220;")
-                wa_sec.setDefaultWidget(sec_lbl)
-                menu.addAction(wa_sec)
-                for nid, node in items:
-                    wa = QWidgetAction(menu)
-                    cb = QCheckBox(f"  {node.tool.icon}  {node.tool.name}  "
-                                    f"({node.tool.tool_id})")
-                    cb.setChecked(entry['cell_overlays'].get(nid, False))
-                    cb.setStyleSheet(
-                        "QCheckBox{color:#e2e8f0; font-size:11px; padding:4px 8px;}"
-                        "QCheckBox::indicator{width:14px; height:14px;}")
-                    cb.toggled.connect(
-                        lambda on, _nid=nid, _entry=entry:
-                            self._on_cell_overlay_toggled(_entry, _nid, on))
-                    wa.setDefaultWidget(cb)
-                    menu.addAction(wa)
+            for nid, node in tools:
+                wa = QWidgetAction(menu)
+                cb = QCheckBox(f"  {node.tool.icon}  {node.tool.name}  "
+                                f"({node.tool.tool_id})")
+                cb.setChecked(entry['cell_overlays'].get(nid, False))
+                cb.setStyleSheet(
+                    "QCheckBox{color:#e2e8f0; font-size:11px; padding:4px 8px;}"
+                    "QCheckBox::indicator{width:14px; height:14px;}")
+                cb.toggled.connect(
+                    lambda on, _nid=nid, _entry=entry:
+                        self._on_cell_overlay_toggled(_entry, _nid, on))
+                wa.setDefaultWidget(cb)
+                menu.addAction(wa)
 
         menu.addSeparator()
         act_clear = QAction("✗  Clear All", menu)
@@ -838,18 +835,32 @@ class ImageViewerPanel(QWidget):
             lambda _checked=False, _entry=entry: self._clear_cell_overlays(_entry))
         menu.addAction(act_clear)
 
+    def _active_cell_overlays(self, entry) -> List[str]:
+        """Overlay node_ids đang ACTIVE cho ô — chỉ những item thuộc pipeline
+        hiện tại của ô (lọc stale items từ pipeline khác). Cho phép user giữ
+        selection per-pipeline: switch combo qua-lại không mất tick."""
+        if not self._graph:
+            return []
+        tool_ids = {nid for nid, _ in self._cell_branch_tools(entry)}
+        return [nid for nid, on in entry.get('cell_overlays', {}).items()
+                if on and nid in tool_ids]
+
     def _on_cell_overlay_toggled(self, entry, node_id: str, on: bool):
         entry['cell_overlays'][node_id] = on
         self._update_cell_results_btn(entry)
         self._push_multi_cell(entry)
 
     def _clear_cell_overlays(self, entry):
-        entry['cell_overlays'] = {}
+        """Clear chỉ overlay của pipeline hiện tại — selection các pipeline
+        khác (nếu user đã switch qua-lại) được giữ."""
+        active = self._active_cell_overlays(entry)
+        for nid in active:
+            entry['cell_overlays'][nid] = False
         self._update_cell_results_btn(entry)
         self._push_multi_cell(entry)
 
     def _update_cell_results_btn(self, entry):
-        n = sum(1 for v in entry['cell_overlays'].values() if v)
+        n = len(self._active_cell_overlays(entry))
         btn = entry['cell_results_btn']
         btn.setText("📊" if n == 0 else f"📊 ({n})")
 
@@ -877,8 +888,9 @@ class ImageViewerPanel(QWidget):
                 v = n.outputs.get("image")
             return v
 
-        active = [oid for oid, on in entry.get('cell_overlays', {}).items()
-                  if on and oid in self._graph.nodes]
+        # Chỉ apply overlays thuộc pipeline hiện tại của ô — bỏ stale items
+        # nếu user đã switch combo qua pipeline khác.
+        active = self._active_cell_overlays(entry)
 
         img = None
         if active:
