@@ -1875,27 +1875,44 @@ class NodeDetailDialog(QDialog):
             return
 
         # Cần result detect hiện tại để inverse pose. Lấy từ src.outputs.
-        obj_cx = float(src.outputs.get("x", 0.0))
-        obj_cy = float(src.outputs.get("y", 0.0))
-        obj_ang = math.radians(float(src.outputs.get("angle", 0.0)))
+        # Anchor cho ref transform = BBOX CENTER (r.x, r.y) — không phải
+        # 'x'/'y' top-level (đó là pattern-origin transformed cho obj 0).
+        objs = src.outputs.get("objects") or []
+        if not objs:
+            return
+        obj0 = objs[0]
+        obj_cx = float(obj0.get("center_x", obj0.get("x", 0.0)))
+        obj_cy = float(obj0.get("center_y", obj0.get("y", 0.0)))
+        obj_ang_deg = float(src.outputs.get("angle", 0.0))
+        sc = float(src.outputs.get("scale", 1.0) or 1.0)
+        if sc == 0:
+            sc = 1.0
 
-        # local = R(-angle) * (abs - obj_origin)
+        # Engine forward: image = anchor + sc * R(-angle) * (local - pattern_center)
+        # Inverse:       local = pattern_center + (1/sc) * R(+angle) * (image - anchor)
+        # R(+a) * (vx, vy) = (vx*cos(a) - vy*sin(a), vx*sin(a) + vy*cos(a))
+        import math as _m
+        rad = _m.radians(obj_ang_deg)
+        ca = _m.cos(rad); sa = _m.sin(rad)
         dx = float(new_x) - obj_cx
         dy = float(new_y) - obj_cy
-        ca = math.cos(-obj_ang); sa = math.sin(-obj_ang)
-        new_local_x = dx * ca - dy * sa
-        new_local_y = dx * sa + dy * ca
+        edx = (dx * ca - dy * sa) / sc
+        edy = (dx * sa + dy * ca) / sc
 
         # Update model
         model = src.params.get("_patmax_model")
         if model is None:
             return
+        pw = float(getattr(model, "pattern_w", 0) or 0)
+        ph = float(getattr(model, "pattern_h", 0) or 0)
+        new_local_x = edx + pw / 2.0
+        new_local_y = edy + ph / 2.0
+
         if ref_idx == 0:
-            # Origin (trained pattern center). Sửa origin_x/origin_y.
+            # Origin (trained pattern center). SET (không cộng dồn).
             if hasattr(model, "origin_x"):
-                # origin_x/y là pattern-local; cộng thêm delta local
-                model.origin_x = float(getattr(model, "origin_x", 0)) + new_local_x
-                model.origin_y = float(getattr(model, "origin_y", 0)) + new_local_y
+                model.origin_x = float(new_local_x)
+                model.origin_y = float(new_local_y)
         else:
             extras = getattr(model, "extra_refs", None)
             if not isinstance(extras, list):
