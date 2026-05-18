@@ -1825,10 +1825,98 @@ class NodeDetailDialog(QDialog):
                 if hasattr(ed, "setValue"):
                     ed.blockSignals(True); ed.setValue(val); ed.blockSignals(False)
 
+        # Nếu port x/y nhận từ PatMax Ref → đẩy ngược drag về PatMax model.extra_refs
+        # → next Run sẽ tính ra đúng vị trí drag (không snap về cũ).
+        self._propagate_drag_to_patmax_ref(int(x), int(y))
+
         # Trigger rerun để output x/y/w/h cập nhật → downstream tools
         # đang nhận x,y từ Crop ROI cũng tự re-process trong pipeline run.
         if getattr(self, "_auto_run_cb", None) and self._auto_run_cb.isChecked():
             self._auto_run_timer.start()
+
+    def _propagate_drag_to_patmax_ref(self, new_x: int, new_y: int):
+        """Tìm upstream PatMax feed x/y port → update model.extra_refs để drag
+        Crop ROI persist (ngược dòng vào source). Chỉ áp dụng khi:
+        - Cả x và y đến từ cùng 1 PatMax node
+        - Source port là dạng 'refN_x' / 'refN_y' (cùng index N)
+        - PatMax đã có model + có kết quả detect (cần origin + angle để
+          đảo ngược pose transform về pattern-local).
+        """
+        import re, math
+        if not self._graph:
+            return
+        node = self._node
+        upstream = {}   # {"x" or "y": (src_node, src_port)}
+        for c in self._graph.connections:
+            if c.dst_id == node.node_id and c.dst_port in ("x", "y"):
+                src = self._graph.nodes.get(c.src_id)
+                if src and src.tool.tool_id in ("patmax", "patmax_align"):
+                    upstream[c.dst_port] = (src, c.src_port)
+        if "x" not in upstream or "y" not in upstream:
+            return
+        src_x, port_x = upstream["x"]
+        src_y, port_y = upstream["y"]
+        if src_x.node_id != src_y.node_id:
+            return
+        src = src_x
+
+        # Parse refN_x / refN_y (cùng N). "x"/"y" trần = object origin (ref_idx=0).
+        m_x = re.match(r"^ref(\d+)_(x|y)$", port_x)
+        m_y = re.match(r"^ref(\d+)_(x|y)$", port_y)
+        if m_x and m_y:
+            if m_x.group(1) != m_y.group(1):
+                return
+            if m_x.group(2) != "x" or m_y.group(2) != "y":
+                return
+            ref_idx = int(m_x.group(1))   # 1-based: ref1 → extras[0]
+        elif port_x == "x" and port_y == "y":
+            ref_idx = 0   # origin (training pattern center)
+        else:
+            return
+
+        # Cần result detect hiện tại để inverse pose. Lấy từ src.outputs.
+        obj_cx = float(src.outputs.get("x", 0.0))
+        obj_cy = float(src.outputs.get("y", 0.0))
+        obj_ang = math.radians(float(src.outputs.get("angle", 0.0)))
+
+        # local = R(-angle) * (abs - obj_origin)
+        dx = float(new_x) - obj_cx
+        dy = float(new_y) - obj_cy
+        ca = math.cos(-obj_ang); sa = math.sin(-obj_ang)
+        new_local_x = dx * ca - dy * sa
+        new_local_y = dx * sa + dy * ca
+
+        # Update model
+        model = src.params.get("_patmax_model")
+        if model is None:
+            return
+        if ref_idx == 0:
+            # Origin (trained pattern center). Sửa origin_x/origin_y.
+            if hasattr(model, "origin_x"):
+                # origin_x/y là pattern-local; cộng thêm delta local
+                model.origin_x = float(getattr(model, "origin_x", 0)) + new_local_x
+                model.origin_y = float(getattr(model, "origin_y", 0)) + new_local_y
+        else:
+            extras = getattr(model, "extra_refs", None)
+            if not isinstance(extras, list):
+                return
+            idx = ref_idx - 1
+            if 0 <= idx < len(extras):
+                extras[idx]["x"] = float(new_local_x)
+                extras[idx]["y"] = float(new_local_y)
+        # Đánh dấu PatMax node dirty → graph run sẽ pick up
+        src.params["_patmax_model"] = model
+        # Refresh open PatMax dialog nếu có (để Ref list + canvas marker update)
+        if self.parent() is not None:
+            for w in self.parent().children() if hasattr(self.parent(), "children") else []:
+                try:
+                    if w.__class__.__name__ == "PatMaxDialog" and getattr(w, "_node", None) is src:
+                        if hasattr(w, "_refresh_references_list"):
+                            w._refresh_references_list()
+                        if hasattr(w, "_refresh_canvas_extras"):
+                            w._refresh_canvas_extras()
+                except Exception:
+                    pass
 
     def _on_reset_crop_image(self):
         """Reset Crop ROI về full ảnh nguồn — xoá _drawn_roi + set
