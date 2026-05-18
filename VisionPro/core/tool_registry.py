@@ -1049,6 +1049,8 @@ def proc_blob(inputs, params):
 
     return {"image":vis,"count":len(blobs),"pass":is_pass,
             "total_area":total_area,"blobs":blobs,"centroids":centroids,
+            # x,y = alias cho cx,cy (centroid blob đầu tiên) — match PatMax UX
+            "x": cx0, "y": cy0,
             "cx": cx0, "cy": cy0, "area": area0,
             "bbox_w": bbox_w0, "bbox_h": bbox_h0, "angle": angle0,
             # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
@@ -2556,9 +2558,13 @@ TOOL_REGISTRY: List[ToolDef] = [
     [PortDef("image","image"),PortDef("mask","image",required=False),
      PortDef("offset_x","number",required=False),
      PortDef("offset_y","number",required=False)],
-    [PortDef("image","image"),PortDef("count","number"),PortDef("pass","bool"),
+    # `x`, `y` là default shortcut (giống PatMax) — centroid blob đầu tiên.
+    # `cx`, `cy` giữ làm alias để pipeline cũ không gãy; ẩn mặc định trong UI
+    # qua _hidden_outputs default (set khi new node), user vẫn show lại được
+    # qua dialog "Manage Output Ports".
+    [PortDef("image","image"),PortDef("x","number"),PortDef("y","number"),
+     PortDef("count","number"),PortDef("pass","bool"),
      PortDef("total_area","number"),PortDef("blobs","any"),PortDef("centroids","any"),
-     # Scalar shortcuts của blob đầu tiên — nối thẳng vào dist_point/display/…
      PortDef("cx","number"),PortDef("cy","number"),PortDef("area","number"),
      PortDef("bbox_w","number"),PortDef("bbox_h","number"),
      PortDef("angle","number")],

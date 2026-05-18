@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (QGraphicsItem, QGraphicsEllipseItem, QMenu,
                                 QApplication, QDialog, QVBoxLayout, QHBoxLayout,
                                 QLabel, QComboBox, QLineEdit,
                                 QPushButton, QListWidget, QListWidgetItem,
-                                QInputDialog, QMessageBox)
+                                QInputDialog, QMessageBox, QCheckBox,
+                                QScrollArea, QWidget)
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QObject
 from PySide6.QtGui import (QPainter, QColor, QPen, QBrush, QFont,
                             QLinearGradient, QPainterPath, QCursor)
@@ -147,11 +148,14 @@ def _patmax_ref_options(node) -> list:
 
 
 class AddTerminalDialog(QDialog):
-    """Dialog thêm terminal output — chọn object index + reference + field."""
+    """Dialog thêm terminal output — chọn object index + reference + field.
+    Remove được apply NGAY khi click (không chờ Accept) — user expectation
+    sau khi xóa thì port biến mất ngay, dù có Cancel."""
 
-    def __init__(self, node, parent=None):
+    def __init__(self, node, parent=None, on_remove=None):
         super().__init__(parent)
         self._node = node
+        self._on_remove = on_remove
         self.setWindowTitle("➕  Add Output Terminal")
         self.setMinimumWidth(360)
         self.setStyleSheet("""
@@ -246,15 +250,21 @@ class AddTerminalDialog(QDialog):
         btn_row.addWidget(btn_cancel); btn_row.addWidget(btn_ok)
         lay.addLayout(btn_row)
 
-        self._removed_indices: list = []
-
     def _remove_selected(self):
         if not self._list:
             return
         row = self._list.currentRow()
-        if row >= 0:
-            self._removed_indices.append(row)
+        if row < 0:
+            return
+        # Apply ngay vào node.params — không chờ Accept để Cancel cũng giữ
+        # được xóa (user feedback: "remove không mất node" trước khi sửa).
+        terminals = list(self._node.params.get("_extra_terminals") or [])
+        if 0 <= row < len(terminals):
+            terminals.pop(row)
+            self._node.params["_extra_terminals"] = terminals
             self._list.takeItem(row)
+            if callable(self._on_remove):
+                self._on_remove()
 
     def _on_ref_changed(self, idx: int):
         """Populate field combo theo reference đang chọn.
@@ -289,8 +299,89 @@ class AddTerminalDialog(QDialog):
             "name":   self._le_name.text().strip(),
         }
 
-    def get_removed_indices(self) -> list:
-        return list(self._removed_indices)
+
+
+class ManageOutputsDialog(QDialog):
+    """Dialog show/hide output ports. Áp dụng ngay khi tick → port xuất hiện/
+    biến mất tức thời (callback refresh). Dùng được cho mọi tool — tool có
+    nhiều scalar output (blob, find_circle, …) thường cần ẩn bớt cho gọn."""
+
+    def __init__(self, node, parent=None, on_change=None):
+        super().__init__(parent)
+        self._node = node
+        self._on_change = on_change
+        self.setWindowTitle("👁  Manage Output Ports")
+        self.setMinimumWidth(340)
+        self.setStyleSheet("""
+            QDialog{background:#0d1220;color:#e2e8f0;}
+            QLabel{color:#94a3b8;font-size:11px;}
+            QPushButton{background:#1e2d45;color:#e2e8f0;border:none;
+                        border-radius:4px;padding:6px 14px;font-weight:600;}
+            QPushButton:hover{background:#00d4ff;color:#000;}
+            QCheckBox{color:#e2e8f0;font-size:12px;padding:3px 6px;}
+            QCheckBox::indicator{width:14px;height:14px;}
+        """)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 14, 14, 14); lay.setSpacing(8)
+
+        info = QLabel(
+            f"Tick để hiện / bỏ tick để ẩn port. <i>image</i> luôn hiện. "
+            f"Áp dụng ngay — đóng dialog khi xong.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        hidden = set(self._node.params.get("_hidden_outputs") or [])
+        # Build list = tool.outputs + extra terminals (PatMax-style)
+        port_names: List[str] = [p.name for p in self._node.tool.outputs]
+        for term in (self._node.params.get("_extra_terminals") or []):
+            n = auto_terminal_name(term)
+            if n not in port_names:
+                port_names.append(n)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            "QScrollArea{border:1px solid #1e2d45;background:#0a0e1a;}")
+        inner = QWidget()
+        inner_lay = QVBoxLayout(inner)
+        inner_lay.setContentsMargins(6, 6, 6, 6); inner_lay.setSpacing(2)
+        self._checks: List[tuple] = []  # (name, QCheckBox)
+        for name in port_names:
+            cb = QCheckBox(name)
+            is_image = (name == "image")
+            cb.setChecked(name not in hidden)
+            if is_image:
+                cb.setEnabled(False)
+                cb.setToolTip("Port 'image' luôn visible — không ẩn được "
+                               "(chain port).")
+            cb.toggled.connect(
+                lambda on, _nm=name: self._toggle(_nm, on))
+            inner_lay.addWidget(cb)
+            self._checks.append((name, cb))
+        inner_lay.addStretch()
+        scroll.setWidget(inner)
+        scroll.setMinimumHeight(min(360, 30 * max(1, len(port_names)) + 20))
+        lay.addWidget(scroll, 1)
+
+        btn_row = QHBoxLayout(); btn_row.addStretch()
+        btn_close = QPushButton("Close"); btn_close.clicked.connect(self.accept)
+        btn_close.setStyleSheet(btn_close.styleSheet() +
+                                 "QPushButton{background:#0f3460;color:#00d4ff;}")
+        btn_row.addWidget(btn_close)
+        lay.addLayout(btn_row)
+
+    def _toggle(self, port_name: str, visible: bool):
+        if port_name == "image":
+            return  # image không thể ẩn
+        hidden = list(self._node.params.get("_hidden_outputs") or [])
+        if visible and port_name in hidden:
+            hidden.remove(port_name)
+        elif not visible and port_name not in hidden:
+            hidden.append(port_name)
+        self._node.params["_hidden_outputs"] = hidden
+        if callable(self._on_change):
+            self._on_change()
 
 
 class NodeItem(QGraphicsItem):
@@ -325,11 +416,16 @@ class NodeItem(QGraphicsItem):
         self.setToolTip(tip)
 
     def _output_port_names(self) -> List[str]:
-        """Tên các output ports = tool.outputs + extra terminals từ params."""
-        names = [p.name for p in self.node.tool.outputs]
+        """Tên các output ports = tool.outputs + extra terminals từ params,
+        sau khi lọc bỏ những port nằm trong `_hidden_outputs` (user ẩn qua
+        dialog Manage Output Ports). `image` luôn visible — đó là chain port."""
+        hidden = set(self.node.params.get("_hidden_outputs") or [])
+        hidden.discard("image")  # image never hidden
+        names = [p.name for p in self.node.tool.outputs
+                 if p.name not in hidden]
         for term in (self.node.params.get("_extra_terminals") or []):
             n = auto_terminal_name(term)
-            if n not in names:
+            if n not in names and n not in hidden:
                 names.append(n)
         return names
 
@@ -521,6 +617,13 @@ class NodeItem(QGraphicsItem):
         if supports_objects:
             menu.addSeparator()
             act_add_term = menu.addAction("➕  Add / Manage Output Terminals…")
+        # Manage Output Ports — show/hide từng output. Hiện cho mọi tool có
+        # ≥2 outputs (1 output thì không ai ẩn). image port không bị ẩn được.
+        act_manage = None
+        if len(self.node.tool.outputs) >= 2:
+            if not supports_objects:
+                menu.addSeparator()
+            act_manage = menu.addAction("👁  Show / Hide Output Ports…")
         menu.addSeparator()
         act_del    = menu.addAction("🗑  Delete")
 
@@ -537,16 +640,20 @@ class NodeItem(QGraphicsItem):
                 self.scene().view_in_viewer(self.node.node_id)
         elif act_add_term is not None and chosen == act_add_term:
             self._open_add_terminal_dialog()
+        elif act_manage is not None and chosen == act_manage:
+            self._open_manage_outputs_dialog()
+
+    def _open_manage_outputs_dialog(self):
+        dlg = ManageOutputsDialog(self.node, on_change=self.refresh_ports)
+        dlg.exec()
 
     def _open_add_terminal_dialog(self):
-        dlg = AddTerminalDialog(self.node)
+        # on_remove callback → refresh port ngay sau khi click "Remove
+        # selected" trong dialog, không phải chờ Accept.
+        dlg = AddTerminalDialog(self.node, on_remove=self.refresh_ports)
         if dlg.exec() != QDialog.Accepted:
             return
         terminals = list(self.node.params.get("_extra_terminals") or [])
-        # Xoá theo index (sort giảm dần để khỏi lệch)
-        for idx in sorted(dlg.get_removed_indices(), reverse=True):
-            if 0 <= idx < len(terminals):
-                terminals.pop(idx)
         # Thêm mới (nếu user nhập)
         new = dlg.get_new_terminal()
         if new and (new.get("field") or new.get("name")):

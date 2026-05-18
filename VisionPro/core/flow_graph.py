@@ -12,6 +12,16 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.tool_registry import TOOL_BY_ID, ToolDef, ParamDef
 
 
+# Default hidden output ports cho từng tool_id (chỉ áp dụng khi tạo node MỚI
+# — node load từ file giữ nguyên _hidden_outputs đã save). Mục đích: tools có
+# nhiều output scalar (blob, find_circle…) chỉ hiện những port "primary" để
+# node gọn; user vẫn unhide qua dialog "👁 Manage Output Ports".
+_DEFAULT_HIDDEN_OUTPUTS: Dict[str, List[str]] = {
+    "blob": ["count", "total_area", "blobs", "centroids",
+             "cx", "cy", "area", "bbox_w", "bbox_h", "angle"],
+}
+
+
 class NodeInstance:
     def __init__(self, tool_id: str, pos_x: float = 100, pos_y: float = 100):
         self.node_id: str = str(uuid.uuid4())[:8]
@@ -22,6 +32,9 @@ class NodeInstance:
         tool: ToolDef = TOOL_BY_ID[tool_id]
         # Init params from defaults
         self.params: Dict[str, Any] = {p.name: p.default for p in tool.params}
+        hidden = _DEFAULT_HIDDEN_OUTPUTS.get(tool_id)
+        if hidden:
+            self.params["_hidden_outputs"] = list(hidden)
 
         # Runtime state
         self.outputs: Dict[str, Any] = {}

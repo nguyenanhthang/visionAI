@@ -145,7 +145,9 @@ class AOIScene(QGraphicsScene):
         self.graph_changed.emit()
 
     def _on_ports_changed(self, node_id: str):
-        """Khi node thêm/xoá output terminal — vẽ lại các connection liên quan."""
+        """Khi node thêm/xoá/ẩn output terminal — vẽ lại các connection liên
+        quan. Port bị ẩn (_hidden_outputs) → sp=None → hide edge tạm thời để
+        không có line dangling ở vị trí cũ; show lại khi port unhide."""
         for conn in self.graph.connections_for_node(node_id):
             ci = self._conn_items.get(conn.conn_id)
             if not ci:
@@ -158,6 +160,9 @@ class AOIScene(QGraphicsScene):
             dp = di.get_port_scene_pos(conn.dst_port, False)
             if sp and dp:
                 ci.update_positions(sp, dp)
+                ci.setVisible(True)
+            else:
+                ci.setVisible(False)
 
     def _on_node_moved(self, node_id: str, x: float, y: float):
         for conn in self.graph.connections_for_node(node_id):
@@ -335,6 +340,15 @@ class AOICanvas(QGraphicsView):
             self.setCursor(Qt.ClosedHandCursor)
             event.accept()
             return
+        # Right-click trên vùng trống → pan canvas. Trên node (hoặc bất kỳ
+        # item nào) thì để default propagation chạy → node tự show context menu.
+        if event.button() == Qt.RightButton:
+            if self.itemAt(event.pos()) is None:
+                self._panning   = True
+                self._pan_start = event.pos()
+                self.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return
         # Left-click trên vùng trống (không trúng node nào) → pan canvas
         # thay vì rubber-band select, giống Figma/Photoshop.
         if event.button() == Qt.LeftButton:
@@ -360,13 +374,22 @@ class AOICanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._panning and event.button() in (Qt.MiddleButton, Qt.LeftButton):
+        if self._panning and event.button() in (
+                Qt.MiddleButton, Qt.LeftButton, Qt.RightButton):
             self._panning = False
             self._pan_start = None
             self.setCursor(Qt.ArrowCursor)
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        """Chặn context menu mặc định của QGraphicsView trên vùng trống —
+        right-click ở đó là pan, không muốn pop menu rỗng sau khi release."""
+        if self.itemAt(event.pos()) is None:
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasText():
