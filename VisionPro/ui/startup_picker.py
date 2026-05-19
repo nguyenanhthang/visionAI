@@ -15,7 +15,24 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                 QFileDialog, QFrame, QWidget, QSizePolicy,
                                 QStyle)
 from PySide6.QtCore import Qt, QSettings, QSize, QDateTime
-from PySide6.QtGui import QFont, QFontMetrics
+from PySide6.QtGui import QFont, QFontMetrics, QPixmap, QIcon
+
+
+# Logo path resolve relative đến VisionPro/ root (assets/logo.png). File
+# do user drop vào — nếu vắng thì fallback emoji 📄/👁 để không crash.
+_VP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_LOGO_PATH = os.path.join(_VP_ROOT, "assets", "logo.png")
+
+
+def _logo_pixmap(size: int) -> "QPixmap | None":
+    """Load logo scaled vuông `size`x`size`. Trả None nếu file thiếu hoặc
+    không decode được — caller fallback sang text/emoji."""
+    if not os.path.isfile(_LOGO_PATH):
+        return None
+    pm = QPixmap(_LOGO_PATH)
+    if pm.isNull():
+        return None
+    return pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
 def _fmt_size(n: int) -> str:
@@ -64,13 +81,22 @@ class RecentFileCard(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12); lay.setSpacing(14)
 
-        # Icon block — fixed size, accent color
-        self._icon = QLabel("📄")
+        # Icon block — load logo PNG nếu có, fallback emoji 📄 trong block
+        # màu cyan để empty state không bị trống.
+        self._icon = QLabel()
         self._icon.setFixedSize(46, 46)
         self._icon.setAlignment(Qt.AlignCenter)
-        self._icon.setStyleSheet(
-            "QLabel{background:#0f3460;color:#00d4ff;border-radius:8px;"
-            "font-size:22px;border:1px solid #1a2236;}")
+        pm = _logo_pixmap(38)
+        if pm is not None:
+            self._icon.setPixmap(pm)
+            self._icon.setStyleSheet(
+                "QLabel{background:#0d1220;border:1px solid #1a2236;"
+                "border-radius:8px;}")
+        else:
+            self._icon.setText("📄")
+            self._icon.setStyleSheet(
+                "QLabel{background:#0f3460;color:#00d4ff;border-radius:8px;"
+                "font-size:22px;border:1px solid #1a2236;}")
         lay.addWidget(self._icon)
 
         # Center column: filename + path
@@ -161,6 +187,8 @@ class StartupAOIPicker(QDialog):
         super().__init__(parent)
         self.setWindowTitle("VisionPro — Load AOI")
         self.setMinimumSize(720, 520)
+        if os.path.isfile(_LOGO_PATH):
+            self.setWindowIcon(QIcon(_LOGO_PATH))
         self.setStyleSheet("""
             QDialog{background:#0a0e1a;color:#e2e8f0;}
             QLabel{color:#e2e8f0;}
@@ -202,16 +230,30 @@ class StartupAOIPicker(QDialog):
         root.setContentsMargins(28, 24, 28, 22)
         root.setSpacing(16)
 
-        # Hero header: app brand + tagline
-        hero = QVBoxLayout(); hero.setSpacing(2)
-        title = QLabel("👁  VisionPro AOI")
+        # Hero header: logo image + brand text + tagline. Logo và text song
+        # song trong hàng ngang; tagline ở dưới block text.
+        hero_row = QHBoxLayout(); hero_row.setSpacing(14); hero_row.setAlignment(Qt.AlignLeft)
+        hero_logo = QLabel()
+        hero_pm = _logo_pixmap(56)
+        if hero_pm is not None:
+            hero_logo.setPixmap(hero_pm)
+        else:
+            hero_logo.setText("👁")
+            hero_logo.setStyleSheet("color:#00d4ff;font-size:36px;")
+        hero_logo.setFixedSize(64, 64)
+        hero_logo.setAlignment(Qt.AlignCenter)
+        hero_row.addWidget(hero_logo)
+
+        hero_text = QVBoxLayout(); hero_text.setSpacing(2)
+        title = QLabel("VisionPro AOI")
         title.setStyleSheet(
             "color:#00d4ff;font-size:26px;font-weight:800;letter-spacing:2px;")
-        hero.addWidget(title)
+        hero_text.addWidget(title)
         sub = QLabel("Chọn file AOI gần đây để tiếp tục, hoặc bắt đầu mới.")
         sub.setStyleSheet("color:#64748b;font-size:12px;")
-        hero.addWidget(sub)
-        root.addLayout(hero)
+        hero_text.addWidget(sub)
+        hero_row.addLayout(hero_text, 1)
+        root.addLayout(hero_row)
 
         sep = QFrame(); sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet("color:#1e2d45;background:#1e2d45;max-height:1px;")
