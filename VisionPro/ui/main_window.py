@@ -11,7 +11,7 @@ from typing import Optional
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                 QSplitter, QLabel, QPushButton, QStatusBar,
                                 QFileDialog, QMessageBox, QProgressBar,
-                                QFrame, QTabWidget, QApplication)
+                                QFrame, QTabWidget, QApplication, QDialog)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QSettings
 from PySide6.QtGui import QAction, QKeySequence, QFont
 
@@ -260,6 +260,11 @@ class MainWindow(QMainWindow):
             a = file_m.addAction(label)
             a.setShortcut(QKeySequence(shortcut))
             a.triggered.connect(slot)
+        file_m.addSeparator()
+        a_switch = file_m.addAction("Switch Project…")
+        a_switch.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        a_switch.setToolTip("Mở dialog Recent files → pick project khác.")
+        a_switch.triggered.connect(self._switch_project)
         file_m.addSeparator()
         q = file_m.addAction("Quit")
         q.setShortcut(QKeySequence("Ctrl+Q"))
@@ -561,6 +566,30 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self.load_pipeline_from_path(path)
+
+    def _switch_project(self):
+        """File → Switch Project: pop StartupAOIPicker để chọn project khác.
+        Có node → confirm discard trước. New blank → clear; file → load."""
+        if self._graph.nodes:
+            r = QMessageBox.question(
+                self, "Switch Project",
+                "Discard pipeline hiện tại và switch sang project khác?",
+                QMessageBox.Yes | QMessageBox.No)
+            if r != QMessageBox.Yes:
+                return
+        from ui.startup_picker import StartupAOIPicker
+        dlg = StartupAOIPicker(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        chosen = dlg.chosen_path()
+        if chosen:
+            self.load_pipeline_from_path(chosen)
+        else:
+            # New blank
+            self._graph = FlowGraph()
+            self._current_file = None
+            self._rebuild_canvas()
+            self._update_title()
 
     def load_pipeline_from_path(self, path: str) -> bool:
         """Load .aoi/.json file vào canvas. Trả True nếu thành công.

@@ -191,10 +191,20 @@ def main():
     app._no_wheel_filter = _NoWheelFilter()
     app.installEventFilter(app._no_wheel_filter)
 
-    # Startup picker: show splash trước MainWindow để user pick file AOI gần đây
-    # hoặc browse / New blank. Cancel → exit app (không có file → khó dùng app
-    # ngay từ đầu, user phải actively confirm). New blank → MainWindow trống.
+    # Startup flow:
+    #  1. Nếu có file default (QSettings["default_aoi"]) + file còn tồn tại
+    #     → bỏ qua picker, MainWindow + auto-load default.
+    #  2. Nếu không có default (hoặc file đã bị xóa) → show picker để user
+    #     chọn (recent / browse / new blank).
+    #  3. Cancel picker → exit app.
     from ui.startup_picker import StartupAOIPicker
+    default = StartupAOIPicker.get_default_path()
+    if default:
+        window = MainWindow()
+        window.load_pipeline_from_path(default)
+        window.show()
+        sys.exit(app.exec())
+
     picker = StartupAOIPicker()
     if picker.exec() != picker.Accepted:
         sys.exit(0)

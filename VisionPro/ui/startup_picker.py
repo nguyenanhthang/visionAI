@@ -13,9 +13,9 @@ from typing import Optional
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                 QListWidget, QListWidgetItem, QPushButton,
                                 QFileDialog, QFrame, QWidget, QSizePolicy,
-                                QStyle)
+                                QStyle, QMenu)
 from PySide6.QtCore import Qt, QSettings, QSize, QDateTime
-from PySide6.QtGui import QFont, QFontMetrics, QPixmap, QIcon
+from PySide6.QtGui import QFont, QFontMetrics, QPixmap, QIcon, QAction
 
 
 # Logo path resolve relative đến VisionPro/ root (assets/logo.png). File
@@ -71,10 +71,11 @@ class RecentFileCard(QWidget):
 
     Hỗ trợ trạng thái selected (border + bg sáng hơn) qua set_selected()."""
 
-    def __init__(self, path: str, parent=None):
+    def __init__(self, path: str, is_default: bool = False, parent=None):
         super().__init__(parent)
         self._path = path
         self._selected = False
+        self._is_default = is_default
         self.setAttribute(Qt.WA_StyledBackground, True)
 
         # Layout: [Icon] [Name + Path stacked] [stretch] [Meta chips stacked]
@@ -99,12 +100,25 @@ class RecentFileCard(QWidget):
                 "font-size:22px;border:1px solid #1a2236;}")
         lay.addWidget(self._icon)
 
-        # Center column: filename + path
+        # Center column: filename + path. Filename row có badge ⭐ Default
+        # khi card này là file default (auto-load khi mở app).
         center = QVBoxLayout(); center.setSpacing(3)
+        name_row = QHBoxLayout(); name_row.setSpacing(8)
         self._name_lbl = QLabel(os.path.basename(path))
         self._name_lbl.setStyleSheet(
             "color:#e2e8f0;font-size:13px;font-weight:700;")
-        center.addWidget(self._name_lbl)
+        name_row.addWidget(self._name_lbl)
+        self._default_badge = QLabel("⭐  DEFAULT")
+        self._default_badge.setStyleSheet(
+            "QLabel{background:#0f3460;color:#fbbf24;font-size:9px;"
+            "font-weight:800;letter-spacing:1px;padding:2px 7px;"
+            "border-radius:8px;border:1px solid #1a2236;}")
+        self._default_badge.setVisible(self._is_default)
+        self._default_badge.setToolTip(
+            "File này tự load mỗi khi mở app. Right-click → bỏ default.")
+        name_row.addWidget(self._default_badge)
+        name_row.addStretch(1)
+        center.addLayout(name_row)
 
         # Path elided khi quá dài (dùng QFontMetrics khi resize)
         self._path_lbl = QLabel()
@@ -148,7 +162,14 @@ class RecentFileCard(QWidget):
         self._selected = selected
         self._apply_style()
 
+    def set_default(self, is_default: bool):
+        self._is_default = is_default
+        self._default_badge.setVisible(is_default)
+        self._apply_style()
+
     def _apply_style(self):
+        # Default file dùng border vàng nhạt (gold) cho non-selected, để user
+        # nhận diện được file default ngay cả khi không chọn.
         if self._selected:
             self.setStyleSheet(
                 "RecentFileCard{background:#162033;border:1px solid #00d4ff;"
@@ -156,6 +177,14 @@ class RecentFileCard(QWidget):
                 "RecentFileCard:hover{background:#1a2640;}")
             self._name_lbl.setStyleSheet(
                 "color:#00d4ff;font-size:13px;font-weight:700;")
+        elif self._is_default:
+            self.setStyleSheet(
+                "RecentFileCard{background:#0d1220;border:1px solid #475569;"
+                "border-radius:10px;}"
+                "RecentFileCard:hover{background:#131a2a;"
+                "border:1px solid #fbbf24;}")
+            self._name_lbl.setStyleSheet(
+                "color:#fbbf24;font-size:13px;font-weight:700;")
         else:
             self.setStyleSheet(
                 "RecentFileCard{background:#0d1220;border:1px solid #1e2d45;"
@@ -278,6 +307,8 @@ class StartupAOIPicker(QDialog):
         self._list.setSpacing(0)
         self._list.itemDoubleClicked.connect(self._on_double_click)
         self._list.currentItemChanged.connect(self._on_selection_changed)
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_list_context)
         self._populate_recents()
         root.addWidget(self._list, 1)
 
@@ -360,15 +391,23 @@ class StartupAOIPicker(QDialog):
             self._list.setItemWidget(item, placeholder)
             return
 
+        default_path = self.get_default_path()
         for path in recents:
-            card = RecentFileCard(path)
+            card = RecentFileCard(path, is_default=(path == default_path))
             item = QListWidgetItem()
             item.setData(Qt.UserRole, path)
-            item.setToolTip(path)
+            item.setToolTip(path + ("\n⭐ Default file (auto-load mỗi khi mở app)"
+                                     if path == default_path else ""))
             item.setSizeHint(QSize(0, card.sizeHint().height()))
             self._list.addItem(item)
             self._list.setItemWidget(item, card)
-        self._list.setCurrentRow(0)
+        # Auto-select default file nếu có, không thì select item đầu
+        select_row = 0
+        if default_path:
+            for i, p in enumerate(recents):
+                if p == default_path:
+                    select_row = i; break
+        self._list.setCurrentRow(select_row)
 
     def _on_selection_changed(self, current, previous):
         # Update card visual + enable/disable Open button. Guard btn_open vì
@@ -383,6 +422,71 @@ class StartupAOIPicker(QDialog):
         if btn is not None:
             btn.setEnabled(
                 current is not None and current.data(Qt.UserRole) is not None)
+
+    # ── Default file management ──────────────────────────────────────
+    @staticmethod
+    def get_default_path() -> str:
+        """Lấy path file default (auto-load khi mở app). "" nếu chưa set
+        hoặc file đã bị xóa khỏi disk."""
+        p = QSettings().value("default_aoi", "") or ""
+        if isinstance(p, str) and p and os.path.isfile(p):
+            return p
+        return ""
+
+    @staticmethod
+    def set_default_path(path: str):
+        """Set/unset default file. Pass "" để bỏ default."""
+        QSettings().setValue("default_aoi", path or "")
+
+    def _on_list_context(self, pos):
+        """Right-click vào card → menu: Set default / Bỏ default + Remove
+        khỏi recent."""
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        path = item.data(Qt.UserRole)
+        if not path:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu{background:#0d1220;color:#e2e8f0;border:1px solid #1e2d45;"
+            "padding:4px;font-size:12px;}"
+            "QMenu::item{padding:6px 16px;border-radius:4px;}"
+            "QMenu::item:selected{background:#1a2236;color:#00d4ff;}"
+            "QMenu::separator{height:1px;background:#1e2d45;margin:4px 6px;}")
+
+        is_default = (self.get_default_path() == path)
+        if is_default:
+            act_def = QAction("⭐  Bỏ Set default", menu)
+            act_def.triggered.connect(lambda: self._toggle_default(""))
+        else:
+            act_def = QAction("⭐  Set as default", menu)
+            act_def.setToolTip("Mở app lần sau sẽ tự load file này.")
+            act_def.triggered.connect(lambda: self._toggle_default(path))
+        menu.addAction(act_def)
+
+        menu.addSeparator()
+        act_rm = QAction("🗑  Xóa khỏi Recent", menu)
+        act_rm.triggered.connect(lambda: self._remove_from_recents(path))
+        menu.addAction(act_rm)
+
+        menu.exec(self._list.viewport().mapToGlobal(pos))
+
+    def _toggle_default(self, path: str):
+        """Set/unset default + rebuild list để update badges."""
+        self.set_default_path(path)
+        self._populate_recents()
+
+    def _remove_from_recents(self, path: str):
+        """Xóa path khỏi recent_files. Nếu là default thì clear default luôn."""
+        recents = QSettings().value("recent_files", []) or []
+        if isinstance(recents, str):
+            recents = [recents]
+        recents = [p for p in recents if p != path]
+        QSettings().setValue("recent_files", recents)
+        if self.get_default_path() == path:
+            self.set_default_path("")
+        self._populate_recents()
 
     # ── Slots ─────────────────────────────────────────────────────────
     def _on_double_click(self, item: QListWidgetItem):
