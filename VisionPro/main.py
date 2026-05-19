@@ -191,7 +191,18 @@ def main():
     app._no_wheel_filter = _NoWheelFilter()
     app.installEventFilter(app._no_wheel_filter)
 
+    # Startup picker: show splash trước MainWindow để user pick file AOI gần đây
+    # hoặc browse / New blank. Cancel → exit app (không có file → khó dùng app
+    # ngay từ đầu, user phải actively confirm). New blank → MainWindow trống.
+    from ui.startup_picker import StartupAOIPicker
+    picker = StartupAOIPicker()
+    if picker.exec() != picker.Accepted:
+        sys.exit(0)
+
     window = MainWindow()
+    chosen = picker.chosen_path()
+    if chosen:
+        window.load_pipeline_from_path(chosen)
     window.show()
     sys.exit(app.exec())
 

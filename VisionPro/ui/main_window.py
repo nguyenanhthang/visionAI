@@ -560,13 +560,40 @@ class MainWindow(QMainWindow):
             "AOI Pipeline (*.aoi *.json);;All Files (*)")
         if not path:
             return
+        self.load_pipeline_from_path(path)
+
+    def load_pipeline_from_path(self, path: str) -> bool:
+        """Load .aoi/.json file vào canvas. Trả True nếu thành công.
+        Dùng được cả từ menu Open lẫn StartupAOIPicker → MainWindow."""
         try:
             self._graph = FlowGraph.load(path)
             self._current_file = path
             self._rebuild_canvas()
+            self._add_recent_file(path)
             self.statusBar().showMessage(f"Loaded: {path}", 3000)
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Cannot load:\n{e}")
+            return False
+
+    @staticmethod
+    def _get_recent_files() -> list:
+        """List path đã mở/save gần đây (mới nhất đầu). Lưu trong QSettings."""
+        s = QSettings()
+        raw = s.value("recent_files", []) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        # Lọc bỏ file đã bị xóa khỏi disk
+        return [p for p in raw if isinstance(p, str) and os.path.isfile(p)]
+
+    def _add_recent_file(self, path: str, cap: int = 10):
+        """Add path lên đầu recent list, dedupe, cap số lượng."""
+        path = os.path.abspath(path)
+        recents = self._get_recent_files()
+        if path in recents:
+            recents.remove(path)
+        recents.insert(0, path)
+        QSettings().setValue("recent_files", recents[:cap])
 
     def _save_pipeline(self):
         if not self._current_file:
@@ -585,6 +612,7 @@ class MainWindow(QMainWindow):
         if path:
             self._current_file = path
             self._save_pipeline()
+            self._add_recent_file(path)
             self._update_title()
 
     def _clear_canvas(self):
