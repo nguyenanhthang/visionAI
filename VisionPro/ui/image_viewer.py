@@ -240,6 +240,7 @@ class ImageViewerPanel(QWidget):
         node_lbl = QLabel("Node:")
         node_lbl.setStyleSheet("color:#64748b; font-size:11px;")
         tl.addWidget(node_lbl)
+        self._tb_node_lbl = node_lbl   # ref để ẩn khi multi-view ON
 
         self._node_combo = QComboBox()
         self._node_combo.setMinimumWidth(180)
@@ -278,6 +279,9 @@ class ImageViewerPanel(QWidget):
         btn_out.clicked.connect(lambda: self._img_view.set_zoom(self._img_view._scale / 1.5))
         for b in (btn_out, btn_in, btn_1to1, btn_fit):
             tl.addWidget(b)
+        # Refs để ẩn cùng node combo khi vào multi-view (zoom + Results global
+        # không apply cho grid — mỗi cell có combo + zoom riêng).
+        self._tb_zoom_btns = (btn_out, btn_in, btn_1to1, btn_fit)
 
         # Results dropdown — chọn tool nào để overlay annotation lên ảnh gốc.
         # Menu rebuilt động khi mở: list tất cả node có image output, mỗi
@@ -419,7 +423,15 @@ class ImageViewerPanel(QWidget):
 
     # ── Multi-view ────────────────────────────────────────────────
     def _on_multi_toggled(self, checked: bool):
-        """Toggle giữa single view và multi-view grid."""
+        """Toggle giữa single view và multi-view grid. Ẩn các widget single-
+        view (node combo + zoom + global Results) khi vào grid — mỗi ô trong
+        grid đã có combo + zoom + 📊 riêng nên top toolbar bị thừa."""
+        single_only = not checked
+        self._tb_node_lbl.setVisible(single_only)
+        self._node_combo.setVisible(single_only)
+        for b in self._tb_zoom_btns:
+            b.setVisible(single_only)
+        self._btn_results.setVisible(single_only)
         if checked:
             self._rebuild_multi_grid()
             self._view_stack.setCurrentIndex(1)

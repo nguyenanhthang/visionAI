@@ -17,8 +17,8 @@ from core.tool_registry import TOOL_BY_ID, ToolDef, ParamDef
 # nhiều output scalar (blob, find_circle…) chỉ hiện những port "primary" để
 # node gọn; user vẫn unhide qua dialog "👁 Manage Output Ports".
 _DEFAULT_HIDDEN_OUTPUTS: Dict[str, List[str]] = {
-    "blob": ["count", "total_area", "blobs", "centroids",
-             "cx", "cy", "area", "bbox_w", "bbox_h", "angle"],
+    "blob": ["blobs", "centroids", "cx", "cy",
+             "bbox_w", "bbox_h", "angle"],
 }
 
 
