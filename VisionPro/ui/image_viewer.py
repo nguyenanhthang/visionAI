@@ -1119,9 +1119,14 @@ class ImageViewerPanel(QWidget):
     def _overlay_diff(self, base: np.ndarray, before: np.ndarray,
                       after: np.ndarray) -> np.ndarray:
         """Compose pixel khác biệt (before→after) lên base. Dùng cho Shared
-        Graphics: lấy annotation upstream-tool đã vẽ rồi áp lên ảnh hiển thị."""
+        Graphics: lấy annotation upstream-tool đã vẽ rồi áp lên ảnh hiển thị.
+
+        before/after có thể khác channel count (vd PatMax nhận gray HxW, output
+        BGR HxWx3 do `_bgr(img.copy())`); ta chỉ cần match H,W rồi up-convert
+        gray → BGR trước khi absdiff. Trước đây check `before.shape != after.shape`
+        cứng nên overlay PatMax + tool gray-input bị skip silent."""
         if (before is None or after is None
-                or before.shape != after.shape
+                or before.shape[:2] != after.shape[:2]
                 or before.shape[:2] != base.shape[:2]):
             return base
         import cv2
@@ -1134,6 +1139,8 @@ class ImageViewerPanel(QWidget):
         if not mask.any():
             return base
         out = base.copy()
+        if out.ndim == 2:
+            out = cv2.cvtColor(out, cv2.COLOR_GRAY2BGR)
         out[mask] = a[mask]
         return out
 
