@@ -806,6 +806,13 @@ class ImageViewerPanel(QWidget):
         menu.addSeparator()
 
         tools = self._cell_branch_tools(entry)
+        # Loại node combo đang chọn khỏi menu: combo đã render trực tiếp
+        # annotation của node đó qua _vis_of → tick lại trong overlay sẽ
+        # KHÔNG có hiệu ứng visible (composite layer cùng annotation lên
+        # chính nó). Tránh user confused "tick mà không thấy gì".
+        current_nid = entry["combo"].currentData() if "combo" in entry else None
+        if current_nid:
+            tools = [t for t in tools if t[0] != current_nid]
         if not tools:
             wa = QWidgetAction(menu)
             msg = ("(Pipeline chưa có tool nào)" if root
@@ -889,15 +896,19 @@ class ImageViewerPanel(QWidget):
             return v
 
         # Chỉ apply overlays thuộc pipeline hiện tại của ô — bỏ stale items
-        # nếu user đã switch combo qua pipeline khác.
-        active = self._active_cell_overlays(entry)
+        # nếu user đã switch combo qua pipeline khác. Loại luôn combo node
+        # khỏi danh sách active vì combo đang RENDER trực tiếp annotation
+        # của nó qua _vis_of → tick lại sẽ no-op (redundant).
+        active = [oid for oid in self._active_cell_overlays(entry)
+                  if oid != nid]
 
         img = None
         if active:
-            # Base = ảnh Acquire của pipeline ô này (file hoặc camera root).
-            base_root = pipeline_root or entry["root"]
-            base_node = self._graph.nodes.get(base_root)
-            base = base_node.outputs.get("image") if base_node else None
+            # Base = render hiện tại của combo (có annotation của node đó),
+            # rồi layer thêm annotation của các overlay khác bên trên. Cho
+            # phép user xem "node X output + thêm marker của node Y" — UX
+            # rõ ràng hơn so với reset về Acquire image làm base.
+            base = _vis_of(node)
             if base is not None and isinstance(base, np.ndarray):
                 import cv2
                 comp = base.copy()
