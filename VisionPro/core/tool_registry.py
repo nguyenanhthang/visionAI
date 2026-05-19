@@ -979,13 +979,22 @@ def proc_blob(inputs, params):
         cx = (M["m10"]/M["m00"]) * ds + off_x
         cy = (M["m01"]/M["m00"]) * ds + off_y
 
-        # Bounding box & orientation (rect ở downscale space → ×ds)
+        # Rotated bounding box (minAreaRect) & orientation cho overlay/elongation
         rect = cv2.minAreaRect(cnt)
         (bx, by), (bw_ds, bh_ds), angle_deg = rect
         bw = bw_ds * ds
         bh = bh_ds * ds
         elongation = max(bw, bh) / max(min(bw, bh), 0.001)
         if not (min_elo <= elongation <= max_elo): continue
+
+        # Axis-aligned bounding rect (cv2.boundingRect) — emit x,y,w,h
+        # cho downstream tool nối thẳng (crop_roi, region_score, …) không
+        # cần qua rotation. Toạ độ image full-res (đã scale + offset).
+        aabb_x_ds, aabb_y_ds, aabb_w_ds, aabb_h_ds = cv2.boundingRect(cnt)
+        aabb_x = aabb_x_ds * ds + off_x
+        aabb_y = aabb_y_ds * ds + off_y
+        aabb_w = aabb_w_ds * ds
+        aabb_h = aabb_h_ds * ds
 
         # Convex hull & convexity (ratio nên không cần scale)
         hull = cv2.convexHull(cnt)
@@ -999,7 +1008,10 @@ def proc_blob(inputs, params):
             "area":area_mm,"perimeter":perimeter*math.sqrt(scale),
             "circularity":circularity,"elongation":elongation,
             "convexity":convexity,"cx":float(cx),"cy":float(cy),
-            "angle":float(angle_deg),"bbox_w":float(bw),"bbox_h":float(bh)
+            "angle":float(angle_deg),"bbox_w":float(bw),"bbox_h":float(bh),
+            # AABB primary outputs
+            "x":float(aabb_x),"y":float(aabb_y),
+            "w":float(aabb_w),"h":float(aabb_h),
         }
         blobs.append(blob_info)
         centroids.append((float(cx),float(cy)))
@@ -1039,7 +1051,13 @@ def proc_blob(inputs, params):
 
     # Scalar shortcuts của blob ĐẦU TIÊN (lớn nhất hay đầu danh sách tuỳ
     # contour order) — để nối thẳng vào dist_point / display / message …
+    # x,y,w,h = axis-aligned bounding rect (cv2.boundingRect) — primary output
+    # cho downstream geometric ops. cx,cy giữ riêng = centroid (moments).
     first = blobs[0] if blobs else {}
+    x0 = float(first.get("x", 0.0))
+    y0 = float(first.get("y", 0.0))
+    w0 = float(first.get("w", 0.0))
+    h0 = float(first.get("h", 0.0))
     cx0 = float(first.get("cx", 0.0))
     cy0 = float(first.get("cy", 0.0))
     area0 = float(first.get("area", 0.0))
@@ -1049,8 +1067,7 @@ def proc_blob(inputs, params):
 
     return {"image":vis,"count":len(blobs),"pass":is_pass,
             "total_area":total_area,"blobs":blobs,"centroids":centroids,
-            # x,y = alias cho cx,cy (centroid blob đầu tiên) — match PatMax UX
-            "x": cx0, "y": cy0,
+            "x": x0, "y": y0, "w": w0, "h": h0,
             "cx": cx0, "cy": cy0, "area": area0,
             "bbox_w": bbox_w0, "bbox_h": bbox_h0, "angle": angle0,
             # _label_rects: list (x,y,w,h) image coords — UI dùng để hit-test
@@ -2558,11 +2575,14 @@ TOOL_REGISTRY: List[ToolDef] = [
     [PortDef("image","image"),PortDef("mask","image",required=False),
      PortDef("offset_x","number",required=False),
      PortDef("offset_y","number",required=False)],
-    # `x`, `y` là default shortcut (giống PatMax) — centroid blob đầu tiên.
-    # `cx`, `cy` giữ làm alias để pipeline cũ không gãy; ẩn mặc định trong UI
-    # qua _hidden_outputs default (set khi new node), user vẫn show lại được
-    # qua dialog "Manage Output Ports".
-    [PortDef("image","image"),PortDef("x","number"),PortDef("y","number"),
+    # Primary outputs: axis-aligned bbox (x,y,w,h) của blob đầu tiên — visible
+    # mặc định cho new node. Centroid (cx,cy) + rotated bbox (bbox_w,bbox_h) +
+    # các scalar phụ ẩn mặc định trong UI qua _hidden_outputs (user toggle qua
+    # dialog "👁 Show / Hide Output Ports"). Tất cả vẫn được emit qua proc_blob
+    # nên pipeline cũ không gãy.
+    [PortDef("image","image"),
+     PortDef("x","number"),PortDef("y","number"),
+     PortDef("w","number"),PortDef("h","number"),
      PortDef("count","number"),PortDef("pass","bool"),
      PortDef("total_area","number"),PortDef("blobs","any"),PortDef("centroids","any"),
      PortDef("cx","number"),PortDef("cy","number"),PortDef("area","number"),
