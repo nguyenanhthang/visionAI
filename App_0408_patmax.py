@@ -48,6 +48,70 @@ from core.patmax_engine import load_model, run_patmax_align, PatMaxModel
 _PATMAX_MODEL_PATH = os.path.join(_HERE, "model.json")
 
 
+def _select_ellipse_roi(window_name: str, img: np.ndarray):
+    """Custom ellipse ROI selector — drag chuột vẽ bbox; ellipse nội tiếp
+    được render live theo dõi cursor. Trả (x, y, w, h) khi Enter,
+    (0,0,0,0) khi Esc/cancel.
+
+    Khác cv2.selectROI ở chỗ HÌNH HIỂN THỊ là ellipse, khớp với mask thật
+    PatMax dùng (shape_type='ellipse' = inscribed ellipse trong bbox).
+
+    Controls:
+      Left-drag    → vẽ ellipse
+      Enter/Space  → confirm
+      r            → reset (vẽ lại)
+      Esc / c      → cancel
+    """
+    state = {"active": False, "start": None, "end": None}
+
+    def on_mouse(event, x, y, flags, _):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            state["active"] = True
+            state["start"] = (x, y); state["end"] = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and state["active"]:
+            state["end"] = (x, y)
+        elif event == cv2.EVENT_LBUTTONUP:
+            state["active"] = False
+            state["end"] = (x, y)
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(window_name, on_mouse)
+
+    HINT = "Drag chuot ve ellipse | Enter=OK  r=reset  Esc/c=cancel"
+    while True:
+        disp = img.copy()
+        s, e = state["start"], state["end"]
+        if s is not None and e is not None:
+            x1, y1 = s; x2, y2 = e
+            cx = (x1 + x2) // 2; cy = (y1 + y2) // 2
+            rw = abs(x2 - x1) // 2; rh = abs(y2 - y1) // 2
+            if rw >= 1 and rh >= 1:
+                # Bbox xám mờ + ellipse xanh — user thấy rõ vùng match thật
+                cv2.rectangle(disp, (min(x1, x2), min(y1, y2)),
+                              (max(x1, x2), max(y1, y2)),
+                              (120, 120, 120), 1)
+                cv2.ellipse(disp, (cx, cy), (rw, rh), 0, 0, 360,
+                            (0, 255, 0), 2)
+        cv2.putText(disp, HINT, (10, 22),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 255), 1,
+                    cv2.LINE_AA)
+        cv2.imshow(window_name, disp)
+        k = cv2.waitKey(15) & 0xFF
+        if k in (13, 32):   # Enter / Space
+            if s is not None and e is not None:
+                x = min(s[0], e[0]); y = min(s[1], e[1])
+                w = abs(e[0] - s[0]); h = abs(e[1] - s[1])
+                if w > 1 and h > 1:
+                    cv2.destroyWindow(window_name)
+                    return (x, y, w, h)
+        elif k == ord('r'):
+            state["start"] = state["end"] = None
+            state["active"] = False
+        elif k in (27, ord('c')):   # Esc / c
+            cv2.destroyWindow(window_name)
+            return (0, 0, 0, 0)
+
+
 class App(customtkinter.CTk):
     def __init__(self):
         super().__init__()
@@ -267,11 +331,10 @@ class App(customtkinter.CTk):
         cv2.imwrite("img/train.png", frame)
         img = cv2.imread("img/train.png")
 
-        # 2. User pick ROI (rect; mask sẽ là ellipse nội tiếp)
-        roi = cv2.selectROI(
-            "Train PatMax — ve box quanh 1 con vit, Enter de OK / c de cancel",
-            img, showCrosshair=True, fromCenter=False)
-        cv2.destroyAllWindows()
+        # 2. User pick ROI (ellipse direct — preview live khớp với mask thật
+        # PatMax dùng; bbox vẫn được lưu dưới dạng rect cho tương thích).
+        roi = _select_ellipse_roi(
+            "Train PatMax — drag ve ellipse quanh con vit", img)
         x, y, w, h = (int(v) for v in roi)
         if w <= 0 or h <= 0:
             return  # user cancelled
@@ -279,8 +342,8 @@ class App(customtkinter.CTk):
         # 3. Confirm
         ans = messagebox.askquestion(
             'Train PatMax',
-            f'Train với ROI ({x}, {y}) kích thước {w}×{h}?\n'
-            f'Shape: ellipse (vít tròn).\n'
+            f'Train ellipse ROI ({x}, {y}) kích thước {w}×{h}?\n'
+            f'Mask: ellipse nội tiếp bbox.\n'
             f'Model sẽ ghi đè {_PATMAX_MODEL_PATH}.')
         if ans != 'yes':
             return
