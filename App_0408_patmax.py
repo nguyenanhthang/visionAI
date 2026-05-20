@@ -47,6 +47,26 @@ from core.patmax_engine import load_model, run_patmax_align, PatMaxModel
 # cả .json lẫn .npz cùng base.
 _PATMAX_MODEL_PATH = os.path.join(_HERE, "model.json")
 
+# ── PatQuick search tuning ──────────────────────────────────────────
+# Model.json train với angle range = 0 (pattern 1 góc cố định). NHƯNG vít
+# lục giác trên sản phẩm xoay tự do — mỗi con 1 hướng → nếu search không
+# quét góc thì chỉ match đúng con vít cùng góc với pattern, các con khác
+# score thấp → bị loại. Bật quét góc ở search time để tìm đủ.
+#   _SEARCH_ANGLE_RANGE : quét ±deg quanh 0. Hex head đối xứng 60° nên 60
+#                         là đủ; để 180 cho chắc. Đặt 0 = tắt quét góc.
+#   _SEARCH_ANGLE_STEP  : bước quét (deg). Nhỏ hơn = nhạy hơn nhưng chậm.
+#   _SEARCH_ACCEPT_OVERRIDE : None = dùng accept_threshold của model.
+#                         Đặt số 0..1 (vd 0.6) nếu vài vít score hơi thấp
+#                         do lighting/washer khác — hạ ngưỡng để bắt thêm.
+_SEARCH_ANGLE_RANGE = 180.0
+_SEARCH_ANGLE_STEP = 12.0
+_SEARCH_ACCEPT_OVERRIDE = None
+# Diagnostic: vẽ luôn candidate DƯỚI ngưỡng (màu cam + score) lên ảnh để
+# user thấy vít bị "trượt" score bao nhiêu → biết hạ _SEARCH_ACCEPT_OVERRIDE
+# xuống mức nào. Tắt (False) khi đã tune xong cho production.
+_SEARCH_DIAG = True
+_SEARCH_DIAG_FLOOR = 0.35   # score tối thiểu để vẽ candidate diagnostic
+
 
 def _select_ellipse_roi(window_name: str, img: np.ndarray):
     """Custom ellipse ROI selector — drag chuột vẽ bbox; ellipse nội tiếp
@@ -436,38 +456,57 @@ class App(customtkinter.CTk):
             self.btn_nof.configure(text='Error QC: {}'.format(str(ex)), text_color='red')
 
     def _patmax_detect_screws(self, img_bgr: np.ndarray):
-        """Tìm screws bằng PatQuick. Trả list dict {x,y,w,h,score}. Tham số
-        search lấy từ chính model (đã train với accept_threshold=0.7,
-        angle/scale range=0, num_results=3) — không hardcode magic numbers."""
+        """Tìm screws bằng PatQuick. Trả (accepted, rejected) — 2 list dict
+        {x,y,w,h,score,angle}.
+
+        • Quét rotation (_SEARCH_ANGLE_RANGE) vì model train angle 0-0 nhưng
+          vít hex trên sản phẩm xoay tự do — không quét góc thì chỉ bắt
+          được 1 con cùng hướng pattern.
+        • accepted = score ≥ ngưỡng (đếm vào count). rejected = candidate
+          dưới ngưỡng nhưng ≥ _SEARCH_DIAG_FLOOR — để vẽ diagnostic giúp
+          user thấy vít "trượt" bao nhiêu mà chỉnh ngưỡng."""
         if self.patmax_model is None:
-            return []
+            return [], []
         m = self.patmax_model
+        accept = (_SEARCH_ACCEPT_OVERRIDE
+                  if _SEARCH_ACCEPT_OVERRIDE is not None
+                  else m.accept_threshold)
+        # Quét góc: override angle range của model (0-0) bằng dải search.
+        if _SEARCH_ANGLE_RANGE > 0:
+            a_lo, a_hi, a_st = (-_SEARCH_ANGLE_RANGE, _SEARCH_ANGLE_RANGE,
+                                 _SEARCH_ANGLE_STEP)
+        else:
+            a_lo, a_hi, a_st = m.angle_low, m.angle_high, m.angle_step
+        # Search với ngưỡng thấp (_SEARCH_DIAG_FLOOR) + num_results dư để
+        # bắt cả near-miss cho diagnostic. Lọc theo `accept` thật ở Python.
+        floor = min(accept, _SEARCH_DIAG_FLOOR) if _SEARCH_DIAG else accept
+        n_req = max(m.num_results, m.num_results + 4) if _SEARCH_DIAG else m.num_results
         results, _ = run_patmax_align(
             img_bgr, m,
             algorithm="PatQuick",
             train_mode_align=m.train_mode if m.train_mode else "Image",
-            accept_threshold=m.accept_threshold,
-            angle_low=m.angle_low, angle_high=m.angle_high,
-            angle_step=m.angle_step,
+            accept_threshold=floor,
+            angle_low=a_lo, angle_high=a_hi, angle_step=a_st,
             scale_low=m.scale_low, scale_high=m.scale_high,
             scale_step=getattr(m, "scale_step", 0.1) or 0.1,
-            num_results=m.num_results,
+            num_results=n_req,
             overlap_threshold=m.overlap_threshold,
             coarse_downscale=1,
             build_score_map=False,
         )
-        out = []
-        thr = m.accept_threshold
+        accepted, rejected = [], []
         for r in results:
-            if r.score < thr:
-                continue
-            out.append({
+            d = {
                 "x": float(r.x), "y": float(r.y),
                 "w": float(r.width), "h": float(r.height),
                 "score": float(r.score),
                 "angle": float(r.angle),
-            })
-        return out
+            }
+            if r.score >= accept:
+                accepted.append(d)
+            elif _SEARCH_DIAG and r.score >= _SEARCH_DIAG_FLOOR:
+                rejected.append(d)
+        return accepted, rejected
 
     def AOI(self, moment1, moment2, moment3):
         self.check_sample = self.sys.find('Test_sample')
@@ -487,16 +526,24 @@ class App(customtkinter.CTk):
         cv2.rectangle(self.img, (166, 175), (516, 464), (255, 255, 255), -1)
 
         # ── PatQuick screw detection ───────────────────────────────
-        detections = self._patmax_detect_screws(self.img)
+        detections, rejected = self._patmax_detect_screws(self.img)
         count = len(detections)
-        for d in detections:
+
+        def _draw_box(d, color):
             x_c, y_c = d["x"], d["y"]
             w, h = d["w"], d["h"]
             x1 = int(round(x_c - w / 2)); y1 = int(round(y_c - h / 2))
             x2 = int(round(x_c + w / 2)); y2 = int(round(y_c + h / 2))
-            cv2.rectangle(self.img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.rectangle(self.img, (x1, y1), (x2, y2), color, 2)
             cv2.putText(self.img, f"{d['score']:.2f}", (x1, max(12, y1 - 6)),
-                        cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 0), 1)
+                        cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
+
+        # Xanh = accepted (đếm vào count). Cam = near-miss dưới ngưỡng —
+        # diagnostic: nhìn score cam để biết hạ _SEARCH_ACCEPT_OVERRIDE.
+        for d in detections:
+            _draw_box(d, (0, 255, 0))
+        for d in rejected:
+            _draw_box(d, (0, 165, 255))
 
         # ── Moments overlay (giữ nguyên logic cũ) ──────────────────
         if 0.4 <= moment2 <= 0.6:
