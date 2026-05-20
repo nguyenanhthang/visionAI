@@ -129,7 +129,7 @@ class App(customtkinter.CTk):
         self.lbl_optionmenu = customtkinter.CTkLabel(self.frame_top, text='Select Option', font=customtkinter.CTkFont('Times new roman', 16, 'normal'))
         self.lbl_optionmenu.grid(row=1, column=5, padx=(0, 30), pady=0)
 
-        self.option_menu = customtkinter.CTkOptionMenu(self.frame_top, values=['Reset Sản Lượng', 'Thiết lập ROIs Right', 'Thiết lập ROIs Left', 'Motor cu', 'Motor moi'], command=self.st_option_menu)
+        self.option_menu = customtkinter.CTkOptionMenu(self.frame_top, values=['Reset Sản Lượng', 'Thiết lập ROIs Right', 'Thiết lập ROIs Left', 'Train PatMax', 'Motor cu', 'Motor moi'], command=self.st_option_menu)
         self.option_menu.grid(row=2, column=5, padx=10, pady=10)
 
         self.lbl_quantity_screws = customtkinter.CTkLabel(self.frame_top, text='Quantity Screws', font=customtkinter.CTkFont('Times new roman', 16, 'normal'))
@@ -240,6 +240,100 @@ class App(customtkinter.CTk):
                         file.write(str(ROIs[idx][1]) + "\n")
                         file.write(str(ROIs[idx][2]) + "\n")
                         file.write(str(ROIs[idx][3]))
+        elif value == 'Train PatMax':
+            self._train_patmax_interactive()
+
+    def _train_patmax_interactive(self):
+        """Train PatMax từ frame camera hiện tại:
+          1. Capture frame → save img/train.png
+          2. cv2.selectROI để user vẽ box quanh 1 con vít
+          3. Confirm → train_patmax + save_model (override model.json+.npz)
+          4. Reload self.patmax_model — AOI() lần sau dùng model mới
+
+        Shape mặc định 'ellipse' khớp với model gốc (vít tròn). Search params
+        (accept_threshold, num_results, overlap_threshold) GIỮ từ model cũ
+        nếu có — train mới không reset tuning của user."""
+        from core.patmax_engine import train_patmax, save_model
+        # 1. Capture frame
+        sleep(0.5)
+        frame = None
+        for _ in range(4):
+            ret, frame = self.video.read()
+        if frame is None:
+            messagebox.showerror('Train PatMax', 'Không lấy được frame camera.')
+            return
+        frame = cv2.resize(frame, (880, 680))
+        os.makedirs("img", exist_ok=True)
+        cv2.imwrite("img/train.png", frame)
+        img = cv2.imread("img/train.png")
+
+        # 2. User pick ROI (rect; mask sẽ là ellipse nội tiếp)
+        roi = cv2.selectROI(
+            "Train PatMax — ve box quanh 1 con vit, Enter de OK / c de cancel",
+            img, showCrosshair=True, fromCenter=False)
+        cv2.destroyAllWindows()
+        x, y, w, h = (int(v) for v in roi)
+        if w <= 0 or h <= 0:
+            return  # user cancelled
+
+        # 3. Confirm
+        ans = messagebox.askquestion(
+            'Train PatMax',
+            f'Train với ROI ({x}, {y}) kích thước {w}×{h}?\n'
+            f'Shape: ellipse (vít tròn).\n'
+            f'Model sẽ ghi đè {_PATMAX_MODEL_PATH}.')
+        if ans != 'yes':
+            return
+
+        # 4. Train (mode "evaluate" như model gốc) — preserve search tuning
+        old = self.patmax_model
+        accept_thr = old.accept_threshold if old else 0.7
+        num_res    = old.num_results      if old else 3
+        overlap    = old.overlap_threshold if old else 0.5
+        ang_lo     = old.angle_low        if old else 0.0
+        ang_hi     = old.angle_high       if old else 0.0
+        ang_st     = old.angle_step       if old else 5.0
+        sc_lo      = old.scale_low        if old else 1.0
+        sc_hi      = old.scale_high       if old else 1.0
+        canny_lo   = old.canny_low        if old else 50
+        canny_hi   = old.canny_high       if old else 150
+
+        try:
+            new_model = train_patmax(
+                img, (x, y, w, h),
+                shape_type='ellipse',
+                shape_data={'x': x, 'y': y, 'w': w, 'h': h},
+                train_mode='evaluate',
+                canny_low=canny_lo, canny_high=canny_hi,
+                angle_low=ang_lo, angle_high=ang_hi, angle_step=ang_st,
+                scale_low=sc_lo, scale_high=sc_hi,
+            )
+        except Exception as ex:
+            messagebox.showerror('Train PatMax', f'Train failed:\n{ex}')
+            return
+
+        # Restore search tuning từ model cũ
+        new_model.accept_threshold = accept_thr
+        new_model.num_results      = num_res
+        new_model.overlap_threshold = overlap
+
+        # 5. Save + reload
+        try:
+            save_model(new_model, _PATMAX_MODEL_PATH)
+        except Exception as ex:
+            messagebox.showerror('Train PatMax', f'Save failed:\n{ex}')
+            return
+
+        self.patmax_model = new_model
+        msg = (f'Train + save OK.\n'
+                f'  Edges: {new_model.edge_count}\n'
+                f'  Hash:  {new_model.model_hash}\n'
+                f'  Accept: {accept_thr}  ·  Num results: {num_res}\n'
+                f'  File:  {_PATMAX_MODEL_PATH}')
+        messagebox.showinfo('Train PatMax', msg)
+        self.btn_nof.configure(
+            text=f'PatMax trained (edges={new_model.edge_count})',
+            text_color='green')
 
     def state_on_off_SFC(self):
         if self.on_SFC is True:
