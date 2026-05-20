@@ -52,20 +52,24 @@ _PATMAX_MODEL_PATH = os.path.join(_HERE, "model.json")
 # lục giác trên sản phẩm xoay tự do — mỗi con 1 hướng → nếu search không
 # quét góc thì chỉ match đúng con vít cùng góc với pattern, các con khác
 # score thấp → bị loại. Bật quét góc ở search time để tìm đủ.
-#   _SEARCH_ANGLE_RANGE : quét ±deg quanh 0. Hex head đối xứng 60° nên 60
-#                         là đủ; để 180 cho chắc. Đặt 0 = tắt quét góc.
+#   _SEARCH_ANGLE_RANGE : quét ±deg quanh 0. Hex head đối xứng 60° → chỉ
+#                         cần ±60° là phủ hết mọi hướng vít. Để rộng hơn
+#                         (vd 180) chỉ tổ chậm. Đặt 0 = tắt quét góc.
 #   _SEARCH_ANGLE_STEP  : bước quét (deg). Nhỏ hơn = nhạy hơn nhưng chậm.
+#   _SEARCH_DOWNSCALE   : search ở 1/N resolution cho nhanh. 2 ≈ 4× nhanh,
+#                         sai số vị trí ±2px (đủ cho đếm vít). 1 = full-res.
 #   _SEARCH_ACCEPT_OVERRIDE : None = dùng accept_threshold của model.
 #                         Đặt số 0..1 (vd 0.6) nếu vài vít score hơi thấp
 #                         do lighting/washer khác — hạ ngưỡng để bắt thêm.
-_SEARCH_ANGLE_RANGE = 180.0
+_SEARCH_ANGLE_RANGE = 60.0
 _SEARCH_ANGLE_STEP = 12.0
+_SEARCH_DOWNSCALE = 2
 _SEARCH_ACCEPT_OVERRIDE = None
 # Diagnostic: vẽ luôn candidate DƯỚI ngưỡng (màu cam + score) lên ảnh để
 # user thấy vít bị "trượt" score bao nhiêu → biết hạ _SEARCH_ACCEPT_OVERRIDE
 # xuống mức nào. Tắt (False) khi đã tune xong cho production.
 _SEARCH_DIAG = True
-_SEARCH_DIAG_FLOOR = 0.35   # score tối thiểu để vẽ candidate diagnostic
+_SEARCH_DIAG_FLOOR = 0.45   # score tối thiểu để vẽ candidate diagnostic
 
 
 def _select_ellipse_roi(window_name: str, img: np.ndarray):
@@ -491,7 +495,7 @@ class App(customtkinter.CTk):
             scale_step=getattr(m, "scale_step", 0.1) or 0.1,
             num_results=n_req,
             overlap_threshold=m.overlap_threshold,
-            coarse_downscale=1,
+            coarse_downscale=max(1, _SEARCH_DOWNSCALE),
             build_score_map=False,
         )
         accepted, rejected = [], []
@@ -529,11 +533,17 @@ class App(customtkinter.CTk):
         detections, rejected = self._patmax_detect_screws(self.img)
         count = len(detections)
 
+        # Box vẽ CỐ ĐỊNH = pattern_w × pattern_h (kích thước pattern train),
+        # tâm tại (x, y). KHÔNG dùng d['w']/d['h'] — đó là bbox của pattern
+        # ĐÃ XOAY theo góc match (nW=ph·sin+pw·cos) → mỗi vít 1 góc khác →
+        # box to nhỏ lung tung. Cố định cỡ → 3 box bằng nhau, gọn.
+        m = self.patmax_model
+        box_w = int(m.pattern_w) if m else 84
+        box_h = int(m.pattern_h) if m else 85
+
         def _draw_box(d, color):
-            x_c, y_c = d["x"], d["y"]
-            w, h = d["w"], d["h"]
-            x1 = int(round(x_c - w / 2)); y1 = int(round(y_c - h / 2))
-            x2 = int(round(x_c + w / 2)); y2 = int(round(y_c + h / 2))
+            x1 = int(round(d["x"] - box_w / 2)); y1 = int(round(d["y"] - box_h / 2))
+            x2 = int(round(d["x"] + box_w / 2)); y2 = int(round(d["y"] + box_h / 2))
             cv2.rectangle(self.img, (x1, y1), (x2, y2), color, 2)
             cv2.putText(self.img, f"{d['score']:.2f}", (x1, max(12, y1 - 6)),
                         cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
