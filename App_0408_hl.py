@@ -78,65 +78,112 @@ _SEARCH_DIAG_FLOOR = 0.45   # score tối thiểu để vẽ candidate diagnosti
 
 
 def _select_ellipse_roi(window_name: str, img: np.ndarray):
-    """Custom ellipse ROI selector — drag chuột vẽ bbox; ellipse nội tiếp
-    được render live theo dõi cursor. Trả (x, y, w, h) khi Enter,
-    (0,0,0,0) khi Esc/cancel.
+    """ROI ellipse selector — vẽ XONG vẫn CHỈNH được trước khi confirm.
 
-    Khác cv2.selectROI ở chỗ HÌNH HIỂN THỊ là ellipse, khớp với mask thật
-    PatMax dùng (shape_type='ellipse' = inscribed ellipse trong bbox).
+    Thao tác:
+      • Drag vùng trống      → vẽ ellipse mới.
+      • Drag 8 handle vuông  → resize (4 góc + 4 cạnh giữa).
+      • Drag bên trong box   → di chuyển cả ROI.
+      • Enter / Space        → confirm.
+      • r                    → xoá, vẽ lại.
+      • Esc / c              → cancel.
 
-    Controls:
-      Left-drag    → vẽ ellipse
-      Enter/Space  → confirm
-      r            → reset (vẽ lại)
-      Esc / c      → cancel
+    Trả (x, y, w, h) của bbox (ellipse nội tiếp); (0,0,0,0) nếu cancel.
     """
-    state = {"active": False, "start": None, "end": None}
+    HR = 7   # nửa cạnh ô handle + bán kính hit-test (px, toạ độ ảnh)
+    st = {"box": None, "mode": None, "m0": None, "b0": None}
 
-    def on_mouse(event, x, y, flags, _):
+    def _handles(b):
+        x, y, w, h = b
+        return {"nw": (x, y),            "ne": (x + w, y),
+                "sw": (x, y + h),        "se": (x + w, y + h),
+                "n":  (x + w // 2, y),   "s":  (x + w // 2, y + h),
+                "w":  (x, y + h // 2),   "e":  (x + w, y + h // 2)}
+
+    def _hit(b, mx, my):
+        for nm, (hx, hy) in _handles(b).items():
+            if abs(mx - hx) <= HR and abs(my - hy) <= HR:
+                return nm
+        return None
+
+    def on_mouse(event, mx, my, flags, _):
+        b = st["box"]
         if event == cv2.EVENT_LBUTTONDOWN:
-            state["active"] = True
-            state["start"] = (x, y); state["end"] = (x, y)
-        elif event == cv2.EVENT_MOUSEMOVE and state["active"]:
-            state["end"] = (x, y)
+            st["m0"] = (mx, my)
+            if b is not None:
+                hn = _hit(b, mx, my)
+                if hn:                              # trúng handle → resize
+                    st["mode"] = "rs:" + hn; st["b0"] = list(b); return
+                x, y, w, h = b
+                if x <= mx <= x + w and y <= my <= y + h:
+                    st["mode"] = "mv"; st["b0"] = list(b); return  # trong → move
+            st["mode"] = "draw"; st["box"] = [mx, my, 0, 0]        # trống → vẽ mới
+        elif event == cv2.EVENT_MOUSEMOVE and st["mode"]:
+            dx = mx - st["m0"][0]; dy = my - st["m0"][1]
+            if st["mode"] == "draw":
+                x0, y0 = st["m0"]
+                st["box"] = [x0, y0, mx - x0, my - y0]
+            elif st["mode"] == "mv":
+                x, y, w, h = st["b0"]
+                st["box"] = [x + dx, y + dy, w, h]
+            elif st["mode"].startswith("rs:"):
+                hn = st["mode"][3:]; x, y, w, h = st["b0"]
+                if "n" in hn: y += dy; h -= dy
+                if "s" in hn: h += dy
+                if "w" in hn: x += dx; w -= dx
+                if "e" in hn: w += dx
+                st["box"] = [x, y, w, h]
         elif event == cv2.EVENT_LBUTTONUP:
-            state["active"] = False
-            state["end"] = (x, y)
+            if st["box"] is not None:               # chuẩn hoá w,h ≥ 0
+                x, y, w, h = st["box"]
+                if w < 0: x += w; w = -w
+                if h < 0: y += h; h = -h
+                st["box"] = [int(x), int(y), int(w), int(h)]
+            st["mode"] = None
 
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window_name, on_mouse)
 
-    HINT = "Drag chuot ve ellipse | Enter=OK  r=reset  Esc/c=cancel"
+    HINT1 = "Drag = ve  |  keo handle = resize  |  keo trong box = di chuyen"
+    HINT2 = "Enter/Space = OK    r = ve lai    Esc/c = cancel"
     while True:
         disp = img.copy()
-        s, e = state["start"], state["end"]
-        if s is not None and e is not None:
-            x1, y1 = s; x2, y2 = e
-            cx = (x1 + x2) // 2; cy = (y1 + y2) // 2
-            rw = abs(x2 - x1) // 2; rh = abs(y2 - y1) // 2
+        b = st["box"]
+        if b is not None:
+            x, y, w, h = b
+            # Chuẩn hoá để hiển thị (khi đang draw/resize w,h có thể âm)
+            rx = x if w >= 0 else x + w
+            ry = y if h >= 0 else y + h
+            rw, rh = abs(w), abs(h)
             if rw >= 1 and rh >= 1:
-                # Bbox xám mờ + ellipse xanh — user thấy rõ vùng match thật
-                cv2.rectangle(disp, (min(x1, x2), min(y1, y2)),
-                              (max(x1, x2), max(y1, y2)),
+                cv2.rectangle(disp, (rx, ry), (rx + rw, ry + rh),
                               (120, 120, 120), 1)
-                cv2.ellipse(disp, (cx, cy), (rw, rh), 0, 0, 360,
-                            (0, 255, 0), 2)
-        cv2.putText(disp, HINT, (10, 22),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 255), 1,
-                    cv2.LINE_AA)
+                cv2.ellipse(disp, (rx + rw // 2, ry + rh // 2),
+                            (rw // 2, rh // 2), 0, 0, 360, (0, 255, 0), 2)
+                # 8 handle ô vuông cyan viền đen
+                for hx, hy in _handles((rx, ry, rw, rh)).values():
+                    cv2.rectangle(disp, (hx - HR, hy - HR),
+                                  (hx + HR, hy + HR), (0, 200, 255), -1)
+                    cv2.rectangle(disp, (hx - HR, hy - HR),
+                                  (hx + HR, hy + HR), (20, 20, 20), 1)
+        cv2.putText(disp, HINT1, (10, 22), cv2.FONT_HERSHEY_DUPLEX,
+                    0.5, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(disp, HINT2, (10, 44), cv2.FONT_HERSHEY_DUPLEX,
+                    0.5, (0, 255, 255), 1, cv2.LINE_AA)
         cv2.imshow(window_name, disp)
         k = cv2.waitKey(15) & 0xFF
-        if k in (13, 32):   # Enter / Space
-            if s is not None and e is not None:
-                x = min(s[0], e[0]); y = min(s[1], e[1])
-                w = abs(e[0] - s[0]); h = abs(e[1] - s[1])
-                if w > 1 and h > 1:
+        if k in (13, 32):   # Enter / Space → confirm
+            if b is not None:
+                x, y, w, h = b
+                rx = x if w >= 0 else x + w
+                ry = y if h >= 0 else y + h
+                rw, rh = abs(w), abs(h)
+                if rw > 1 and rh > 1:
                     cv2.destroyWindow(window_name)
-                    return (x, y, w, h)
-        elif k == ord('r'):
-            state["start"] = state["end"] = None
-            state["active"] = False
-        elif k in (27, ord('c')):   # Esc / c
+                    return (int(rx), int(ry), int(rw), int(rh))
+        elif k == ord('r'):                         # vẽ lại
+            st["box"] = None; st["mode"] = None
+        elif k in (27, ord('c')):                   # Esc / c → cancel
             cv2.destroyWindow(window_name)
             return (0, 0, 0, 0)
 
