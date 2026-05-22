@@ -241,7 +241,7 @@ def _load_image_cached(path: str):
 
 
 def proc_acquire_image(inputs, params):
-    """CogAcqFifoTool — Acquire image từ file đơn hoặc folder (frame index).
+    """TAcqFifoTool — Acquire image từ file đơn hoặc folder (frame index).
 
     Ưu tiên: folder_path > file_path.
     Khi folder_path là thư mục có ảnh, sẽ lấy ảnh tại index `frame_index`
@@ -299,7 +299,7 @@ def proc_acquire_image(inputs, params):
             "frame_number": 0, "file_name": "", "frame_count": 0}
 
 def proc_camera_acquire(inputs, params):
-    """CogAcqFifoTool (Camera) — Capture từ OpenCV/USB hoặc HikRobot/Do3think MVS."""
+    """TAcqFifoTool (Camera) — Capture từ OpenCV/USB hoặc HikRobot/Do3think MVS."""
     backend = (params.get("backend") or "OpenCV").strip()
     try:
         from core.camera import CameraRegistry, CameraError
@@ -422,7 +422,7 @@ def _apply_extra_terminals(out: dict, objects: list, params: dict):
 
 def proc_patmax(inputs, params):
     """
-    CogPatMaxPatternAlignTool — dùng PatMaxEngine.
+    TPatMaxPatternAlignTool — dùng PatMaxEngine.
     Model được train trong PatMaxDialog (double-click node).
     Hỗ trợ multi-pattern: nếu params có "_patmax_models" (list) sẽ search
     qua tất cả models và gộp kết quả qua run_patmax_multi.
@@ -639,7 +639,7 @@ def proc_patmax_align(inputs, params):
 
 def proc_patfind(inputs, params):
     """
-    CogPMAlignTool — PatFind nhanh (NCC), dùng chung PatMaxEngine nhưng không xoay.
+    TPMAlignTool — PatFind nhanh (NCC), dùng chung PatMaxEngine nhưng không xoay.
     """
     from core.patmax_engine import (PatMaxModel, run_patmax,
                                      draw_patmax_results, _empty_vis)
@@ -687,7 +687,7 @@ def proc_patfind(inputs, params):
 
 def proc_fixture(inputs, params):
     """
-    CogFixtureTool — Thiết lập hệ tọa độ dựa trên PatMax result.
+    TFixtureTool — Thiết lập hệ tọa độ dựa trên PatMax result.
     Giúp các tool sau bất biến với vị trí/góc của part.
     """
     img   = inputs.get("image")
@@ -732,7 +732,7 @@ def proc_fixture(inputs, params):
 
 def proc_caliper(inputs, params):
     """
-    CogCaliperTool — Đo cạnh (edge) chính xác sub-pixel,
+    TCaliperTool — Đo cạnh (edge) chính xác sub-pixel,
     đo khoảng cách giữa 2 cạnh (Width measurement).
     """
     img = inputs.get("image")
@@ -836,7 +836,7 @@ def proc_caliper(inputs, params):
             "width":width_mm,"pass":is_pass,"edges_found":len(edges)}
 
 def proc_caliper_multi(inputs, params):
-    """CogCaliperTool (Multi-edge) — Tìm tất cả cạnh trong vùng."""
+    """TCaliperTool (Multi-edge) — Tìm tất cả cạnh trong vùng."""
     img = inputs.get("image")
     if img is None:
         return {"image":None,"edges":[],"count":0,"pass":False}
@@ -879,7 +879,7 @@ def proc_caliper_multi(inputs, params):
 
 def proc_blob(inputs, params):
     """
-    CogBlobTool — Phân tích vùng (blob) toàn diện:
+    TBlobTool — Phân tích vùng (blob) toàn diện:
     diện tích, chu vi, circularity, bounding box, centroid, orientation.
 
     Auto downscale: threshold + findContours chạy trên ảnh ~1.5MP
@@ -1148,7 +1148,7 @@ def proc_blob(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_find_line(inputs, params):
-    """CogFindLineTool — Tìm đường thẳng từ các điểm edge (least-squares).
+    """TFindLineTool — Tìm đường thẳng từ các điểm edge (least-squares).
 
     Tối ưu: chỉ Canny trong band ROI (không phải full ảnh) → giảm hẳn
     cost cho ảnh lớn. Auto downscale band rộng nếu ảnh > 1.5MP.
@@ -1212,7 +1212,7 @@ def proc_find_line(inputs, params):
             "point_x": px, "point_y": py, "pass": is_pass}
 
 def proc_find_circle(inputs, params):
-    """CogFindCircleTool — Tìm & fit đường tròn chính xác."""
+    """TFindCircleTool — Tìm & fit đường tròn chính xác."""
     img = inputs.get("image")
     if img is None:
         return {"image":None,"found":False,"cx":0.0,"cy":0.0,
@@ -1263,7 +1263,7 @@ def proc_find_circle(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_color_picker(inputs, params):
-    """CogColorTool (Picker) — Click chuột lấy màu → xuất HSV/RGB range."""
+    """TColorTool (Picker) — Click chuột lấy màu → xuất HSV/RGB range."""
     img=inputs.get("image")
     if img is None:
         return {"image":None,"color_hsv":None,"h":0,"s":0,"v":0,"r":0,"g":0,"b":0}
@@ -1408,7 +1408,7 @@ def _draw_shape_outline(vis: np.ndarray, shape_type: str,
 
 
 def proc_color_segment(inputs, params):
-    """CogColorSegmenterTool — Phân đoạn theo không gian màu, xuất mask + ratio.
+    """TColorSegmenterTool — Phân đoạn theo không gian màu, xuất mask + ratio.
 
     Hỗ trợ `color_space`: HSV (default) / RGB / HSL / Lab / Gray. Mỗi mode
     có bộ low/high riêng (visible_if ẩn các slider không thuộc mode hiện
@@ -1601,7 +1601,7 @@ def proc_color_segment(inputs, params):
     return out
 
 def proc_color_match(inputs, params):
-    """CogColorMatchTool — So khớp màu trung bình trong ROI với màu tham chiếu."""
+    """TColorMatchTool — So khớp màu trung bình trong ROI với màu tham chiếu."""
     img=inputs.get("image")
     if img is None:
         return {"image":None,"pass":False,"delta_e":0.0,"mean_r":0,"mean_g":0,"mean_b":0}
@@ -1640,7 +1640,7 @@ def proc_color_match(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_id_reader(inputs, params):
-    """CogIDReaderTool — Đọc Barcode 1D/2D, QR, DataMatrix."""
+    """TIDReaderTool — Đọc Barcode 1D/2D, QR, DataMatrix."""
     img=inputs.get("image")
     if img is None: return {"image":None,"data":"","symbology":"","pass":False}
     gray=_gray(img); vis=_bgr(img.copy())
@@ -1721,7 +1721,7 @@ def _get_easyocr_reader(langs: List[str]):
     return r
 
 def proc_ocr_max(inputs, params):
-    """CogOCRMaxTool — Đọc & xác nhận ký tự (OCR).
+    """TOCRMaxTool — Đọc & xác nhận ký tự (OCR).
 
     Engines:
       • tesseract — pytesseract + Tesseract binary + langpack hệ thống
@@ -1855,7 +1855,7 @@ def proc_ocr_max(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_distance_point(inputs, params):
-    """CogDistancePointPointTool — Đo khoảng cách 2 điểm.
+    """TDistancePointPointTool — Đo khoảng cách 2 điểm.
 
     Calibration modes:
       • "Scale": mm = px × pixel_to_mm (mặc định, back-compat).
@@ -1940,7 +1940,7 @@ def proc_distance_point(inputs, params):
 
 
 def proc_distance_point_line(inputs, params):
-    """CogDistancePointLineTool — Khoảng cách (vuông góc) từ 1 điểm đến
+    """TDistancePointLineTool — Khoảng cách (vuông góc) từ 1 điểm đến
     1 đường thẳng. Đường thẳng định nghĩa theo 1 trong 2 mode:
       - "Two Points":   (lx1, ly1) → (lx2, ly2)
       - "Point + Angle": qua (lx1, ly1) hợp với trục X góc `line_angle` (độ)
@@ -2037,7 +2037,7 @@ def proc_distance_point_line(inputs, params):
             "pass": is_pass}
 
 def proc_angle_lines(inputs, params):
-    """CogAngleLineLineTool — Đo góc giữa 2 đường thẳng."""
+    """TAngleLineLineTool — Đo góc giữa 2 đường thẳng."""
     img=inputs.get("image")
     a1=float(inputs.get("angle1",params.get("line1_angle",0.0)))
     a2=float(inputs.get("angle2",params.get("line2_angle",45.0)))
@@ -2092,7 +2092,7 @@ def proc_area(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_image_convert(inputs, params):
-    """CogImageConvertTool — Chuyển đổi định dạng ảnh.
+    """TImageConvertTool — Chuyển đổi định dạng ảnh.
     Grayscale mode trả ảnh 1-channel (downstream _gray/_bgr xử lý được);
     bỏ double-convert BGR→GRAY→BGR thừa của bản cũ.
     """
@@ -2426,7 +2426,7 @@ def proc_find_contours(inputs, params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_calibrate_grid(inputs, params):
-    """CogCalibCheckerboardTool — Hiệu chỉnh camera từ checkerboard.
+    """TCalibCheckerboardTool — Hiệu chỉnh camera từ checkerboard.
 
     Coarse-then-refine: findChessboardCorners chạy trên ảnh downscaled
     (~1.5MP) với FAST_CHECK flag, scale corners ngược về full-res rồi
@@ -2496,7 +2496,7 @@ def proc_judge(inputs,params):
     return {"result":result,"pass":result}
 
 def proc_script(inputs,params):
-    """CogScriptTool — Chạy Python expression tùy chỉnh."""
+    """TScriptTool — Chạy Python expression tùy chỉnh."""
     expr=params.get("expression","result = True")
     ctx={"inputs":inputs,"params":params,"result":False,"pass_value":False,**inputs}
     try: exec(expr,ctx)
@@ -2511,7 +2511,7 @@ def proc_script(inputs,params):
 # ═══════════════════════════════════════════════════════════════════
 
 def proc_display(inputs,params):
-    """CogRecordDisplayTool — Annotate & display image."""
+    """TRecordDisplayTool — Annotate & display image."""
     img=inputs.get("image")
     if img is None: return {"image":None}
     vis=_bgr(img.copy())
@@ -2615,7 +2615,7 @@ def proc_message(inputs, params):
 
 
 def proc_save_image(inputs,params):
-    """CogSaveImageTool — Lưu ảnh ra file."""
+    """TSaveImageTool — Lưu ảnh ra file."""
     img=inputs.get("image")
     if img is None: return {"saved":False,"path":""}
     import os,time
@@ -3092,7 +3092,7 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
   ToolDef("acquire_image","Acquire Image","Acquire Image",
-    "Load ảnh từ file hoặc folder — CogAcqFifoTool","#0f3460","🖼",
+    "Load ảnh từ file hoặc folder — TAcqFifoTool","#0f3460","🖼",
     [],[PortDef("image","image"),PortDef("width","number"),PortDef("height","number"),
         PortDef("acquired","bool"),PortDef("frame_number","number"),
         PortDef("frame_count","number"),PortDef("file_name","str")],
@@ -3112,10 +3112,10 @@ TOOL_REGISTRY: List[ToolDef] = [
               tooltip="Đường dẫn 1 file ảnh",
               visible_if={"source_mode":"File"}),
      P("width","Width","int",640,1,8192),P("height","Height","int",480,1,8192)],
-    proc_acquire_image, "CogAcqFifoTool"),
+    proc_acquire_image, "TAcqFifoTool"),
 
   ToolDef("camera_acquire","Camera Acquire","Acquire Image",
-    "Capture từ camera (OpenCV / HikRobot / Do3think) — CogAcqFifoTool","#0f3460","📷",
+    "Capture từ camera (OpenCV / HikRobot / Do3think) — TAcqFifoTool","#0f3460","📷",
     [],[PortDef("image","image"),PortDef("width","number"),PortDef("height","number"),
         PortDef("acquired","bool")],
     [P("backend","Backend","enum","OpenCV",
@@ -3144,11 +3144,11 @@ TOOL_REGISTRY: List[ToolDef] = [
                 "Tắt nếu cần single-frame chính xác lúc PLC trigger.",
         visible_if={"backend":"HikRobot/Do3think"}),
      P("timeout_ms","Grab timeout (ms)","int",1000,10,30000)],
-    proc_camera_acquire, "CogAcqFifoTool"),
+    proc_camera_acquire, "TAcqFifoTool"),
 
   # ── PATTERN FIND ────────────────────────────────────────────────
   ToolDef("patmax","Search PatMax","Pattern Find",
-    "Pattern matching nâng cao với xoay góc — CogPatMaxPatternAlignTool",
+    "Pattern matching nâng cao với xoay góc — TPatMaxPatternAlignTool",
     "#16213e","🎯",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
@@ -3173,10 +3173,10 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Hiện origin marker + X/Y axes + label '(x,y)' trên ảnh output."),
      P("show_bbox","Show bounding box","bool",True,
        tooltip="Hiện rotated bounding box + score label trên ảnh output.")],
-    proc_patmax, "CogPatMaxPatternAlignTool"),
+    proc_patmax, "TPatMaxPatternAlignTool"),
 
   ToolDef("patmax_align","PatMax Align Tool","Pattern Find",
-    "PatMax Pattern Align — chọn Algorithm & Train Mode (CogPMAlignTool)",
+    "PatMax Pattern Align — chọn Algorithm & Train Mode (TPMAlignTool)",
     "#16213e","🎯",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
@@ -3204,10 +3204,10 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Hiện origin marker + X/Y axes + label '(x,y)' trên ảnh output."),
      P("show_bbox","Show bounding box","bool",True,
        tooltip="Hiện rotated bounding box + score label trên ảnh output.")],
-    proc_patmax_align, "CogPMAlignTool"),
+    proc_patmax_align, "TPMAlignTool"),
 
   ToolDef("patfind","PatFind","Pattern Find",
-    "Pattern matching nhanh (NCC) — CogPMAlignTool","#16213e","🔍",
+    "Pattern matching nhanh (NCC) — TPMAlignTool","#16213e","🔍",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("found","bool"),PortDef("score","number"),
      PortDef("x","number"),PortDef("y","number"),PortDef("num_found","number")],
@@ -3216,11 +3216,11 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Hiện origin marker + X/Y axes + label '(x,y)' trên ảnh output."),
      P("show_bbox","Show bounding box","bool",True,
        tooltip="Hiện rotated bounding box + score label trên ảnh output.")],
-    proc_patfind, "CogPMAlignTool"),
+    proc_patfind, "TPMAlignTool"),
 
   # ── FIXTURE ─────────────────────────────────────────────────────
   ToolDef("fixture","Fixture","Fixture",
-    "Thiết lập hệ tọa độ theo part — CogFixtureTool","#1a1a2e","📌",
+    "Thiết lập hệ tọa độ theo part — TFixtureTool","#1a1a2e","📌",
     [PortDef("image","image"),
      PortDef("ref_x","number",required=False),
      PortDef("ref_y","number",required=False),
@@ -3229,11 +3229,11 @@ TOOL_REGISTRY: List[ToolDef] = [
      PortDef("offset_x","number"),PortDef("offset_y","number"),PortDef("angle","number")],
     [P("origin_x","Origin X","float",320,0,8192),
      P("origin_y","Origin Y","float",240,0,8192)],
-    proc_fixture, "CogFixtureTool"),
+    proc_fixture, "TFixtureTool"),
 
   # ── CALIPER ─────────────────────────────────────────────────────
   ToolDef("caliper","Caliper","Caliper",
-    "Đo cạnh & khoảng cách 2 cạnh sub-pixel — CogCaliperTool","#1b4332","📐",
+    "Đo cạnh & khoảng cách 2 cạnh sub-pixel — TCaliperTool","#1b4332","📐",
     [PortDef("image","image"),
      PortDef("x1","number",required=False), PortDef("y1","number",required=False),
      PortDef("x2","number",required=False), PortDef("y2","number",required=False)],
@@ -3255,10 +3255,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("max_width","Max Width (mm)","float",9999.0,0,10000),
      P("show_labels","Display: show labels on image","bool",False,
        tooltip="Bật để vẽ label edge (E1:42.5 …) lên ảnh output. Mặc định tắt — số đo vẫn được log ra console.")],
-    proc_caliper, "CogCaliperTool"),
+    proc_caliper, "TCaliperTool"),
 
   ToolDef("caliper_multi","Caliper Multi-Edge","Caliper",
-    "Tìm tất cả cạnh trong vùng — CogCaliperTool","#1b4332","📏",
+    "Tìm tất cả cạnh trong vùng — TCaliperTool","#1b4332","📏",
     [PortDef("image","image"),
      PortDef("x1","number",required=False), PortDef("y1","number",required=False),
      PortDef("x2","number",required=False), PortDef("y2","number",required=False)],
@@ -3269,11 +3269,11 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("edge_threshold","Edge Threshold","float",10.0,0,500),
      P("min_count","Min Edges","int",1,0,100),
      P("max_count","Max Edges","int",100,0,1000)],
-    proc_caliper_multi, "CogCaliperTool"),
+    proc_caliper_multi, "TCaliperTool"),
 
   # ── BLOB ────────────────────────────────────────────────────────
   ToolDef("blob","Blob Analysis","Blob Analysis",
-    "Phân tích vùng: area, circularity, elongation, bounding box — CogBlobTool. "
+    "Phân tích vùng: area, circularity, elongation, bounding box — TBlobTool. "
     "Nối node Morphology phía trước nếu cần lọc nhiễu/vá lỗ.\n"
     "Khi mask đến từ ROI nhỏ hơn image (ví dụ crop_roi → color_segment → blob), "
     "nối crop_roi.x → offset_x, crop_roi.y → offset_y để contour/bbox/centroid "
@@ -3358,11 +3358,11 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Cỡ chữ (font scale OpenCV)."),
      P("label_thickness","Label Thickness","int",1,1,8,use_slider=True,
        tooltip="Độ dày nét chữ.")],
-    proc_blob, "CogBlobTool"),
+    proc_blob, "TBlobTool"),
 
   # ── EDGE / LINE / CIRCLE ────────────────────────────────────────
   ToolDef("find_line","Find Line","Edge & Geometry",
-    "Tìm đường thẳng từ edge — CogFindLineTool","#134074","〰",
+    "Tìm đường thẳng từ edge — TFindLineTool","#134074","〰",
     [PortDef("image","image"),
      PortDef("x1","number",required=False), PortDef("y1","number",required=False),
      PortDef("x2","number",required=False), PortDef("y2","number",required=False)],
@@ -3377,10 +3377,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("max_angle","Max Angle (°)","float",180,-180,180),
      P("downscale","Coarse Downscale","int",0,0,16,
        tooltip="0=auto (target ~1.5MP). Canny chỉ chạy trong ROI band; downscale thêm khi band lớn.")],
-    proc_find_line, "CogFindLineTool"),
+    proc_find_line, "TFindLineTool"),
 
   ToolDef("find_circle","Find Circle","Edge & Geometry",
-    "Fit đường tròn chính xác — CogFindCircleTool","#134074","⭕",
+    "Fit đường tròn chính xác — TFindCircleTool","#134074","⭕",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("found","bool"),PortDef("cx","number"),
      PortDef("cy","number"),PortDef("radius","number"),PortDef("pass","bool")],
@@ -3393,7 +3393,7 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("max_r_check","Max Radius (mm)","float",9999.0,0,10000),
      P("show_labels","Display: show labels on image","bool",False,
        tooltip="Bật để vẽ label 'R=…mm cx=… cy=…' lên ảnh output. Mặc định tắt — vẫn được log.")],
-    proc_find_circle, "CogFindCircleTool"),
+    proc_find_circle, "TFindCircleTool"),
 
   # ── COLOR ───────────────────────────────────────────────────────
   ToolDef("color_picker","Color Picker","Color Analysis",
@@ -3409,10 +3409,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("tolerance","HSV Tolerance","int",20,0,100),
      P("show_labels","Display: show labels on image","bool",False,
        tooltip="Bật để vẽ label 'H S V' cạnh điểm picked lên ảnh output. Mặc định tắt.")],
-    proc_color_picker, "CogColorTool"),
+    proc_color_picker, "TColorTool"),
 
   ToolDef("color_segment","Color Segmentation","Color Analysis",
-    "Phân đoạn màu (HSV/RGB/HSL/Lab/Gray) — CogColorSegmenterTool","#6b2737","🌈",
+    "Phân đoạn màu (HSV/RGB/HSL/Lab/Gray) — TColorSegmenterTool","#6b2737","🌈",
     [PortDef("image","image"),PortDef("color_hsv","any",required=False),
      PortDef("x","number",required=False),PortDef("y","number",required=False),
      PortDef("w","number",required=False),PortDef("h","number",required=False)],
@@ -3512,10 +3512,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("roi_h","ROI H","int",100,1,8192,use_slider=True,
        tooltip="Height khi shape được sinh từ port x/y hoặc fallback khi "
                "port h không kết nối.")],
-    proc_color_segment, "CogColorSegmenterTool"),
+    proc_color_segment, "TColorSegmenterTool"),
 
   ToolDef("color_match","Color Match","Color Analysis",
-    "So khớp màu trung bình ROI — CogColorMatchTool","#6b2737","🎭",
+    "So khớp màu trung bình ROI — TColorMatchTool","#6b2737","🎭",
     [PortDef("image","image"),
      PortDef("x","number",required=False), PortDef("y","number",required=False),
      PortDef("w","number",required=False), PortDef("h","number",required=False)],
@@ -3526,19 +3526,19 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("ref_r","Ref R","int",128,0,255),P("ref_g","Ref G","int",128,0,255),
      P("ref_b","Ref B","int",128,0,255),
      P("max_delta_e","Max ΔE","float",30.0,0,441,tooltip="ΔE Euclidean RGB distance")],
-    proc_color_match, "CogColorMatchTool"),
+    proc_color_match, "TColorMatchTool"),
 
   # ── ID / READ ───────────────────────────────────────────────────
   ToolDef("id_reader","ID Reader","ID & Read",
-    "Đọc Barcode 1D/2D, QR, DataMatrix — CogIDReaderTool","#3d0c02","📦",
+    "Đọc Barcode 1D/2D, QR, DataMatrix — TIDReaderTool","#3d0c02","📦",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("data","any"),
      PortDef("symbology","any"),PortDef("pass","bool")],
     [P("expected_data","Expected Data","str","",tooltip="Để trống = chấp nhận mọi code")],
-    proc_id_reader, "CogIDReaderTool"),
+    proc_id_reader, "TIDReaderTool"),
 
   ToolDef("ocr_max","OCR Max","ID & Read",
-    "Nhận dạng & xác nhận ký tự — CogOCRMaxTool. "
+    "Nhận dạng & xác nhận ký tự — TOCRMaxTool. "
     "Engine 'auto' tự fallback tesseract→easyocr. "
     "Cài: pip install pytesseract (+ tesseract-ocr binary & langpack vie) "
     "hoặc pip install easyocr (không cần binary, tốt cho tiếng Việt + nền phức tạp).",
@@ -3564,11 +3564,11 @@ TOOL_REGISTRY: List[ToolDef] = [
         tooltip="Đảo trắng-đen (cho text sáng trên nền tối)."),
      P("expected_text","Expected Text","str",""),
      P("min_confidence","Min Confidence (%)","float",60.0,0,100)],
-    proc_ocr_max, "CogOCRMaxTool"),
+    proc_ocr_max, "TOCRMaxTool"),
 
   # ── MEASUREMENT ─────────────────────────────────────────────────
   ToolDef("dist_point","Distance Point-Point","Measurement",
-    "Đo khoảng cách 2 điểm — CogDistancePointPointTool. "
+    "Đo khoảng cách 2 điểm — TDistancePointPointTool. "
     "Calib 'Two Points' = nội suy tuyến tính từ 2 cặp (px, mm) đã đo.",
     "#134074","↔",
     [PortDef("image","image",required=False),
@@ -3615,10 +3615,10 @@ TOOL_REGISTRY: List[ToolDef] = [
        choices=["Simplex","Plain","Duplex","Complex","Triplex"]),
      P("label_size","Label Size","float",0.6,0.2,3.0,step=0.05,use_slider=True),
      P("label_thickness","Label Thickness","int",2,1,8,use_slider=True)],
-    proc_distance_point, "CogDistancePointPointTool"),
+    proc_distance_point, "TDistancePointPointTool"),
 
   ToolDef("dist_point_line","Distance Point-Line","Measurement",
-    "Khoảng cách vuông góc từ điểm đến đường thẳng — CogDistancePointLineTool",
+    "Khoảng cách vuông góc từ điểm đến đường thẳng — TDistancePointLineTool",
     "#134074","⊥",
     [PortDef("image","image",required=False),
      PortDef("px","number",required=False), PortDef("py","number",required=False),
@@ -3645,10 +3645,10 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("max_dist","Max (mm)","float",9999.0,0,100000),
      P("show_labels","Display: show labels on image","bool",False,
        tooltip="Bật để vẽ label '…mm' giữa điểm và chân đường vuông góc.")],
-    proc_distance_point_line, "CogDistancePointLineTool"),
+    proc_distance_point_line, "TDistancePointLineTool"),
 
   ToolDef("angle_lines","Angle Line-Line","Measurement",
-    "Đo góc giữa 2 đường — CogAngleLineLineTool","#134074","∠",
+    "Đo góc giữa 2 đường — TAngleLineLineTool","#134074","∠",
     [PortDef("image","image",required=False),
      PortDef("angle1","number",required=False),PortDef("angle2","number",required=False)],
     [PortDef("image","image"),PortDef("angle","number"),PortDef("pass","bool")],
@@ -3656,7 +3656,7 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("line2_angle","Line 2 Angle (°)","float",45,-180,180,step=0.1),
      P("min_angle","Min Angle (°)","float",0,0,180),
      P("max_angle","Max Angle (°)","float",90,0,180)],
-    proc_angle_lines, "CogAngleLineLineTool"),
+    proc_angle_lines, "TAngleLineLineTool"),
 
   ToolDef("area_measure","Area Measure","Measurement",
     "Đo diện tích vùng từ mask/contours","#134074","⬛",
@@ -3669,7 +3669,7 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("max_area","Max Area (mm²)","float",1e9,0,1e9),
      P("show_labels","Display: show labels on image","bool",False,
        tooltip="Bật để vẽ label area cạnh từng contour lên ảnh output. Mặc định tắt.")],
-    proc_area, "CogMeasureRectangleTool"),
+    proc_area, "TMeasureRectangleTool"),
 
   # ── SURFACE INSPECTION ──────────────────────────────────────────
   ToolDef("surface_defect","Surface Defect","Surface Inspection",
@@ -3704,11 +3704,11 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   # ── IMAGE PROCESSING ────────────────────────────────────────────
   ToolDef("image_convert","Image Convert","Image Processing",
-    "Chuyển đổi format ảnh — CogImageConvertTool","#2c3e50","🔄",
+    "Chuyển đổi format ảnh — TImageConvertTool","#2c3e50","🔄",
     [PortDef("image","image")],[PortDef("image","image")],
     [P("mode","Mode","enum","Grayscale",
        choices=["Grayscale","BGR to RGB","Invert","HSV","LAB","YCrCb"])],
-    proc_image_convert, "CogImageConvertTool"),
+    proc_image_convert, "TImageConvertTool"),
 
   ToolDef("crop_roi","Crop ROI","Image Processing",
     "Cắt vùng ROI — nhận x/y/w/h từ PatMax để tracking.\n"
@@ -3800,7 +3800,7 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   # ── CALIBRATION ─────────────────────────────────────────────────
   ToolDef("calibrate_grid","Calibrate (Checkerboard)","Calibration",
-    "Hiệu chỉnh camera từ checkerboard — CogCalibCheckerboardTool",
+    "Hiệu chỉnh camera từ checkerboard — TCalibCheckerboardTool",
     "#1a472a","📋",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("calibrated","bool"),
@@ -3810,7 +3810,7 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("square_size_mm","Square Size (mm)","float",25.4,0.1,1000,step=0.1),
      P("downscale","Coarse Downscale","int",0,0,16,
        tooltip="0=auto. findChessboardCorners coarse trên ảnh nhỏ, cornerSubPix refine full-res → cùng độ chính xác sub-pixel.")],
-    proc_calibrate_grid, "CogCalibCheckerboardTool"),
+    proc_calibrate_grid, "TCalibCheckerboardTool"),
 
   # ── LOGIC & FLOW ────────────────────────────────────────────────
   ToolDef("logic_and","AND Gate","Logic & Flow","Logic AND","#1c1c2e","∧",
@@ -3842,24 +3842,24 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_judge,""),
 
   ToolDef("script","Script Tool","Logic & Flow",
-    "Chạy Python expression tùy chỉnh — CogScriptTool","#1c1c2e","🐍",
+    "Chạy Python expression tùy chỉnh — TScriptTool","#1c1c2e","🐍",
     [PortDef("A","any",required=False),PortDef("B","any",required=False),
      PortDef("C","any",required=False)],
     [PortDef("result","bool"),PortDef("pass","bool"),PortDef("output","any")],
     [P("expression","Python Expression","str","result = True",
        tooltip="Dùng: inputs['A'], inputs['B'], result=True/False, output=value")],
-    proc_script,"CogScriptTool"),
+    proc_script,"TScriptTool"),
 
   # ── OUTPUT / DISPLAY ────────────────────────────────────────────
   ToolDef("display","Display","Output & Display",
-    "Annotate & hiển thị ảnh kết quả — CogRecordDisplayTool",
+    "Annotate & hiển thị ảnh kết quả — TRecordDisplayTool",
     "#0d1117","🖥",
     [PortDef("image","image"),PortDef("pass","bool",required=False)],
     [PortDef("image","image")],
     [P("label","Label Text","str",""),P("tx","Text X","int",10,0,8192),
      P("ty","Text Y","int",30,0,8192),P("font_scale","Font Scale","float",0.8,0.1,5,step=0.1),
      P("show_result","Show PASS/FAIL","bool",True)],
-    proc_display,"CogRecordDisplayTool"),
+    proc_display,"TRecordDisplayTool"),
 
   ToolDef("message","Message","Output & Display",
     "Hiển thị message khác nhau theo port pass (PASS/FAIL/NONE). "
@@ -3896,12 +3896,12 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_message, ""),
 
   ToolDef("save_image","Save Image","Output & Display",
-    "Lưu ảnh ra file — CogSaveImageTool","#0d1117","💾",
+    "Lưu ảnh ra file — TSaveImageTool","#0d1117","💾",
     [PortDef("image","image")],
     [PortDef("saved","bool"),PortDef("path","any")],
     [P("save_path","Save Path","str","output/result.png"),
      P("timestamp","Add Timestamp","bool",True)],
-    proc_save_image,"CogSaveImageTool"),
+    proc_save_image,"TSaveImageTool"),
 
   ToolDef("csv_log","CSV Logger","Output & Display",
     "Ghi kết quả vào CSV log file","#0d1117","📊",

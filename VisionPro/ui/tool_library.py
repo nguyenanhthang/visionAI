@@ -219,7 +219,7 @@ class ToolLibraryPanel(QWidget):
         title.setStyleSheet("background:#060a14; border-bottom:1px solid #1e2d45;")
         tl = QVBoxLayout(title)
         tl.setContentsMargins(12, 6, 12, 6)
-        t1 = QLabel("⬡  COGNEX TOOL LIBRARY")
+        t1 = QLabel("⬡  T TOOL LIBRARY")
         t1.setStyleSheet("color:#00d4ff; font-size:10px; font-weight:700; letter-spacing:2px;")
         t2 = QLabel(f"{len(TOOL_REGISTRY)} tools")
         t2.setStyleSheet("color:#1e2d45; font-size:9px;")
