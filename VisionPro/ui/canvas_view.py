@@ -1,5 +1,5 @@
 """
-ui/canvas_view.py — v5 Cognex style
+ui/canvas_view.py — v5 T style
 Thêm view_in_viewer signal, giữ nguyên connection logic đã fix.
 """
 from __future__ import annotations

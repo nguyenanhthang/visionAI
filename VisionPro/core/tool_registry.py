@@ -1,6 +1,6 @@
 """
-core/tool_registry.py — Cognex VisionPro Style
-Tools mô phỏng Cognex VisionPro: PatMax, Caliper, Blob, Edge, Color,
+core/tool_registry.py — T VisionPro Style
+Tools mô phỏng T VisionPro: PatMax, Caliper, Blob, Edge, Color,
 Barcode, OCR, Fixture, Calibration, Display, Logic, Communication.
 Giữ nguyên kiến trúc kéo-thả pipeline.
 """
@@ -52,7 +52,7 @@ class ToolDef:
     outputs: List[PortDef]
     params: List[ParamDef]
     process_fn: Callable
-    cognex_equiv: str = ""   # Tên tool tương đương trong Cognex
+    T_equiv: str = ""   # Tên tool tương đương trong T
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -555,7 +555,7 @@ def _is_gray_image(img) -> bool:
 
 def proc_patmax_align(inputs, params):
     """
-    PatMax Align Tool — dispatch theo Algorithm + Train Mode (Cognex-style
+    PatMax Align Tool — dispatch theo Algorithm + Train Mode (T-style
     behavioral approximation). Validate input gray; nếu không gray trả ảnh
     gốc + found=False (UI dialog popup cảnh báo khi user ấn Train).
     """
@@ -770,7 +770,7 @@ def proc_caliper(inputs, params):
     ys = np.clip(ys,0,gray.shape[0]-1)
     profile = gray[ys, xs].astype(float)
 
-    # Gaussian derivative (Cognex-style edge filter)
+    # Gaussian derivative (T-style edge filter)
     sigma = filter_half
     kernel_size = 2*filter_half*3+1
     t = np.arange(-filter_half*3, filter_half*3+1)

@@ -1563,8 +1563,8 @@ class NodeDetailDialog(QDialog):
         tc = QVBoxLayout()
         t1 = QLabel(tool.name)
         t1.setStyleSheet("color:#fff; font-size:16px; font-weight:700; background:transparent;")
-        cog = f"  {tool.cognex_equiv}" if tool.cognex_equiv else ""
-        t2 = QLabel(f"{tool.category}{cog}  •  {tool.description}")
+        T = f"  {tool.T_equiv}" if tool.T_equiv else ""
+        t2 = QLabel(f"{tool.category}{T}  •  {tool.description}")
         t2.setStyleSheet("color:#ffffff88; font-size:11px; background:transparent;")
         tc.addWidget(t1); tc.addWidget(t2)
         hl.addLayout(tc, 1)

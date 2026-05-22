@@ -1,6 +1,6 @@
 """
-ui/node_item.py — Cognex VisionPro style
-Hiển thị Cognex tool name, tooltip params, port colors.
+ui/node_item.py — T VisionPro style
+Hiển thị T tool name, tooltip params, port colors.
 """
 from __future__ import annotations
 from typing import Optional, List, TYPE_CHECKING
@@ -407,7 +407,7 @@ class NodeItem(QGraphicsItem):
         self._color       = QColor(tool.color)
         self._icon        = tool.icon
         self._name        = tool.name
-        self._cognex_name = tool.cognex_equiv
+        self._T_name = tool.T_equiv
 
         self._in_ports:  List[PortItem] = []
         self._out_ports: List[PortItem] = []
@@ -416,8 +416,8 @@ class NodeItem(QGraphicsItem):
 
         # Tooltip
         tip = f"<b>{tool.name}</b>"
-        if tool.cognex_equiv:
-            tip += f"<br><span style='color:#00d4ff'>{tool.cognex_equiv}</span>"
+        if tool.T_equiv:
+            tip += f"<br><span style='color:#00d4ff'>{tool.T_equiv}</span>"
         tip += f"<br>{tool.description}"
         self.setToolTip(tip)
 
@@ -529,12 +529,12 @@ class NodeItem(QGraphicsItem):
         painter.drawText(QRectF(36, 2, self._w - 42, NODE_HEADER_H // 2 + 2),
                          Qt.AlignVCenter | Qt.AlignLeft, self._name)
 
-        # Cognex equiv name (small, cyan)
-        if self._cognex_name:
+        # T equiv name (small, cyan)
+        if self._T_name:
             painter.setFont(QFont("Segoe UI", 6))
             painter.setPen(QPen(QColor(0, 212, 255, 180)))
             painter.drawText(QRectF(36, NODE_HEADER_H // 2, self._w - 42, NODE_HEADER_H // 2),
-                             Qt.AlignVCenter | Qt.AlignLeft, self._cognex_name)
+                             Qt.AlignVCenter | Qt.AlignLeft, self._T_name)
 
         # Status badge
         if status in ("pass", "fail", "error", "running"):

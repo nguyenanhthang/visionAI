@@ -1,6 +1,6 @@
 """
-ui/tool_library.py — Cognex VisionPro style
-Panel thư viện tool bên trái — categories theo Cognex.
+ui/tool_library.py — T VisionPro style
+Panel thư viện tool bên trái — categories theo T.
 """
 from __future__ import annotations
 from typing import Dict, List
@@ -12,7 +12,7 @@ from PySide6.QtGui import (QDrag, QPixmap, QPainter, QColor, QFont, QMouseEvent,
 
 from core.tool_registry import TOOL_REGISTRY, CATEGORIES, ToolDef
 
-# Category accent colors (Cognex-inspired)
+# Category accent colors (T-inspired)
 CAT_COLORS = {
     "Acquire Image":     "#0f3460",
     "Pattern Find":      "#16213e",
@@ -71,10 +71,10 @@ class ToolButton(QFrame):
             }}
         """)
 
-        # Tooltip: name + cognex equiv + description
+        # Tooltip: name + T equiv + description
         tip = f"<b>{tool.name}</b>"
-        if tool.cognex_equiv:
-            tip += f"<br><i style='color:#00d4ff'>{tool.cognex_equiv}</i>"
+        if tool.T_equiv:
+            tip += f"<br><i style='color:#00d4ff'>{tool.T_equiv}</i>"
         tip += f"<br>{tool.description}"
         self.setToolTip(tip)
 
@@ -87,9 +87,9 @@ class ToolButton(QFrame):
             "color:#e2e8f0; font-size:12px; font-weight:600; "
             "background:transparent; border:none;")
 
-        # Show Cognex equivalent in small text
-        if tool.cognex_equiv:
-            bot_row = QLabel(tool.cognex_equiv)
+        # Show T equivalent in small text
+        if tool.T_equiv:
+            bot_row = QLabel(tool.T_equiv)
             bot_row.setStyleSheet(
                 "color:#00d4ff; font-size:9px; font-style:italic; "
                 "background:transparent; border:none;")
@@ -197,7 +197,7 @@ class CategorySection(QWidget):
         for btn in self._buttons:
             vis = (text.lower() in btn.tool.name.lower() or
                    text.lower() in btn.tool.description.lower() or
-                   text.lower() in btn.tool.cognex_equiv.lower())
+                   text.lower() in btn.tool.T_equiv.lower())
             btn.setVisible(vis)
             any_vis = any_vis or vis
         self.setVisible(any_vis or not text)
@@ -228,7 +228,7 @@ class ToolLibraryPanel(QWidget):
 
         # Search
         self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  Search tools or Cognex name...")
+        self._search.setPlaceholderText("🔍  Search tools or T name...")
         self._search.setStyleSheet("""
             QLineEdit {
                 background:#0a0e1a; border:none;

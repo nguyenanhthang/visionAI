@@ -1,7 +1,7 @@
 """
 ui/patmax_dialog.py
-PatMax Training & Search Dialog — mô phỏng CogPatMaxPatternAlignTool
-Cognex VisionPro style:
+PatMax Training & Search Dialog — mô phỏng TPatMaxPatternAlignTool
+T VisionPro style:
   - Tab TRAIN: vẽ ROI trên ảnh, set origin, train, xem model preview
   - Tab SEARCH: chạy search, xem kết quả, score map, multi-result table
   - Tab SETTINGS: các params search (angle range, scale, threshold, ...)
@@ -87,7 +87,7 @@ class PatMaxDialog(QDialog):
             "stop:0 #16213e,stop:1 #0a0e1a);"
             "border-bottom:1px solid #1e2d45;")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(16,0,16,0)
-        logo = QLabel("🎯  CogPatMaxPatternAlignTool")
+        logo = QLabel("🎯  TPatMaxPatternAlignTool")
         logo.setStyleSheet(
             "color:#00d4ff; font-size:14px; font-weight:700; "
             "letter-spacing:1px; background:transparent;")
