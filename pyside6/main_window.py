@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 import config
 from login_window import StatusDot, make_brand_pixmap
 from plc_worker import SimulatedPLCWorker, PanasonicPLCWorker
+from scanner import ProductScanner
 
 
 # ── tiny widgets ─────────────────────────────────────────────────
@@ -347,6 +348,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._setup_clock()
         self._setup_plc()
+        self._setup_product_scanner()
 
         self._log("Đăng nhập thành công", "SYS",
                   detail=f"{employee_id} — {self.employee_name}")
@@ -656,6 +658,50 @@ class MainWindow(QMainWindow):
         self.sb_plc.dot.set_color("#7d8590")
         self._log("PLC disconnected", "PLC")
 
+    # ── product scanner wiring ───────────────────────────────
+    def _setup_product_scanner(self):
+        self._scan_thread = QThread(self)
+        self.product_scanner = ProductScanner(
+            port=config.SCANNER_PORT,
+            baudrate=config.SCANNER_BAUDRATE,
+            read_size=config.PRODUCT_READ_SIZE,
+            serial_timeout=config.SCANNER_TIMEOUT,
+            sn_check_prefix=config.sn_link1,
+            sn_check_suffix=config.sn_link2,
+            plc_port=config.PLC_PORT,
+            plc_baud=config.PLC_BAUDRATE,
+            request_timeout=config.API_REQUEST_TIMEOUT,
+        )
+        self.product_scanner.moveToThread(self._scan_thread)
+        self._scan_thread.started.connect(self.product_scanner.run)
+        self.product_scanner.connected.connect(self._on_scanner_connected)
+        self.product_scanner.disconnected.connect(self._on_scanner_disconnected)
+        self.product_scanner.scanned.connect(self._on_product_scanned)
+        self.product_scanner.verdict.connect(self._on_product_verdict)
+        self.product_scanner.error.connect(lambda e: self._log(e, "SYS", level="err"))
+        self.product_scanner.finished.connect(self._scan_thread.quit)
+        self._scan_thread.start()
+
+    def _on_scanner_connected(self, port: str):
+        self._set_chip(self.scanner_chip, f"Scanner {port}", "#2ea043")
+        self.sb_scanner.dot.set_color("#2ea043")
+        self.sb_scanner.lbl.setText(f"Scanner · {port}")
+        self._log(f"Scanner sản phẩm sẵn sàng ({port})", "SYS", level="ok")
+
+    def _on_scanner_disconnected(self):
+        self._set_chip(self.scanner_chip, "Scanner offline", "#7d8590")
+        self.sb_scanner.dot.set_color("#7d8590")
+
+    def _on_product_scanned(self, code: str):
+        self._product_lbl.setText(code)
+        self._log(f"Đã quét mã SP: {code}", "SYS")
+
+    def _on_product_verdict(self, code: str, api_ok: bool, plc_value: int):
+        tag = "OK" if api_ok else "NG"
+        level = "ok" if api_ok else "err"
+        api_txt = "200 OK" if api_ok else "fail"
+        self._log(f"{code} → API {api_txt}, ghi D250={plc_value}", tag, level=level)
+
     def _on_plc_result(self, data: dict):
         pid = data.get("product_id", "")
         ok = data.get("ok")
@@ -727,6 +773,12 @@ class MainWindow(QMainWindow):
 
     # ── close ────────────────────────────────────────────────
     def closeEvent(self, e):
+        try:
+            self.product_scanner.stop()
+            self._scan_thread.quit()
+            self._scan_thread.wait(1500)
+        except Exception:
+            pass
         try:
             self.plc.stop()
             self._plc_thread.quit()

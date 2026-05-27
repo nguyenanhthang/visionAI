@@ -3,8 +3,9 @@
 # ── Barcode scanner (badge reader) ──────────────────────────
 SCANNER_PORT       = "COM4"
 SCANNER_BAUDRATE   = 9600
-SCANNER_READ_SIZE  = 8       # số byte tối đa cho 1 lần đọc
+SCANNER_READ_SIZE  = 8       # số byte tối đa cho 1 lần đọc badge
 SCANNER_TIMEOUT    = 0.5     # giây - càng nhỏ stop càng nhanh
+PRODUCT_READ_SIZE  = 64      # số byte tối đa cho 1 lần đọc mã sản phẩm
 
 # ── API xác thực nhân viên ─────────────────────────────────
 # Để rỗng → fallback dùng employees.py local.
