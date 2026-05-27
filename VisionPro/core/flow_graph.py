@@ -187,6 +187,86 @@ class FlowGraph:
         return [c for c in self.connections
                 if c.src_id == node_id or c.dst_id == node_id]
 
+    # Tên port được auto-bind từ upstream khi chưa wired. Giảm spaghetti
+    # cho 2 channel hay dùng nhất: ảnh (gần như mọi tool đều cần) và mask
+    # (blob/threshold/morphology/find_contours/area_measure).
+    _IMPLICIT_CHANNELS = ("image", "mask")
+
+    def _implicit_sources(
+        self,
+        nodes: Dict[str, "NodeInstance"],
+        in_edges: Dict[str, set],
+    ) -> Dict[Tuple[str, str], str]:
+        """Cho mỗi (node_id, channel) chưa wired, trả node_id "latest"
+        cung cấp channel đó trong topo order. Hai bước:
+          1. BFS upstream qua connections — ưu tiên (đảm bảo causal).
+          2. Fallback: latest producer trong topo order trước node hiện
+             tại (cho phép bỏ wire image dư thừa mà pipeline vẫn chạy).
+        Caller phải add các implicit dep này vào in_edges/out_edges để
+        parallel scheduler đợi producer xong trước consumer.
+        """
+        out_adj: Dict[str, set] = {nid: set() for nid in nodes}
+        parent_of: Dict[str, List[str]] = {}
+        for c in self.connections:
+            if c.src_id in nodes and c.dst_id in nodes:
+                out_adj[c.src_id].add(c.dst_id)
+                parent_of.setdefault(c.dst_id, []).append(c.src_id)
+
+        in_count = {nid: len(deps) for nid, deps in in_edges.items()}
+        in_count_w = dict(in_count)
+        ready = [nid for nid, cnt in in_count_w.items() if cnt == 0]
+        topo: List[str] = []
+        while ready:
+            nid = ready.pop(0)
+            topo.append(nid)
+            for succ in out_adj.get(nid, ()):
+                in_count_w[succ] -= 1
+                if in_count_w[succ] == 0:
+                    ready.append(succ)
+
+        wired_in: set = {(c.dst_id, c.dst_port)
+                         for c in self.connections
+                         if c.src_id in nodes and c.dst_id in nodes}
+
+        implicit: Dict[Tuple[str, str], str] = {}
+
+        def bfs_upstream(nid: str, ch: str) -> Optional[str]:
+            visited = {nid}
+            queue: List[str] = list(parent_of.get(nid, []))
+            while queue:
+                cur = queue.pop(0)
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                node = nodes.get(cur)
+                if node and any(p.name == ch for p in node.tool.outputs):
+                    return cur
+                queue.extend(parent_of.get(cur, []))
+            return None
+
+        for ch in self._IMPLICIT_CHANNELS:
+            latest: Optional[str] = None
+            for nid in topo:
+                node = nodes[nid]
+                needs = any(p.name == ch for p in node.tool.inputs)
+                if needs and (nid, ch) not in wired_in:
+                    src = bfs_upstream(nid, ch) or latest
+                    if src and src != nid:
+                        implicit[(nid, ch)] = src
+                if any(p.name == ch for p in node.tool.outputs):
+                    latest = nid
+        return implicit
+
+    def implicit_source_for(self, nid: str, port_name: str) -> Optional[str]:
+        """Wrapper public: trả node_id cung cấp implicit value cho UI
+        tooltip. Dùng cùng logic execute() để hiển thị nhất quán."""
+        nodes = self.nodes
+        in_edges = {n: set() for n in nodes}
+        for c in self.connections:
+            if c.src_id in nodes and c.dst_id in nodes:
+                in_edges[c.dst_id].add(c.src_id)
+        return self._implicit_sources(nodes, in_edges).get((nid, port_name))
+
     # ── Topological sort ──────────────────────────
     def topo_order(self) -> List[str]:
         in_edges: Dict[str, set] = {nid: set() for nid in self.nodes}
@@ -251,6 +331,16 @@ class FlowGraph:
             if c.src_id in nodes and c.dst_id in nodes:
                 in_edges[c.dst_id].add(c.src_id)
                 out_edges[c.src_id].add(c.dst_id)
+
+        # Implicit channel bus (image/mask): tự bind port chưa wired từ
+        # producer gần nhất trong topo order. Add virtual dep để scheduler
+        # đợi producer xong trước consumer — không tạo cycle vì topo
+        # luôn từ trên xuống.
+        implicit_sources = self._implicit_sources(nodes, in_edges)
+        for (dst_nid, _ch), src_nid in implicit_sources.items():
+            if src_nid != dst_nid and src_nid not in in_edges[dst_nid]:
+                in_edges[dst_nid].add(src_nid)
+                out_edges[src_nid].add(dst_nid)
         remaining = {nid: set(deps) for nid, deps in in_edges.items()}
 
         total = len(nodes)
@@ -269,6 +359,17 @@ class FlowGraph:
                     src = nodes.get(c.src_id)
                     if src and c.src_port in src.outputs:
                         inputs[c.dst_port] = src.outputs[c.src_port]
+            # Implicit channel bus: lấy value từ source đã pre-compute ở
+            # implicit_sources. Wire tay (đã collect ở loop trên) luôn
+            # override implicit.
+            for port in node.tool.inputs:
+                if port.name in self._IMPLICIT_CHANNELS \
+                        and inputs.get(port.name) is None:
+                    src = implicit_sources.get((nid, port.name))
+                    if src and src in nodes:
+                        val = nodes[src].outputs.get(port.name)
+                        if val is not None:
+                            inputs[port.name] = val
             for port in node.tool.inputs:
                 if port.name not in inputs:
                     inputs[port.name] = port.default

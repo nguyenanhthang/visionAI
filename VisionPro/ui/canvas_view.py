@@ -230,6 +230,7 @@ class AOIScene(QGraphicsScene):
             self._add_node_item(node)
         for conn in self.graph.connections:
             self._add_conn_item(conn)
+        self._refresh_implicit_port_styles()
 
     def _add_node_item(self, node) -> NodeItem:
         item = NodeItem(node, self._signals)
@@ -254,6 +255,7 @@ class AOIScene(QGraphicsScene):
     def add_node(self, tool_id: str, pos: QPointF) -> NodeItem:
         node = self.graph.add_node(tool_id, pos.x(), pos.y())
         item = self._add_node_item(node)
+        self._refresh_implicit_port_styles()
         self.graph_changed.emit()
         return item
 
@@ -266,6 +268,7 @@ class AOIScene(QGraphicsScene):
         if ni:
             self.removeItem(ni)
         self.graph.remove_node(node_id)
+        self._refresh_implicit_port_styles()
         self.node_deselected.emit()
         self.graph_changed.emit()
 
@@ -375,8 +378,16 @@ class AOIScene(QGraphicsScene):
             in_port.node_item.node.node_id, in_port.port_name)
         if conn:
             self._add_conn_item(conn)
+            self._refresh_implicit_port_styles()
             self.connection_added.emit()
             self.graph_changed.emit()
+
+    def _refresh_implicit_port_styles(self):
+        """Refresh hollow/solid style của port image/mask trên mọi node sau
+        khi connections thay đổi (wire image tay → solid, bỏ wire → hollow
+        auto-bound)."""
+        for ni in self._node_items.values():
+            ni.refresh_implicit_port_brushes()
 
     def _refresh_node_highlights(self):
         """Node + nub port là endpoint của 1 dây đang được chọn hoặc hover →
@@ -401,6 +412,7 @@ class AOIScene(QGraphicsScene):
             self.removeItem(ci)
         self.graph.remove_connection(conn_id)
         self._refresh_node_highlights()
+        self._refresh_implicit_port_styles()
         self.graph_changed.emit()
 
     def relink_connection(self, conn_id: str,
@@ -440,6 +452,7 @@ class AOIScene(QGraphicsScene):
             self.connection_added.emit()
             self.graph_changed.emit()
         self._refresh_node_highlights()
+        self._refresh_implicit_port_styles()
         return new_conn
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -453,6 +466,7 @@ class AOIScene(QGraphicsScene):
                     self.removeItem(item)
                     self.graph_changed.emit()
             self._refresh_node_highlights()
+            self._refresh_implicit_port_styles()
         super().keyPressEvent(event)
 
     def run_single_node(self, node_id: str):

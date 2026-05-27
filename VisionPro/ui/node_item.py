@@ -60,6 +60,24 @@ class PortItem(QGraphicsEllipseItem):
         self.setAcceptedMouseButtons(Qt.LeftButton)
         self._update_brush()
 
+    # Channel input port (image/mask) khi không wire sẽ được auto-bind từ
+    # upstream qua FlowGraph._implicit_sources — vẽ hollow để phân biệt với
+    # port required-wire thường.
+    IMPLICIT_CHANNELS = ("image", "mask")
+
+    def _is_implicit_auto_bound(self) -> bool:
+        if self.is_output or self.port_name not in self.IMPLICIT_CHANNELS:
+            return False
+        scene = self.node_item.scene()
+        graph = getattr(scene, "graph", None)
+        if graph is None:
+            return False
+        nid = self.node_item.node.node_id
+        for c in graph.connections:
+            if c.dst_id == nid and c.dst_port == self.port_name:
+                return False   # user đã wire tay → không auto
+        return True
+
     def _update_brush(self):
         base = C_PORT_OUT if self.is_output else C_PORT_IN
         if self._highlight:
@@ -69,6 +87,11 @@ class PortItem(QGraphicsEllipseItem):
         elif self._hovered:
             self.setBrush(QBrush(base))
             self.setPen(QPen(Qt.white, 2))
+        elif self._is_implicit_auto_bound():
+            # Hollow + dashed border = "auto-bound, không cần wire".
+            self.setBrush(QBrush(QColor(0, 0, 0, 0)))
+            pen = QPen(base.darker(120), 1.3, Qt.DashLine)
+            self.setPen(pen)
         else:
             self.setBrush(QBrush(base.darker(200)))
             self.setPen(QPen(base, 1.5))
@@ -88,6 +111,21 @@ class PortItem(QGraphicsEllipseItem):
             self.setToolTip(
                 f"<b>OUT • {self.port_name}</b><br>"
                 f"<span style='color:#00d4ff'>{self._fmt_value(val)}</span>")
+        elif self._is_implicit_auto_bound():
+            scene = self.node_item.scene()
+            graph = getattr(scene, "graph", None)
+            src_name = "(no upstream — pipeline sẽ nhận None)"
+            if graph is not None:
+                src_id = graph.implicit_source_for(
+                    self.node_item.node.node_id, self.port_name)
+                if src_id and src_id in graph.nodes:
+                    src_name = graph.nodes[src_id].tool.name
+            self.setToolTip(
+                f"<b>IN • {self.port_name}</b> "
+                f"<span style='color:#94a3b8'>(auto)</span><br>"
+                f"<span style='color:#00d4ff'>← {src_name}</span><br>"
+                f"<span style='color:#64748b;font-size:10px'>"
+                f"Wire tay để override</span>")
         else:
             self.setToolTip(f"<b>IN • {self.port_name}</b>")
         super().hoverEnterEvent(event)
@@ -610,6 +648,13 @@ class NodeItem(QGraphicsItem):
             x, y = self._port_xy(i, True)
             p.setPos(x, y)
             self._out_ports.append(p)
+
+    def refresh_implicit_port_brushes(self):
+        """Cập nhật visual của input port image/mask (hollow nếu auto-bound).
+        Gọi sau khi connections thay đổi để port đổi style ngay."""
+        for p in self._in_ports:
+            if p.port_name in PortItem.IMPLICIT_CHANNELS:
+                p._update_brush()
 
     def refresh_ports(self):
         """Rebuild ports (gọi sau khi đổi extra_terminals)."""
