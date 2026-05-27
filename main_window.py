@@ -1,5 +1,8 @@
+import queue
 import customtkinter as ctk
 from datetime import datetime
+
+from plc_worker import PLCEvent, SimulatedPLCWorker
 
 
 EMPLOYEE_DIRECTORY = {
@@ -10,6 +13,8 @@ EMPLOYEE_DIRECTORY = {
 
 
 class MainWindow(ctk.CTk):
+    PLC_DRAIN_MS = 50  # tần suất GUI lấy event từ queue (20 Hz)
+
     def __init__(self, employee_id):
         super().__init__()
         self.employee_id = employee_id
@@ -20,15 +25,25 @@ class MainWindow(ctk.CTk):
         self.ok_count = 0
 
         self.title("Vision AI - Giao diện chính")
-        self.geometry("1200x700")
-        self.minsize(1000, 600)
+        self.geometry("1400x780")
+        self.minsize(1100, 640)
 
         self._build_layout()
         self.add_log(f"Đăng nhập thành công - Mã NV: {self.employee_id}")
 
+        # PLC chạy trên thread riêng, đẩy event qua queue để tránh xung đột với Tk
+        self.plc_queue: "queue.Queue[PLCEvent]" = queue.Queue()
+        self.plc_worker = SimulatedPLCWorker(self.plc_queue, poll_interval=1.5)
+        # Khi có PLC thật: thay bằng subclass PLCWorker của bạn (Modbus/S7/MELSEC...)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.plc_worker.start()
+        self.after(self.PLC_DRAIN_MS, self._drain_plc_queue)
+
     def _build_layout(self):
-        self.grid_columnconfigure(0, weight=3)
-        self.grid_columnconfigure(1, weight=2)
+        # Cột ảnh chiếm phần lớn không gian, cột thông tin/log có minsize để không co quá nhỏ
+        self.grid_columnconfigure(0, weight=5, minsize=640)
+        self.grid_columnconfigure(1, weight=2, minsize=340)
         self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=2)
 
@@ -196,3 +211,76 @@ class MainWindow(ctk.CTk):
         if ng is not None:
             self.ng_count = ng
             self.ng_card.value_label.configure(text=str(ng))
+
+    def update_image(self, pil_image):
+        """Hiển thị PIL.Image, scale vừa khít panel, giữ tỉ lệ."""
+        if pil_image is None:
+            self.image_label.configure(image="", text="Chưa có hình ảnh")
+            return
+
+        w = max(self.image_canvas.winfo_width() - 20, 100)
+        h = max(self.image_canvas.winfo_height() - 20, 100)
+        img_w, img_h = pil_image.size
+        scale = min(w / img_w, h / img_h)
+        size = (max(int(img_w * scale), 1), max(int(img_h * scale), 1))
+
+        ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=size)
+        self.image_label.configure(image=ctk_image, text="")
+        self.image_label.image = ctk_image  # giữ reference để tránh GC
+
+    # ---- PLC bridge: chạy trên main thread, gọi từ after() ----
+
+    def _drain_plc_queue(self):
+        """Lấy hết event đang chờ trong queue và xử lý trên GUI thread.
+
+        Coalesce: nếu có nhiều event 'image' liên tiếp thì chỉ giữ frame mới
+        nhất - tránh GUI lag khi PLC bắn liên tục.
+        """
+        events = []
+        try:
+            while True:
+                events.append(self.plc_queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        latest_image = None
+        for event in events:
+            if event.type == "image":
+                latest_image = event
+            else:
+                self._handle_plc_event(event)
+        if latest_image is not None:
+            self._handle_plc_event(latest_image)
+
+        # Tiếp tục poll nếu worker còn chạy hoặc queue chưa cạn
+        if self.plc_worker.is_running() or not self.plc_queue.empty():
+            self.after(self.PLC_DRAIN_MS, self._drain_plc_queue)
+
+    def _handle_plc_event(self, event: PLCEvent):
+        if event.type == "connected":
+            self.add_log("PLC: đã kết nối")
+        elif event.type == "disconnected":
+            self.add_log("PLC: ngắt kết nối")
+        elif event.type == "error":
+            self.add_log(f"PLC error: {event.data}")
+        elif event.type == "fatal":
+            self.add_log(f"PLC fatal: {event.data}")
+        elif event.type == "result":
+            data = event.data or {}
+            if "product_id" in data:
+                self.update_product(data["product_id"])
+            ok_flag = data.get("ok")
+            if ok_flag is True:
+                self.update_counts(ok=self.ok_count + 1, total=self.total_count + 1)
+                self.add_log(f"OK - {data.get('product_id', '')}")
+            elif ok_flag is False:
+                self.update_counts(ng=self.ng_count + 1, total=self.total_count + 1)
+                self.add_log(f"NG - {data.get('product_id', '')}")
+        elif event.type == "image":
+            self.update_image(event.data)
+
+    def _on_close(self):
+        self.add_log("Đang dừng PLC worker...")
+        self.update_idletasks()
+        self.plc_worker.stop(timeout=2.0)
+        self.destroy()
