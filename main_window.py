@@ -6,17 +6,20 @@ import employees
 from plc_worker import PLCEvent, SimulatedPLCWorker
 
 
-class MainWindow(ctk.CTk):
+class MainWindow(ctk.CTkToplevel):
     PLC_DRAIN_MS = 50  # tần suất GUI lấy event từ queue (20 Hz)
 
-    def __init__(self, employee_id):
-        super().__init__()
+    def __init__(self, master, employee_id, on_close):
+        super().__init__(master)
         self.employee_id = employee_id
         self.employee_name = employees.lookup(employee_id) or "Chưa xác định"
         self.product_id = "—"
         self.total_count = 0
         self.ng_count = 0
         self.ok_count = 0
+        self.on_close = on_close
+        self._destroyed = False
+        self._drain_after_id = None
 
         self.title("Vision AI - Giao diện chính")
         self.geometry("1400x780")
@@ -30,9 +33,24 @@ class MainWindow(ctk.CTk):
         self.plc_worker = SimulatedPLCWorker(self.plc_queue, poll_interval=1.5)
         # Khi có PLC thật: thay bằng subclass PLCWorker của bạn (Modbus/S7/MELSEC...)
 
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.protocol("WM_DELETE_WINDOW", self._handle_user_close)
         self.plc_worker.start()
-        self.after(self.PLC_DRAIN_MS, self._drain_plc_queue)
+        self._schedule_drain()
+
+        self.after(50, self._bring_to_front)
+
+    def _bring_to_front(self):
+        if self._safe():
+            self.lift()
+            self.focus_force()
+
+    def _safe(self) -> bool:
+        if self._destroyed:
+            return False
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
 
     def _build_layout(self):
         # Cột ảnh chiếm phần lớn không gian, cột thông tin/log có minsize để không co quá nhỏ
@@ -184,6 +202,8 @@ class MainWindow(ctk.CTk):
         self.log_textbox.configure(state="disabled")
 
     def add_log(self, message):
+        if not self._safe():
+            return
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}\n"
         self.log_textbox.configure(state="normal")
@@ -192,10 +212,14 @@ class MainWindow(ctk.CTk):
         self.log_textbox.configure(state="disabled")
 
     def update_product(self, product_id):
+        if not self._safe():
+            return
         self.product_id = product_id
         self.product_id_label.configure(text=product_id)
 
     def update_counts(self, total=None, ok=None, ng=None):
+        if not self._safe():
+            return
         if total is not None:
             self.total_count = total
             self.total_card.value_label.configure(text=str(total))
@@ -208,6 +232,8 @@ class MainWindow(ctk.CTk):
 
     def update_image(self, pil_image):
         """Hiển thị PIL.Image, scale vừa khít panel, giữ tỉ lệ."""
+        if not self._safe():
+            return
         if pil_image is None:
             self.image_label.configure(image="", text="Chưa có hình ảnh")
             return
@@ -224,12 +250,20 @@ class MainWindow(ctk.CTk):
 
     # ---- PLC bridge: chạy trên main thread, gọi từ after() ----
 
+    def _schedule_drain(self):
+        if self._safe():
+            self._drain_after_id = self.after(self.PLC_DRAIN_MS, self._drain_plc_queue)
+
     def _drain_plc_queue(self):
         """Lấy hết event đang chờ trong queue và xử lý trên GUI thread.
 
         Coalesce: nếu có nhiều event 'image' liên tiếp thì chỉ giữ frame mới
         nhất - tránh GUI lag khi PLC bắn liên tục.
         """
+        self._drain_after_id = None
+        if not self._safe():
+            return
+
         events = []
         try:
             while True:
@@ -246,11 +280,11 @@ class MainWindow(ctk.CTk):
         if latest_image is not None:
             self._handle_plc_event(latest_image)
 
-        # Tiếp tục poll nếu worker còn chạy hoặc queue chưa cạn
-        if self.plc_worker.is_running() or not self.plc_queue.empty():
-            self.after(self.PLC_DRAIN_MS, self._drain_plc_queue)
+        self._schedule_drain()
 
     def _handle_plc_event(self, event: PLCEvent):
+        if not self._safe():
+            return
         if event.type == "connected":
             self.add_log("PLC: đã kết nối")
         elif event.type == "disconnected":
@@ -273,8 +307,31 @@ class MainWindow(ctk.CTk):
         elif event.type == "image":
             self.update_image(event.data)
 
-    def _on_close(self):
-        self.add_log("Đang dừng PLC worker...")
-        self.update_idletasks()
-        self.plc_worker.stop(timeout=2.0)
-        self.destroy()
+    def _handle_user_close(self):
+        callback = self.on_close
+        self._teardown()
+        if callback:
+            callback()
+
+    def _teardown(self):
+        """Cancel after, stop worker, destroy window. An toàn gọi nhiều lần."""
+        if self._destroyed:
+            return
+        self._destroyed = True
+
+        if self._drain_after_id is not None:
+            try:
+                self.after_cancel(self._drain_after_id)
+            except Exception:
+                pass
+            self._drain_after_id = None
+
+        try:
+            self.plc_worker.stop(timeout=2.0)
+        except Exception:
+            pass
+
+        try:
+            self.destroy()
+        except Exception:
+            pass
