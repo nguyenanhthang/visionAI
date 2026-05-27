@@ -15,6 +15,7 @@ Layout giống mockup HTML:
 from __future__ import annotations
 
 import time
+from collections import deque
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QSize, QThread, QTimer, Signal
@@ -60,44 +61,49 @@ class StatCard(QFrame):
     """Card hiển thị 1 con số lớn (TOTAL / OK / NG)."""
 
     PALETTES = {
-        "total": ("#79c0ff", "rgba(63,182,240,40)",  "#3fb6f0"),
-        "ok":    ("#7ee787", "rgba(46,160,67,40)",   "#2ea043"),
-        "ng":    ("#ffa198", "rgba(248,81,73,40)",   "#f85149"),
+        # num_color, border (subtle tinted)
+        "total": ("#79c0ff", "#1f4a64"),
+        "ok":    ("#7ee787", "#1d4a2c"),
+        "ng":    ("#ffa198", "#5a2925"),
     }
 
     def __init__(self, label: str, kind: str = "total", parent=None):
         super().__init__(parent)
-        num_color, _, border = self.PALETTES.get(kind, self.PALETTES["total"])
-        self.setStyleSheet(
-            f"QFrame{{background:#0f1620;border:1px solid #2a3540;border-radius:10px;}}"
-        )
+        self.setObjectName("StatCard")
+        num_color, border = self.PALETTES.get(kind, self.PALETTES["total"])
         self.setMinimumHeight(98)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12); lay.setSpacing(2)
 
-        lab = QLabel(label); lab.setObjectName("StatLabel")
-        lab.setStyleSheet("color:#7d8590;font-size:10px;font-weight:700;letter-spacing:3px;background:transparent;")
+        lab = QLabel(label)
+        lab.setStyleSheet(
+            "color:#7d8590;font-size:10px;font-weight:700;letter-spacing:3px;"
+            "background:transparent;border:none;"
+        )
         lay.addWidget(lab)
         lay.addStretch(1)
 
         self.num = QLabel("0")
         self.num.setStyleSheet(
-            f"color:{num_color};font-size:34px;font-weight:700;background:transparent;"
+            f"color:{num_color};font-size:34px;font-weight:700;"
+            "background:transparent;border:none;"
         )
         self.num.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self.num)
 
         self.sub = QLabel("")
         self.sub.setStyleSheet(
-            "color:#7d8590;font-size:11px;font-family:'JetBrains Mono',Consolas,monospace;background:transparent;"
+            "color:#7d8590;font-size:11px;"
+            "font-family:'JetBrains Mono',Consolas,monospace;"
+            "background:transparent;border:none;"
         )
         lay.addWidget(self.sub)
 
-        # tinted top border via stylesheet override
+        # use objectName selector so the border doesn't cascade to child widgets
         self.setStyleSheet(
-            f"QFrame{{background:#0f1620;border:1px solid {border};border-radius:10px;}}"
-            f"QLabel{{background:transparent;}}"
+            f"QFrame#StatCard{{background:#0f1620;border:1px solid {border};"
+            "border-radius:10px;}"
         )
 
     def set_value(self, value: int, sub: str = ""):
@@ -330,6 +336,7 @@ class MainWindow(QMainWindow):
         self._total = 0
         self._ok = 0
         self._ng = 0
+        self._scan_times: deque[float] = deque()
         self._started_at = time.time()
 
         self.setWindowTitle("Vision AI — Giao diện chính")
@@ -612,6 +619,7 @@ class MainWindow(QMainWindow):
         up = int(time.time() - self._started_at)
         h, m, s = up // 3600, (up % 3600) // 60, up % 60
         self.sb_uptime.setText(f"Uptime {h}h {m:02d}m {s:02d}s")
+        self._refresh_stats()
 
     # ── PLC wiring ───────────────────────────────────────────
     def _setup_plc(self):
@@ -661,6 +669,7 @@ class MainWindow(QMainWindow):
         self._total += 1
         if ok:    self._ok  += 1
         else:     self._ng  += 1
+        self._scan_times.append(now)
         self._refresh_stats()
         # info + verdict
         self._product_lbl.setText(pid or "—")
@@ -679,7 +688,11 @@ class MainWindow(QMainWindow):
 
     # ── stats refresh ────────────────────────────────────────
     def _refresh_stats(self):
-        self.card_total.set_value(self._total, "tổng tích lũy")
+        cutoff = time.time() - 300  # 5 phút
+        while self._scan_times and self._scan_times[0] < cutoff:
+            self._scan_times.popleft()
+        recent = len(self._scan_times)
+        self.card_total.set_value(self._total, f"↑ {recent} / 5 phút")
         ratio_ok = (self._ok / self._total) if self._total else 0
         ratio_ng = (self._ng / self._total) if self._total else 0
         self.card_ok.set_value(self._ok, f"{ratio_ok*100:.1f}%")
