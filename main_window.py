@@ -2,14 +2,8 @@ import queue
 import customtkinter as ctk
 from datetime import datetime
 
+import employees
 from plc_worker import PLCEvent, SimulatedPLCWorker
-
-
-EMPLOYEE_DIRECTORY = {
-    "001": "Nguyễn Văn A",
-    "002": "Trần Thị B",
-    "003": "Lê Văn C",
-}
 
 
 class MainWindow(ctk.CTk):
@@ -18,7 +12,7 @@ class MainWindow(ctk.CTk):
     def __init__(self, employee_id):
         super().__init__()
         self.employee_id = employee_id
-        self.employee_name = EMPLOYEE_DIRECTORY.get(employee_id, "Chưa xác định")
+        self.employee_name = employees.lookup(employee_id) or "Chưa xác định"
         self.product_id = "—"
         self.total_count = 0
         self.ng_count = 0
