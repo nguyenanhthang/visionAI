@@ -40,17 +40,22 @@ C_WARN     = QColor(255, 215, 0)
 C_DIM      = QColor(100, 116, 139)
 C_PORT_IN  = QColor(0, 180, 220)
 C_PORT_OUT = QColor(255, 140, 50)
+# Compound type port (point/line/bbox/...) — magenta để phân biệt với scalar.
+# Wire compound = 1 dây thay cho 2-4 dây scalar.
+C_PORT_COMPOUND = QColor(214, 100, 255)
 
 
 class PortItem(QGraphicsEllipseItem):
     """Port hitbox — scene xử lý drag connection."""
     def __init__(self, node_item: "NodeItem", port_name: str,
-                 is_output: bool, index: int, parent=None):
+                 is_output: bool, index: int, parent=None,
+                 data_type: str = ""):
         super().__init__(-PORT_R, -PORT_R, PORT_D, PORT_D, parent)
         self.node_item  = node_item
         self.port_name  = port_name
         self.is_output  = is_output
         self.port_index = index
+        self.data_type  = data_type   # "image", "point", "line", "number"...
         self._hovered   = False
         self._highlight = False   # sáng khi dây nối tới port này được chọn/hover
 
@@ -60,8 +65,34 @@ class PortItem(QGraphicsEllipseItem):
         self.setAcceptedMouseButtons(Qt.LeftButton)
         self._update_brush()
 
+    # Channel input port (image/mask) khi không wire sẽ được auto-bind từ
+    # upstream qua FlowGraph._implicit_sources — vẽ hollow để phân biệt với
+    # port required-wire thường.
+    IMPLICIT_CHANNELS = ("image", "mask")
+    # Compound data types — 1 dây thay cho 2-4 scalar dây. Render magenta.
+    COMPOUND_TYPES = ("point", "line", "bbox", "circle", "pose2d", "size")
+
+    def _is_compound(self) -> bool:
+        return self.data_type in self.COMPOUND_TYPES
+
+    def _is_implicit_auto_bound(self) -> bool:
+        if self.is_output or self.port_name not in self.IMPLICIT_CHANNELS:
+            return False
+        scene = self.node_item.scene()
+        graph = getattr(scene, "graph", None)
+        if graph is None:
+            return False
+        nid = self.node_item.node.node_id
+        for c in graph.connections:
+            if c.dst_id == nid and c.dst_port == self.port_name:
+                return False   # user đã wire tay → không auto
+        return True
+
     def _update_brush(self):
-        base = C_PORT_OUT if self.is_output else C_PORT_IN
+        if self._is_compound():
+            base = C_PORT_COMPOUND
+        else:
+            base = C_PORT_OUT if self.is_output else C_PORT_IN
         if self._highlight:
             # Endpoint của dây đang chọn/hover → nub vàng sáng, viền cam đậm.
             self.setBrush(QBrush(QColor(255, 235, 80)))
@@ -69,6 +100,11 @@ class PortItem(QGraphicsEllipseItem):
         elif self._hovered:
             self.setBrush(QBrush(base))
             self.setPen(QPen(Qt.white, 2))
+        elif self._is_implicit_auto_bound():
+            # Hollow + dashed border = "auto-bound, không cần wire".
+            self.setBrush(QBrush(QColor(0, 0, 0, 0)))
+            pen = QPen(base.darker(120), 1.3, Qt.DashLine)
+            self.setPen(pen)
         else:
             self.setBrush(QBrush(base.darker(200)))
             self.setPen(QPen(base, 1.5))
@@ -88,6 +124,21 @@ class PortItem(QGraphicsEllipseItem):
             self.setToolTip(
                 f"<b>OUT • {self.port_name}</b><br>"
                 f"<span style='color:#00d4ff'>{self._fmt_value(val)}</span>")
+        elif self._is_implicit_auto_bound():
+            scene = self.node_item.scene()
+            graph = getattr(scene, "graph", None)
+            src_name = "(no upstream — pipeline sẽ nhận None)"
+            if graph is not None:
+                src_id = graph.implicit_source_for(
+                    self.node_item.node.node_id, self.port_name)
+                if src_id and src_id in graph.nodes:
+                    src_name = graph.nodes[src_id].tool.name
+            self.setToolTip(
+                f"<b>IN • {self.port_name}</b> "
+                f"<span style='color:#94a3b8'>(auto)</span><br>"
+                f"<span style='color:#00d4ff'>← {src_name}</span><br>"
+                f"<span style='color:#64748b;font-size:10px'>"
+                f"Wire tay để override</span>")
         else:
             self.setToolTip(f"<b>IN • {self.port_name}</b>")
         super().hoverEnterEvent(event)
@@ -144,11 +195,14 @@ class NodeSignals(QObject):
     ports_changed = Signal(str)   # node_id — phát khi thay đổi extra terminals
 
 
-# Mapping field từ "objects" list — dùng cho PatMax/PatFind
-PATMAX_FIELDS = ["x", "y", "score", "angle", "scale",
+# Mapping field từ "objects" list — dùng cho PatMax/PatFind. `point` /
+# `center` là compound (1 dây tới downstream tool nhận `point`); các field
+# scalar giữ nguyên để wire tay từng giá trị khi cần.
+PATMAX_FIELDS = ["point", "center",
+                 "x", "y", "score", "angle", "scale",
                  "center_x", "center_y", "origin_x", "origin_y"]
 # Field cơ bản dành cho mỗi ref point (origin chính + extra refs)
-PATMAX_REF_FIELDS = ["x", "y", "angle"]
+PATMAX_REF_FIELDS = ["point", "x", "y", "angle"]
 
 
 def _patmax_ref_options(node) -> list:
@@ -601,15 +655,39 @@ class NodeItem(QGraphicsItem):
 
     def _build_ports(self):
         for i, port in enumerate(self._visible_input_ports()):
-            p = PortItem(self, port.name, False, i, self)
+            p = PortItem(self, port.name, False, i, self,
+                          data_type=port.data_type)
             x, y = self._port_xy(i, False)
             p.setPos(x, y)
             self._in_ports.append(p)
+        # Output port data_type lookup: tool.outputs (static) + extra
+        # terminals (PatMax-style — terminal["field"] có thể là "point"/
+        # "bbox" → compound). Đối với output extra terminal, infer type
+        # từ tên field (point/bbox/line) — không lưu data_type riêng.
+        out_type_lookup = {p.name: p.data_type for p in self.node.tool.outputs}
         for i, name in enumerate(self._output_port_names()):
-            p = PortItem(self, name, True, i, self)
+            dt = out_type_lookup.get(name, "")
+            if not dt:
+                # Extra terminal: tên dạng "point_obj3", "bbox_highest",
+                # "ref1_point" → infer compound.
+                base_field = name.split("_")[0]
+                if base_field in ("point", "bbox", "line", "circle"):
+                    dt = base_field
+                elif "_point" in name or "_bbox" in name or "_line" in name:
+                    for k in ("point", "bbox", "line"):
+                        if f"_{k}" in name:
+                            dt = k; break
+            p = PortItem(self, name, True, i, self, data_type=dt)
             x, y = self._port_xy(i, True)
             p.setPos(x, y)
             self._out_ports.append(p)
+
+    def refresh_implicit_port_brushes(self):
+        """Cập nhật visual của input port image/mask (hollow nếu auto-bound).
+        Gọi sau khi connections thay đổi để port đổi style ngay."""
+        for p in self._in_ports:
+            if p.port_name in PortItem.IMPLICIT_CHANNELS:
+                p._update_brush()
 
     def refresh_ports(self):
         """Rebuild ports (gọi sau khi đổi extra_terminals)."""

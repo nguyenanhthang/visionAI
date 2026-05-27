@@ -70,6 +70,45 @@ class ToolDef:
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  COMPOUND DATA TYPES  (Giai đoạn 2 — giảm spaghetti)
+# ═══════════════════════════════════════════════════════════════════
+# Thay vì 1 tool xuất N scalar port (vd Line_2pt xuất x1,y1,x2,y2 = 4
+# port → 4 dây cho mỗi node nhận downstream), gom thành 1 dict-port.
+# Tool downstream nhận dict, tự unpack qua unpack_*(). Tools tiếp tục
+# xuất scalar port song song để wire tay từng giá trị vẫn được + file
+# .aoi cũ load lên không cần migration.
+COMPOUND_TYPES = {"point", "line", "bbox", "circle", "pose2d", "size"}
+
+def make_point(x, y):
+    return {"x": float(x), "y": float(y)}
+
+def make_line(x1, y1, x2, y2):
+    return {"x1": float(x1), "y1": float(y1),
+            "x2": float(x2), "y2": float(y2)}
+
+def make_bbox(x, y, w, h):
+    return {"x": float(x), "y": float(y),
+            "w": float(w), "h": float(h)}
+
+def unpack_point(v, fx=0.0, fy=0.0):
+    if isinstance(v, dict):
+        return float(v.get("x", fx)), float(v.get("y", fy))
+    return float(fx), float(fy)
+
+def unpack_line(v, fx1=0.0, fy1=0.0, fx2=0.0, fy2=0.0):
+    if isinstance(v, dict):
+        return (float(v.get("x1", fx1)), float(v.get("y1", fy1)),
+                float(v.get("x2", fx2)), float(v.get("y2", fy2)))
+    return float(fx1), float(fy1), float(fx2), float(fy2)
+
+def unpack_bbox(v, fx=0.0, fy=0.0, fw=0.0, fh=0.0):
+    if isinstance(v, dict):
+        return (float(v.get("x", fx)), float(v.get("y", fy)),
+                float(v.get("w", fw)), float(v.get("h", fh)))
+    return float(fx), float(fy), float(fw), float(fh)
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  HELPERS
 # ═══════════════════════════════════════════════════════════════════
 def _gray(img):
@@ -378,7 +417,10 @@ def _build_patmax_objects(results, model, obj_origin_overrides=None):
         obj = {"x": ox, "y": oy, "score": r.score,
                "angle": r.angle, "scale": r.scale,
                "center_x": r.x, "center_y": r.y,
-               "origin_x": r.origin_x, "origin_y": r.origin_y}
+               "origin_x": r.origin_x, "origin_y": r.origin_y,
+               # Compound: terminal "point" / "center" map sang 1 dict-port.
+               "point": make_point(ox, oy),
+               "center": make_point(r.x, r.y)}
         refs_data = []
         for j, ref in enumerate(extras, start=1):
             try:
@@ -390,6 +432,8 @@ def _build_patmax_objects(results, model, obj_origin_overrides=None):
             obj[f"ref{j}_x"]     = ex
             obj[f"ref{j}_y"]     = ey
             obj[f"ref{j}_angle"] = eang
+            # Mỗi ref cũng phơi point compound — `ref1_point`, `ref2_point`...
+            obj[f"ref{j}_point"] = make_point(ex, ey)
         obj["refs"] = refs_data
         objs.append(obj)
     return objs
@@ -468,6 +512,14 @@ def _apply_extra_terminals(out: dict, objects: list, params: dict):
     object có thể là int (index cố định) hoặc str selector (vd "highest",
     "lowest", "leftmost"...). field là field cơ bản hoặc ref-aware (PatMax).
     """
+    # Default đúng kiểu khi không có object: scalar=0.0, compound=dict rỗng
+    # đúng schema. Tránh downstream tool nhận 0.0 cho port `point` rồi crash
+    # khi gọi unpack_point(0.0).
+    _compound_defaults = {
+        "point": {"x": 0.0, "y": 0.0},
+        "bbox":  {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0},
+        "line":  {"x1": 0.0, "y1": 0.0, "x2": 0.0, "y2": 0.0},
+    }
     for term in (params.get("_extra_terminals") or []):
         try:
             obj_spec = term.get("object", 0)
@@ -480,7 +532,8 @@ def _apply_extra_terminals(out: dict, objects: list, params: dict):
                 obj_idx = int(obj_spec or 0)
                 if 0 <= obj_idx < len(objects):
                     obj = objects[obj_idx]
-            out[name] = obj.get(field, 0.0) if obj is not None else 0.0
+            default = _compound_defaults.get(field, 0.0)
+            out[name] = obj.get(field, default) if obj is not None else default
         except Exception:
             continue
 
@@ -1298,8 +1351,16 @@ def proc_line_2pt(inputs, params):
             return float(default)
 
     img = inputs.get("image")
-    x1 = _num("x1", 0);   y1 = _num("y1", 0)
-    x2 = _num("x2", 100); y2 = _num("y2", 0)
+    # Compound point inputs ưu tiên hơn scalar x1/y1/x2/y2.
+    p1_in = inputs.get("p1"); p2_in = inputs.get("p2")
+    if isinstance(p1_in, dict):
+        x1, y1 = unpack_point(p1_in)
+    else:
+        x1 = _num("x1", 0); y1 = _num("y1", 0)
+    if isinstance(p2_in, dict):
+        x2, y2 = unpack_point(p2_in)
+    else:
+        x2 = _num("x2", 100); y2 = _num("y2", 0)
     dx = x2 - x1; dy = y2 - y1
     length_px = math.hypot(dx, dy)
     found = length_px > 1e-6
@@ -1362,6 +1423,9 @@ def proc_line_2pt(inputs, params):
             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
             "angle": angle, "length": length, "length_px": length_px,
             "mid_x": mx, "mid_y": my,
+            "line": make_line(x1, y1, x2, y2),
+            "p1": make_point(x1, y1), "p2": make_point(x2, y2),
+            "mid": make_point(mx, my),
             "_label_rects": label_rects,
             "_label_centroids": [(float(mx), float(my))] if label_rects else []}
 
@@ -2024,10 +2088,24 @@ def proc_distance_point(inputs, params):
     sync ngược về params).
     """
     img=inputs.get("image")
-    x1=float(inputs.get("x1",params.get("x1",0)))
-    y1=float(inputs.get("y1",params.get("y1",0)))
-    x2=float(inputs.get("x2",params.get("x2",100)))
-    y2=float(inputs.get("y2",params.get("y2",0)))
+    def _n(key, default):
+        v = inputs.get(key)
+        if v is None:
+            v = params.get(key, default)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float(default)
+    # Compound point inputs (1 dây / điểm) ưu tiên hơn scalar x1/y1/x2/y2.
+    p1_in = inputs.get("p1"); p2_in = inputs.get("p2")
+    if isinstance(p1_in, dict):
+        x1, y1 = unpack_point(p1_in)
+    else:
+        x1 = _n("x1", 0); y1 = _n("y1", 0)
+    if isinstance(p2_in, dict):
+        x2, y2 = unpack_point(p2_in)
+    else:
+        x2 = _n("x2", 100); y2 = _n("y2", 0)
     dist_px = math.hypot(x2-x1, y2-y1)
     calib_mode = str(params.get("calib_mode", "Scale"))
     if calib_mode == "Two Points":
@@ -2089,6 +2167,7 @@ def proc_distance_point(inputs, params):
           f"({'PASS' if is_pass else 'FAIL'})")
     return {"image":vis,"distance":dist,"distance_px":dist_px,
             "x1":float(x1),"y1":float(y1),"x2":float(x2),"y2":float(y2),
+            "p1": make_point(x1, y1), "p2": make_point(x2, y2),
             "pass":is_pass,
             "_label_rects": label_rects,
             "_label_centroids": [(float(mx), float(my))] if label_rects else []}
@@ -2105,23 +2184,40 @@ def proc_distance_point_line(inputs, params):
              chân đường vuông góc), pass.
     """
     img = inputs.get("image")
-    # Point
-    px = float(inputs.get("px", params.get("px", 0)))
-    py = float(inputs.get("py", params.get("py", 0)))
-    # Line — ưu tiên port; fallback params
-    mode = params.get("mode", "Two Points")
-    lx1 = float(inputs.get("lx1", params.get("lx1", 0)))
-    ly1 = float(inputs.get("ly1", params.get("ly1", 0)))
-    if mode == "Point + Angle":
-        ang = float(inputs.get("line_angle",
-                                params.get("line_angle", 0.0)))
-        rad = math.radians(ang)
-        # Điểm thứ 2 ở khoảng cách lớn để vẽ "vô tận"
-        lx2 = lx1 + math.cos(rad) * 1000.0
-        ly2 = ly1 + math.sin(rad) * 1000.0
+    # Helper: port chưa wired → inputs[k]=None (port.default), KHÔNG được
+    # fallback bằng dict.get default. Phải explicit check None.
+    def _n(key, default):
+        v = inputs.get(key)
+        if v is None:
+            v = params.get(key, default)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float(default)
+    # Point — ưu tiên compound `point` (1 dây) hơn 2 scalar px/py.
+    point_in = inputs.get("point")
+    if isinstance(point_in, dict):
+        px, py = unpack_point(point_in)
     else:
-        lx2 = float(inputs.get("lx2", params.get("lx2", 100)))
-        ly2 = float(inputs.get("ly2", params.get("ly2", 0)))
+        px = _n("px", 0)
+        py = _n("py", 0)
+    # Line — ưu tiên compound `line` (1 dây) hơn 4 scalar lx1/ly1/lx2/ly2.
+    mode = params.get("mode", "Two Points")
+    line_in = inputs.get("line")
+    if isinstance(line_in, dict):
+        lx1, ly1, lx2, ly2 = unpack_line(line_in)
+    else:
+        lx1 = _n("lx1", 0)
+        ly1 = _n("ly1", 0)
+        if mode == "Point + Angle":
+            ang = _n("line_angle", 0.0)
+            rad = math.radians(ang)
+            # Điểm thứ 2 ở khoảng cách lớn để vẽ "vô tận"
+            lx2 = lx1 + math.cos(rad) * 1000.0
+            ly2 = ly1 + math.sin(rad) * 1000.0
+        else:
+            lx2 = _n("lx2", 100)
+            ly2 = _n("ly2", 0)
 
     # Vector along line
     vx = lx2 - lx1; vy = ly2 - ly1
@@ -2189,6 +2285,7 @@ def proc_distance_point_line(inputs, params):
     return {"image": vis, "distance": distance,
             "signed_distance": signed_mm,
             "foot_x": float(fx), "foot_y": float(fy),
+            "foot": make_point(fx, fy),
             "pass": is_pass}
 
 def proc_angle_lines(inputs, params):
@@ -3326,7 +3423,11 @@ def _yolo_detect_onnx(img: np.ndarray, onnx_path: str, params: dict,
                             "conf": conf_val, "cx": cx, "cy": cy,
                             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                             "w": w_, "h": h_,
-                            "x": x1, "y": y1})
+                            "x": x1, "y": y1,
+                            # Compound fields — terminal user có thể chọn
+                            # "point"/"bbox" để gom 2-4 scalar thành 1 port.
+                            "point": make_point(cx, cy),
+                            "bbox": make_bbox(x1, y1, w_, h_)})
     return detections, backend
 
 
@@ -3925,9 +4026,16 @@ TOOL_REGISTRY: List[ToolDef] = [
     "Xuất angle / length / midpoint để chain vào Distance Point-Line, "
     "Angle Line-Line, hoặc làm ROI cho Caliper.","#134074","📏",
     [PortDef("image","image",required=False),
+     # Compound input — 1 dây thay cho 2 (point) / 4 (line). Ưu tiên hơn
+     # scalar khi cả 2 đều wired.
+     PortDef("p1","point",required=False),
+     PortDef("p2","point",required=False),
      PortDef("x1","number",required=False), PortDef("y1","number",required=False),
      PortDef("x2","number",required=False), PortDef("y2","number",required=False)],
     [PortDef("image","image"),PortDef("found","bool"),
+     # Compound outputs — wire 1 dây sang tool downstream (vd dist_point_line).
+     PortDef("line","line"),
+     PortDef("p1","point"), PortDef("p2","point"), PortDef("mid","point"),
      PortDef("x1","number"),PortDef("y1","number"),
      PortDef("x2","number"),PortDef("y2","number"),
      PortDef("angle","number"),PortDef("length","number"),
@@ -4135,10 +4243,14 @@ TOOL_REGISTRY: List[ToolDef] = [
     "Calib 'Two Points' = nội suy tuyến tính từ 2 cặp (px, mm) đã đo.",
     "#134074","↔",
     [PortDef("image","image",required=False),
+     # Compound 1-dây / điểm — ưu tiên hơn scalar x/y.
+     PortDef("p1","point",required=False),
+     PortDef("p2","point",required=False),
      PortDef("x1","number",required=False),PortDef("y1","number",required=False),
      PortDef("x2","number",required=False),PortDef("y2","number",required=False)],
     [PortDef("image","image"),PortDef("distance","number"),
      PortDef("distance_px","number"),
+     PortDef("p1","point"), PortDef("p2","point"),
      PortDef("x1","number"),PortDef("y1","number"),
      PortDef("x2","number"),PortDef("y2","number"),
      PortDef("pass","bool")],
@@ -4184,12 +4296,17 @@ TOOL_REGISTRY: List[ToolDef] = [
     "Khoảng cách vuông góc từ điểm đến đường thẳng — TDistancePointLineTool",
     "#134074","⊥",
     [PortDef("image","image",required=False),
+     # Compound: `point` thay px/py (1 dây), `line` thay lx1/ly1/lx2/ly2
+     # (1 dây). Wire compound từ YOLO detection.point / Line(2pt).line.
+     PortDef("point","point",required=False),
+     PortDef("line","line",required=False),
      PortDef("px","number",required=False), PortDef("py","number",required=False),
      PortDef("lx1","number",required=False), PortDef("ly1","number",required=False),
      PortDef("lx2","number",required=False), PortDef("ly2","number",required=False),
      PortDef("line_angle","number",required=False)],
     [PortDef("image","image"), PortDef("distance","number"),
      PortDef("signed_distance","number"),
+     PortDef("foot","point"),
      PortDef("foot_x","number"), PortDef("foot_y","number"),
      PortDef("pass","bool")],
     [P("mode","Line Mode","enum","Two Points",
@@ -4573,7 +4690,8 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("fill_segments","Seg: fill polygon (30% alpha)","bool",False,
        tooltip="Seg model: tô màu nửa-trong-suốt bên trong polygon. Mặc định OFF — chỉ vẽ outline cho ảnh sạch.")],
     proc_yolo_detect,"ultralytics YOLO",
-    terminal_fields=["px","py","x","y","w","h","cx","cy","x1","y1","x2","y2",
+    terminal_fields=["point","bbox",
+                      "px","py","x","y","w","h","cx","cy","x1","y1","x2","y2",
                       "conf","class","cls_id"],
     terminal_source_key="detections"),
 
