@@ -177,6 +177,13 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Cài đặt — Riser cable")
         self.setMinimumSize(720, 560)
         self.setModal(True)
+        self.setStyleSheet(
+            "QCheckBox::indicator{width:18px;height:18px;border:1px solid #2a3540;"
+            "border-radius:4px;background:#0f1620;}"
+            "QCheckBox::indicator:hover{border-color:#3fb6f0;}"
+            "QCheckBox::indicator:checked{background:#3fb6f0;border-color:#3fb6f0;}"
+            "QCheckBox::indicator:checked:hover{background:#5cc5f5;}"
+        )
         self._widgets: dict[str, QWidget] = {}
         self._build_ui()
         self._load_values()
