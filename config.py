@@ -26,3 +26,9 @@ link_post_img= "//10.222.48.222/cdpaoi/AOI-C219B-S1/"
 link_sfc = "http://10.222.48.213:8888/v2/pass/mes/tsc/tsc_vn1/clipThroughStation"
 emp_link = "http://10.222.48.213:8888/v2/platform/staff-detail?factoryCode=tsc_vn1&staffCode="
 token_link = "http://10.245.36.59:8888/v2/platform/get/token?appid=e015ef3a23a842419a6a36373f9db9b8&appsecret=405a03d085a1406dbfb74ee941de2c6e&transid=1000599992700000062014101615303080000001'"
+
+# ── OPL attachments (ảnh kiểm tra) ─────────────────────────
+# Folder gốc chứa các thư mục con YYYYMMDD, mỗi thư mục chứa ảnh
+# YYYYMMDDhhmmss.jpg. Nút Submit sẽ tìm folder mới nhất + ảnh mới
+# nhất trong đó để đẩy lên link_post_img.
+OPL_ATTACHMENT_DIR = r"\\10.222.48.222\cdpaoi\AOI-C219B-S1\OPLEUATTACHMENT"

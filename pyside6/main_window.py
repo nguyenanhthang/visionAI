@@ -14,18 +14,20 @@ Layout giống mockup HTML:
 
 from __future__ import annotations
 
+import shutil
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QObject, QSize, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QImage,
     QBrush, QLinearGradient,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMainWindow, QProgressBar, QSizePolicy,
-    QTextEdit, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMainWindow, QProgressBar, QPushButton,
+    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
 )
 
 import config
@@ -115,6 +117,8 @@ class StatCard(QFrame):
 class ImagePanel(QFrame):
     """Khung hiển thị ảnh kiểm tra, có overlay product id + verdict."""
 
+    submit_clicked = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("Card")
@@ -135,6 +139,13 @@ class ImagePanel(QFrame):
         t.setStyleSheet("color:#9aa4ae;font-size:11px;font-weight:700;letter-spacing:3px;background:transparent;")
         hl.addWidget(t)
         hl.addStretch(1)
+
+        self.submit_btn = QPushButton("Submit")
+        self.submit_btn.setObjectName("Ghost")
+        self.submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.submit_btn.clicked.connect(self.submit_clicked.emit)
+        hl.addWidget(self.submit_btn)
+
         self.meta = QLabel("chưa có ảnh")
         self.meta.setStyleSheet(
             "color:#7d8590;font-size:11px;font-family:'JetBrains Mono',Consolas,monospace;background:transparent;"
@@ -281,6 +292,78 @@ class ImageLabel(QLabel):
         p.drawText(pr, Qt.AlignmentFlag.AlignCenter, text)
 
 
+class OplImageWorker(QObject):
+    """Tìm folder ngày mới nhất + ảnh mới nhất trong OPL, load + upload.
+
+    - root_dir/<YYYYMMDD>/<YYYYMMDDhhmmss>.jpg
+    - Sort folder + file theo TÊN giảm dần để chọn "mới nhất".
+    - Upload = shutil.copy2 sang upload_dir (UNC share của hệ thống).
+    """
+
+    image_ready = Signal(str, QImage)   # filename, QImage
+    upload_done = Signal(bool, str)     # ok, message
+    error       = Signal(str)
+    finished    = Signal()
+
+    _IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
+
+    def __init__(self, root_dir: str, upload_dir: str = "",
+                 parent: QObject | None = None):
+        super().__init__(parent)
+        self.root_dir = root_dir
+        self.upload_dir = upload_dir
+
+    @Slot()
+    def run(self):
+        try:
+            root = Path(self.root_dir)
+            if not root.exists():
+                self.error.emit(f"Folder gốc không tồn tại: {root}")
+                return
+
+            date_folders = sorted(
+                (p for p in root.iterdir()
+                 if p.is_dir() and p.name.isdigit() and len(p.name) == 8),
+                key=lambda p: p.name,
+                reverse=True,
+            )
+            if not date_folders:
+                self.error.emit(f"{root.name} không có folder YYYYMMDD nào")
+                return
+            latest_folder = date_folders[0]
+
+            imgs = sorted(
+                (p for p in latest_folder.iterdir()
+                 if p.is_file() and p.suffix.lower() in self._IMG_EXTS),
+                key=lambda p: p.name,
+                reverse=True,
+            )
+            if not imgs:
+                self.error.emit(f"Folder {latest_folder.name} không có ảnh")
+                return
+            latest_img = imgs[0]
+
+            qimg = QImage(str(latest_img))
+            if qimg.isNull():
+                self.error.emit(f"Không load được ảnh {latest_img.name}")
+                return
+            self.image_ready.emit(f"{latest_folder.name}/{latest_img.name}", qimg)
+
+            if self.upload_dir:
+                try:
+                    dest_parent = Path(self.upload_dir)
+                    dest_parent.mkdir(parents=True, exist_ok=True)
+                    dest = dest_parent / latest_img.name
+                    shutil.copy2(str(latest_img), str(dest))
+                    self.upload_done.emit(True, f"đã copy → {dest}")
+                except Exception as exc:
+                    self.upload_done.emit(False, f"upload lỗi: {exc}")
+        except Exception as exc:
+            self.error.emit(repr(exc))
+        finally:
+            self.finished.emit()
+
+
 # ── icon helpers ─────────────────────────────────────────────────
 def _camera_icon(size: int, color: str) -> QPixmap:
     pm = QPixmap(size, size); pm.fill(Qt.GlobalColor.transparent)
@@ -368,6 +451,7 @@ class MainWindow(QMainWindow):
 
         # left: image panel
         self.image_panel = ImagePanel()
+        self.image_panel.submit_clicked.connect(self._on_submit_clicked)
         bl.addWidget(self.image_panel, 3)
 
         # right: info + stats + log
@@ -701,6 +785,41 @@ class MainWindow(QMainWindow):
         level = "ok" if api_ok else "err"
         api_txt = "200 OK" if api_ok else "fail"
         self._log(f"{code} → API {api_txt}, ghi D250={plc_value}", tag, level=level)
+
+    # ── OPL submit (nút Submit trên header ảnh) ──────────────
+    def _on_submit_clicked(self):
+        if getattr(self, "_opl_thread", None) is not None:
+            return  # đang chạy, bỏ qua click thừa
+        self.image_panel.submit_btn.setEnabled(False)
+        self.image_panel.meta.setText("đang tìm ảnh mới nhất…")
+        self._log("Submit: tìm ảnh OPL mới nhất", "SYS")
+
+        self._opl_thread = QThread(self)
+        self._opl_worker = OplImageWorker(
+            root_dir=config.OPL_ATTACHMENT_DIR,
+            upload_dir=config.link_post_img,
+        )
+        self._opl_worker.moveToThread(self._opl_thread)
+        self._opl_thread.started.connect(self._opl_worker.run)
+        self._opl_worker.image_ready.connect(self._on_opl_image_ready)
+        self._opl_worker.upload_done.connect(self._on_opl_upload_done)
+        self._opl_worker.error.connect(lambda e: self._log(e, "SYS", level="err"))
+        self._opl_worker.finished.connect(self._on_opl_finished)
+        self._opl_worker.finished.connect(self._opl_thread.quit)
+        self._opl_thread.start()
+
+    def _on_opl_image_ready(self, name: str, qimg: QImage):
+        self.image_panel.set_image(qimg, name)
+        self._log(f"Đã load ảnh: {name}", "SYS", level="ok")
+
+    def _on_opl_upload_done(self, ok: bool, msg: str):
+        level = "ok" if ok else "err"
+        self._log(f"Upload: {msg}", "SYS", level=level)
+
+    def _on_opl_finished(self):
+        self.image_panel.submit_btn.setEnabled(True)
+        self._opl_thread = None
+        self._opl_worker = None
 
     def _on_plc_result(self, data: dict):
         pid = data.get("product_id", "")
