@@ -29,7 +29,11 @@ emp_link = "http://10.222.48.213:8888/v2/platform/staff-detail?factoryCode=tsc_v
 token_link = "http://10.245.36.59:8888/v2/platform/get/token?appid=e015ef3a23a842419a6a36373f9db9b8&appsecret=405a03d085a1406dbfb74ee941de2c6e&transid=1000599992700000062014101615303080000001'"
 
 # ── OPL attachments (ảnh kiểm tra) ─────────────────────────
-# Folder gốc — Submit sẽ tìm subfolder có mtime mới nhất, rồi
-# lấy file ảnh có mtime mới nhất trong subfolder đó để đẩy
-# lên link_post_img.
-OPL_ATTACHMENT_DIR = r"D:\Folder_python\data"
+# Ảnh được hệ thống AOI chia làm 2 cây:
+#   <OPL_OK_DIR>\<YYYY-MM-DD>\<image>.png  — sản phẩm OK
+#   <OPL_NG_DIR>\<YYYY-MM-DD>\<image>.png  — sản phẩm NG
+# Khi PLC reg 300 = 1 → lấy ảnh từ OK, = 2 → lấy từ NG.
+# Submit/auto-trigger sẽ chọn subfolder có mtime mới nhất rồi
+# lấy file ảnh có mtime mới nhất trong subfolder đó.
+OPL_OK_DIR = r"D:\anh\OK"
+OPL_NG_DIR = r"D:\anh\NG"

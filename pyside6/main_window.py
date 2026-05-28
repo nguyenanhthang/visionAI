@@ -510,14 +510,14 @@ class MainWindow(QMainWindow):
         )
 
     # ── OPL upload (auto trigger sau mỗi PLC verdict) ────────
-    def _trigger_opl_upload(self, sn: str, verdict_label: str):
+    def _trigger_opl_upload(self, sn: str, verdict_label: str, root_dir: str):
         if getattr(self, "_opl_thread", None) is not None:
             return  # đang chạy, bỏ qua trigger trùng
-        self._log(f"Tìm ảnh OPL mới nhất cho {sn} ({verdict_label})…", "SYS")
+        self._log(f"Tìm ảnh {verdict_label} mới nhất cho {sn} trong {root_dir}…", "SYS")
 
         self._opl_thread = QThread(self)
         self._opl_worker = OplImageWorker(
-            root_dir=config.OPL_ATTACHMENT_DIR,
+            root_dir=root_dir,
             upload_dir=config.link_post_img,
             sn=sn,
             verdict_label=verdict_label,
@@ -561,9 +561,14 @@ class MainWindow(QMainWindow):
         self._log(f"AOI verdict: {pid or '—'} → {label}", tag, level=level)
         # đẩy kết quả lên SFC + đẩy ảnh OPL
         if result in ("PASS", "FAIL"):
-            verdict_label = "Passed" if result == "PASS" else "Failed"
+            if result == "PASS":
+                verdict_label = "Passed"
+                root_dir = config.OPL_OK_DIR
+            else:
+                verdict_label = "Failed"
+                root_dir = config.OPL_NG_DIR
             self._push_sfc_result(pid, result)
-            self._trigger_opl_upload(pid, verdict_label)
+            self._trigger_opl_upload(pid, verdict_label, root_dir)
 
     # ── SFC clipThroughStation push ──────────────────────────
     def _push_sfc_result(self, sn: str, result: str):
