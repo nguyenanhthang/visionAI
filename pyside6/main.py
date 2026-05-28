@@ -1,4 +1,4 @@
-"""Entry point — PySide6 version of the Vision AI inspection app.
+"""Entry point — PySide6 version of the Riser cable inspection app.
 
 Workflow:
     1. Hiển thị LoginWindow (modal). Đóng → có employee_id hoặc None.
@@ -26,8 +26,8 @@ def load_stylesheet() -> str:
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Vision AI")
-    app.setOrganizationName("Vision AI")
+    app.setApplicationName("Riser cable")
+    app.setOrganizationName("Riser cable")
     app.setStyle("Fusion")
     app.setStyleSheet(load_stylesheet())
 

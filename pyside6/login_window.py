@@ -55,7 +55,7 @@ class ManualLoginWorker(QObject):
 
 # ── helpers ──────────────────────────────────────────────────
 def make_brand_pixmap(size: int = 38) -> QPixmap:
-    """Vẽ logo Vision AI (eye-icon trên gradient cyan) ra QPixmap."""
+    """Vẽ logo Riser cable (eye-icon trên gradient cyan) ra QPixmap."""
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -132,7 +132,7 @@ class LoginWindow(QDialog):
         super().__init__(parent)
         self.result_employee: dict | None = None
 
-        self.setWindowTitle("Đăng nhập — Vision AI")
+        self.setWindowTitle("Đăng nhập — Riser cable")
         self.setWindowIcon(QIcon(make_brand_pixmap(64)))
         self.setFixedSize(480, 620)
         self.setModal(True)
@@ -157,7 +157,7 @@ class LoginWindow(QDialog):
         logo.setFixedSize(40, 40)
         brand_row.addWidget(logo)
         name = QLabel(); name.setObjectName("BrandName")
-        name.setText("VISION <span style='color:#3fb6f0;'> AI</span>")
+        name.setText("RISER <span style='color:#3fb6f0;'> CABLE</span>")
         name.setTextFormat(Qt.TextFormat.RichText)
         brand_row.addWidget(name)
         brand_row.addStretch(1)

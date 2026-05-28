@@ -1,4 +1,4 @@
-# Vision AI — PySide6
+# Riser cable — PySide6
 
 Phiên bản chuyển từ CustomTkinter sang **PySide6** + làm lại giao diện theo phong cách
 industrial dashboard.

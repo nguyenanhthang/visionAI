@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         self._scan_times: deque[float] = deque()
         self._started_at = time.time()
 
-        self.setWindowTitle("Vision AI — Giao diện chính")
+        self.setWindowTitle("Riser cable — Giao diện chính")
         self.setWindowIcon(QIcon(make_brand_pixmap(64)))
         self.resize(1500, 900)
         self.setMinimumSize(1180, 720)
@@ -480,7 +480,7 @@ class MainWindow(QMainWindow):
         logo.setFixedSize(34, 34)
         lay.addWidget(logo)
 
-        name = QLabel("VISION <span style='color:#3fb6f0;'> AI</span>")
+        name = QLabel("RISER <span style='color:#3fb6f0;'> CABLE</span>")
         name.setTextFormat(Qt.TextFormat.RichText)
         name.setStyleSheet("font-size:16px;font-weight:700;letter-spacing:2px;")
         lay.addWidget(name)
