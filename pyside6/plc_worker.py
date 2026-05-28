@@ -86,38 +86,39 @@ class SimulatedPLCWorker(PLCWorker):
         })
 
 
-class PanasonicPLCWorker(PLCWorker):
-    """Đọc Panasonic MEWTOCOL qua panasonic.py (kế thừa code cũ).
+class H3U_PLCWorker(PLCWorker):
+    """Đọc Inovance H3U/H5U qua Modbus TCP (h3u_h5u.py).
 
-    Override _poll để decode register thật. Ví dụ scaffold ở dưới —
-    sửa lại register address theo line của bạn.
+    Override _poll để decode register thật. Scaffold dưới đọc 4 register
+    liên tiếp từ ``trigger_addr`` và phát hiện rising edge ở word đầu
+    và cuối — sửa lại theo wiring line của bạn.
     """
 
-    def __init__(self, com: str, baud: int, poll_interval: float = 0.2,
+    def __init__(self, ip: str, poll_interval: float = 0.2,
+                 trigger_addr: int = 0,
                  parent: QObject | None = None):
         super().__init__(poll_interval=poll_interval, parent=parent)
-        self.com = com
-        self.baud = baud
+        self.ip = ip
+        self.trigger_addr = trigger_addr
         self._prev_trigger_right = 0
         self._prev_trigger_left = 0
 
     def _connect(self):
-        # panasonic.py lazy-opens trên call đầu tiên → ping 1 lần để xác nhận.
-        import panasonic
-        v = panasonic.read_data_panasonic(self.com, self.baud, "D0")
+        import h3u_h5u
+        v = h3u_h5u.read_data_h3u(self.ip, self.trigger_addr)
         if v is None:
-            raise RuntimeError(f"PLC {self.com} không phản hồi")
+            raise RuntimeError(f"PLC {self.ip} không phản hồi (Modbus TCP)")
 
     def _disconnect(self):
         try:
-            import panasonic
-            panasonic.close_all()
+            import h3u_h5u
+            h3u_h5u.close_all()
         except Exception:
             pass
 
     def _poll(self):
-        import panasonic
-        regs = panasonic.read_multi_data_panasonic(self.com, self.baud, "D17800", 4)
+        import h3u_h5u
+        regs = h3u_h5u.read_multi_data_h3u(self.ip, self.trigger_addr, 4)
         if not regs:
             return
 

@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 import config
 from login_window import StatusDot, make_brand_pixmap
-from plc_worker import SimulatedPLCWorker, PanasonicPLCWorker
+from plc_worker import SimulatedPLCWorker, H3U_PLCWorker
 from scanner import ProductScanner
 
 
@@ -386,8 +386,9 @@ class MainWindow(QMainWindow):
             self._set_chip(self.scanner_chip, "Scanner offline", "#7d8590")
             self.sb_scanner.dot.set_color("#7d8590")
         else:
-            self.plc = PanasonicPLCWorker(
-                com=config.PLC_PORT, baud=config.PLC_BAUDRATE,
+            self.plc = H3U_PLCWorker(
+                ip=config.PLC_IP,
+                trigger_addr=config.PLC_TRIGGER_ADDR,
                 poll_interval=1.0 / max(config.PLC_POLL_HZ, 1),
             )
         self.plc.moveToThread(self._plc_thread)
@@ -403,7 +404,7 @@ class MainWindow(QMainWindow):
 
     def _on_plc_connected(self):
         self._set_chip(self.plc_chip, "PLC online", "#2ea043")
-        self.sb_plc.lbl.setText(f"PLC · {config.PLC_PORT} {config.PLC_BAUDRATE}")
+        self.sb_plc.lbl.setText(f"PLC · {config.PLC_IP}:502")
         self.sb_plc.dot.set_color("#2ea043")
         self._log("PLC connected", "PLC", level="ok")
 
@@ -422,8 +423,8 @@ class MainWindow(QMainWindow):
             serial_timeout=config.SCANNER_TIMEOUT,
             sn_check_prefix=config.sn_link1,
             sn_check_suffix=config.sn_link2,
-            plc_port=config.PLC_PORT,
-            plc_baud=config.PLC_BAUDRATE,
+            plc_ip=config.PLC_IP,
+            plc_verdict_addr=config.PLC_VERDICT_ADDR,
             request_timeout=config.API_REQUEST_TIMEOUT,
         )
         self.product_scanner.moveToThread(self._scan_thread)
