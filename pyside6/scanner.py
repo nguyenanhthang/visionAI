@@ -39,6 +39,42 @@ except ImportError:
 import employees
 
 
+def validate_employee_api(token_url: str, employee_url_prefix: str,
+                          badge_id: str, request_timeout: float = 5.0):
+    """Gọi API xác thực nhân viên — trả về (ok, data).
+
+    ok=True  → data = {"staff_id":..., "staff_name":...}
+    ok=False → data = thông báo lỗi (str)
+    """
+    if requests is None:
+        return False, "thư viện requests chưa cài"
+    try:
+        r = requests.get(token_url, timeout=request_timeout)
+        r.raise_for_status()
+        token = r.json()["data"]["token"]
+
+        r = requests.get(
+            employee_url_prefix + badge_id,
+            headers={"token": token},
+            timeout=request_timeout,
+        )
+        if r.status_code != 200:
+            return False, f"API phản hồi {r.status_code}"
+
+        payload = r.json().get("data")
+        if not payload or payload == "null":
+            return False, f"Mã nhân viên '{badge_id}' không tồn tại."
+
+        return True, {
+            "staff_id": payload["staffCode"],
+            "staff_name": payload["staffName"],
+        }
+    except requests.Timeout:
+        return False, "API timeout — kiểm tra kết nối mạng."
+    except Exception as exc:
+        return False, f"Lỗi gọi API: {exc}"
+
+
 class BadgeScanner(QObject):
     """Đọc badge từ serial scanner, xác thực rồi emit signal."""
 
@@ -151,33 +187,14 @@ class BadgeScanner(QObject):
         self.login_ok.emit({"staff_id": badge_id, "staff_name": name})
 
     def _validate_api(self, badge_id: str):
-        try:
-            r = requests.get(self.token_url, timeout=self.request_timeout)
-            r.raise_for_status()
-            token = r.json()["data"]["token"]
-
-            r = requests.get(
-                self.employee_url_prefix + badge_id,
-                headers={"token": token},
-                timeout=self.request_timeout,
-            )
-            if r.status_code != 200:
-                self.error.emit(f"API phản hồi {r.status_code}")
-                return
-
-            payload = r.json().get("data")
-            if not payload or payload == "null":
-                self.error.emit(f"Mã nhân viên '{badge_id}' không tồn tại.")
-                return
-
-            self.login_ok.emit({
-                "staff_id": payload["staffCode"],
-                "staff_name": payload["staffName"],
-            })
-        except requests.Timeout:
-            self.error.emit("API timeout — kiểm tra kết nối mạng.")
-        except Exception as exc:
-            self.error.emit(f"Lỗi gọi API: {exc}")
+        ok, data = validate_employee_api(
+            self.token_url, self.employee_url_prefix,
+            badge_id, self.request_timeout,
+        )
+        if ok:
+            self.login_ok.emit(data)
+        else:
+            self.error.emit(data)
 
 
 class ProductScanner(QObject):

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QSize, QThread, Signal
+from PySide6.QtCore import Qt, QObject, QSize, QThread, Signal, Slot
 from PySide6.QtGui import QIcon, QPainter, QColor, QBrush, QPen, QPixmap, QFont
 from PySide6.QtWidgets import (
     QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -19,7 +19,38 @@ from PySide6.QtWidgets import (
 
 import config
 import employees
-from scanner import BadgeScanner
+from scanner import BadgeScanner, validate_employee_api
+
+
+class ManualLoginWorker(QObject):
+    """Gọi API xác thực cho mã gõ tay (chạy trên QThread riêng)."""
+
+    login_ok = Signal(dict)   # {"staff_id":..., "staff_name":...}
+    error    = Signal(str)
+    finished = Signal()
+
+    def __init__(self, token_url: str, employee_url_prefix: str,
+                 badge_id: str, request_timeout: float = 5.0,
+                 parent: QObject | None = None):
+        super().__init__(parent)
+        self.token_url = token_url
+        self.employee_url_prefix = employee_url_prefix
+        self.badge_id = badge_id
+        self.request_timeout = request_timeout
+
+    @Slot()
+    def run(self):
+        try:
+            ok, data = validate_employee_api(
+                self.token_url, self.employee_url_prefix,
+                self.badge_id, self.request_timeout,
+            )
+            if ok:
+                self.login_ok.emit(data)
+            else:
+                self.error.emit(data)
+        finally:
+            self.finished.emit()
 
 
 # ── helpers ──────────────────────────────────────────────────
@@ -266,12 +297,48 @@ class LoginWindow(QDialog):
             self._flag_field_error()
             self._log("Mã nhân viên đang để trống.", "err")
             return
-        name = employees.lookup(eid)
-        if name is None:
-            self._flag_field_error()
-            self._log(f"Mã nhân viên '{eid}' không tồn tại.", "err")
+        if getattr(self, "_manual_thread", None) is not None:
+            return  # đang gọi API, bỏ qua click thừa
+
+        # Không config API → fallback local lookup
+        if not config.API_TOKEN_URL or not config.API_EMPLOYEE_URL_PREFIX:
+            name = employees.lookup(eid)
+            if name is None:
+                self._flag_field_error()
+                self._log(f"Mã nhân viên '{eid}' không tồn tại.", "err")
+                return
+            self._finish_login(eid, name)
             return
-        self._finish_login(eid, name)
+
+        # Có config API → gọi API trên worker thread
+        self.login_btn.setEnabled(False)
+        self.entry.setEnabled(False)
+        self._log(f"Xác thực {eid} qua API…", "info")
+
+        self._manual_thread = QThread(self)
+        self._manual_worker = ManualLoginWorker(
+            token_url=config.API_TOKEN_URL,
+            employee_url_prefix=config.API_EMPLOYEE_URL_PREFIX,
+            badge_id=eid,
+            request_timeout=config.API_REQUEST_TIMEOUT,
+        )
+        self._manual_worker.moveToThread(self._manual_thread)
+        self._manual_thread.started.connect(self._manual_worker.run)
+        self._manual_worker.login_ok.connect(self._on_login_ok)
+        self._manual_worker.error.connect(self._on_manual_error)
+        self._manual_worker.finished.connect(self._on_manual_finished)
+        self._manual_worker.finished.connect(self._manual_thread.quit)
+        self._manual_thread.start()
+
+    def _on_manual_error(self, msg: str):
+        self._flag_field_error()
+        self._log(msg, "err")
+
+    def _on_manual_finished(self):
+        self.login_btn.setEnabled(True)
+        self.entry.setEnabled(True)
+        self._manual_thread = None
+        self._manual_worker = None
 
     def _finish_login(self, employee_id: str, employee_name: str):
         self.result_employee = {"id": employee_id, "name": employee_name}
@@ -284,6 +351,15 @@ class LoginWindow(QDialog):
             self.scanner.stop()
             self._scanner_thread.quit()
             self._scanner_thread.wait(1500)
+        except Exception:
+            pass
+        # cleanup manual login worker nếu còn chạy
+        try:
+            if getattr(self, "_manual_thread", None) is not None:
+                self._manual_thread.quit()
+                self._manual_thread.wait(2000)
+                self._manual_thread = None
+                self._manual_worker = None
         except Exception:
             pass
 
