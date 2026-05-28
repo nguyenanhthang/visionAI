@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 import config
 import employees
 from scanner import BadgeScanner, validate_employee_api
+from settings_window import SettingsDialog, gear_icon
 
 
 class ManualLoginWorker(QObject):
@@ -161,6 +162,20 @@ class LoginWindow(QDialog):
         name.setTextFormat(Qt.TextFormat.RichText)
         brand_row.addWidget(name)
         brand_row.addStretch(1)
+
+        self.settings_btn = QPushButton()
+        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.setToolTip("Cài đặt")
+        self.settings_btn.setFixedSize(34, 34)
+        self.settings_btn.setIcon(QIcon(gear_icon(20, "#9aa4ae")))
+        self.settings_btn.setIconSize(QSize(20, 20))
+        self.settings_btn.setStyleSheet(
+            "QPushButton{background:#101820;border:1px solid #2a3540;border-radius:8px;}"
+            "QPushButton:hover{border-color:#3fb6f0;}"
+        )
+        self.settings_btn.clicked.connect(self._open_settings)
+        brand_row.addWidget(self.settings_btn)
+
         card_l.addLayout(brand_row)
 
         sub = QLabel("Quét thẻ nhân viên hoặc nhập mã thủ công.")
@@ -242,6 +257,12 @@ class LoginWindow(QDialog):
         self.scanner.login_ok.connect(self._on_login_ok)
         self.scanner.finished.connect(self._scanner_thread.quit)
         self._scanner_thread.start()
+
+    # ── settings ─────────────────────────────────────────────
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() == SettingsDialog.DialogCode.Accepted:
+            self._log("Đã lưu cài đặt — đăng nhập lại để áp dụng", "ok")
 
     # ── logging helper ───────────────────────────────────────
     def _log(self, message: str, kind: str = "info"):

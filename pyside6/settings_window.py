@@ -14,7 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPointF
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
@@ -39,6 +40,28 @@ def load_settings_overrides() -> dict:
         if hasattr(config, k):
             setattr(config, k, v)
     return data
+
+
+def gear_icon(size: int, color: str) -> QPixmap:
+    """Vẽ bánh răng 8 răng — public, dùng chung cho main + login."""
+    import math
+    pm = QPixmap(size, size); pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color)); pen.setWidthF(max(1.4, size * 0.08))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+    cx, cy = size / 2, size / 2
+    p.drawEllipse(QPointF(cx, cy), size * 0.28, size * 0.28)
+    p.drawEllipse(QPointF(cx, cy), size * 0.10, size * 0.10)
+    inner, outer = size * 0.34, size * 0.46
+    for i in range(8):
+        a = i * (math.pi / 4) + math.pi / 8
+        x1 = cx + inner * math.cos(a); y1 = cy + inner * math.sin(a)
+        x2 = cx + outer * math.cos(a); y2 = cy + outer * math.sin(a)
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+    p.end()
+    return pm
 
 
 def save_settings(data: dict):
