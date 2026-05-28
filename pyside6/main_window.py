@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QObject, QSize, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QIcon, QImage, QLinearGradient, QPainter, QPen,
     QPixmap,
@@ -268,16 +268,17 @@ class MainWindow(QMainWindow):
         )
         lay.addWidget(self.clock_lbl)
 
-        # settings button
-        self.settings_btn = QPushButton("⚙")
+        # settings button (gear icon)
+        self.settings_btn = QPushButton()
         self.settings_btn.setObjectName("Ghost")
         self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.settings_btn.setToolTip("Cài đặt")
-        self.settings_btn.setFixedSize(32, 30)
+        self.settings_btn.setFixedSize(34, 30)
+        self.settings_btn.setIcon(QIcon(_gear_icon(20, "#9aa4ae")))
+        self.settings_btn.setIconSize(QSize(20, 20))
         self.settings_btn.setStyleSheet(
-            "QPushButton{background:#101820;color:#9aa4ae;border:1px solid #2a3540;"
-            "border-radius:6px;font-size:16px;}"
-            "QPushButton:hover{color:#3fb6f0;border-color:#3fb6f0;}"
+            "QPushButton{background:#101820;border:1px solid #2a3540;border-radius:6px;}"
+            "QPushButton:hover{border-color:#3fb6f0;}"
         )
         self.settings_btn.clicked.connect(self._open_settings)
         lay.addWidget(self.settings_btn)
@@ -674,6 +675,33 @@ def _user_icon(size: int, color: str) -> QPixmap:
     from PySide6.QtCore import QRectF
     p.drawEllipse(QRectF(size*0.30, size*0.14, size*0.40, size*0.40))
     p.drawArc(QRectF(size*0.14, size*0.50, size*0.72, size*0.72), 0, 180 * 16)
+    p.end()
+    return pm
+
+
+def _gear_icon(size: int, color: str) -> QPixmap:
+    import math
+    pm = QPixmap(size, size); pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color)); pen.setWidthF(max(1.4, size * 0.08))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+    from PySide6.QtCore import QPointF
+    cx, cy = size / 2, size / 2
+    # outer + inner circle of the gear hub
+    body_r = size * 0.28
+    p.drawEllipse(QPointF(cx, cy), body_r, body_r)
+    hole_r = size * 0.10
+    p.drawEllipse(QPointF(cx, cy), hole_r, hole_r)
+    # 8 răng đều quanh hub
+    tooth_inner = size * 0.34
+    tooth_outer = size * 0.46
+    for i in range(8):
+        a = i * (math.pi / 4) + math.pi / 8  # offset cho lệch 22.5°
+        x1 = cx + tooth_inner * math.cos(a); y1 = cy + tooth_inner * math.sin(a)
+        x2 = cx + tooth_outer * math.cos(a); y2 = cy + tooth_outer * math.sin(a)
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
     p.end()
     return pm
 

@@ -16,9 +16,9 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 import config
@@ -75,13 +75,50 @@ class _DirField(QWidget):
         self.edit.setText(v)
 
 
+class _ComField(QComboBox):
+    """Combo box các cổng COM đang cắm, editable để gõ tay."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self._populate()
+
+    def _populate(self):
+        try:
+            from serial.tools import list_ports
+            ports = sorted(list_ports.comports(), key=lambda p: p.device)
+            for p in ports:
+                desc = (p.description or "").strip()
+                label = p.device + (f" — {desc}" if desc and desc != "n/a" else "")
+                self.addItem(label, p.device)
+        except Exception:
+            pass
+
+    def text(self) -> str:
+        cur = self.currentText().strip()
+        # Nếu match item trong dropdown → trả userData (chỉ tên COMx)
+        for i in range(self.count()):
+            if self.itemText(i) == cur:
+                return self.itemData(i) or cur
+        return cur
+
+    def setText(self, v: str):
+        v = (v or "").strip()
+        for i in range(self.count()):
+            if self.itemData(i) == v:
+                self.setCurrentIndex(i)
+                return
+        if v:
+            self.setEditText(v)
+
+
 class SettingsDialog(QDialog):
     """Tabs: Scanner · PLC · API/SFC · Folders."""
 
-    # (key, label, type) — type ∈ {"str","int","float","bool","dir"}
+    # (key, label, type) — type ∈ {"str","int","float","bool","dir","com"}
     SCHEMA = {
         "Scanner": [
-            ("SCANNER_PORT",     "COM port",            "str"),
+            ("SCANNER_PORT",     "COM port",            "com"),
             ("SCANNER_BAUDRATE", "Baudrate",            "int"),
             ("SCANNER_READ_SIZE","Read size badge",     "int"),
             ("SCANNER_TIMEOUT",  "Timeout (s)",         "float"),
@@ -96,16 +133,14 @@ class SettingsDialog(QDialog):
             ("PLC_SIMULATED",         "Chạy giả lập",           "bool"),
         ],
         "API / SFC": [
-            ("STATION_NAME",            "Station name",          "str"),
-            ("ON_OFF_SFC",              "Bật push SFC",          "bool"),
-            ("sn_link1",                "SN check URL prefix",   "str"),
-            ("sn_link2",                "SN check URL suffix",   "str"),
-            ("link_sfc",                "clipThroughStation",    "str"),
-            ("token_link",              "Token URL",             "str"),
-            ("emp_link",                "Employee URL prefix",   "str"),
-            ("API_TOKEN_URL",           "API_TOKEN_URL (fb)",    "str"),
-            ("API_EMPLOYEE_URL_PREFIX", "API_EMPLOYEE_URL_PREFIX","str"),
-            ("API_REQUEST_TIMEOUT",     "Request timeout (s)",   "int"),
+            ("STATION_NAME",  "Station name",          "str"),
+            ("ON_OFF_SFC",    "Bật push SFC",          "bool"),
+            ("sn_link1",      "SN check URL prefix",   "str"),
+            ("sn_link2",      "SN check URL suffix",   "str"),
+            ("link_sfc",      "clipThroughStation",    "str"),
+            ("token_link",    "Token URL",             "str"),
+            ("emp_link",      "Employee URL prefix",   "str"),
+            ("API_REQUEST_TIMEOUT", "Request timeout (s)", "int"),
         ],
         "Folder ảnh": [
             ("OPL_OK_DIR",     "Folder ảnh OK",     "dir"),
@@ -160,6 +195,8 @@ class SettingsDialog(QDialog):
             return QCheckBox()
         if typ == "dir":
             return _DirField()
+        if typ == "com":
+            return _ComField()
         return QLineEdit()
 
     def _load_values(self):
