@@ -16,18 +16,17 @@ from __future__ import annotations
 
 import shutil
 import time
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, QSize, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
-    QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QImage,
-    QBrush, QLinearGradient,
+    QBrush, QColor, QFont, QIcon, QImage, QLinearGradient, QPainter, QPen,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMainWindow, QProgressBar, QPushButton,
-    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMainWindow, QSizePolicy, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
 import config
@@ -59,237 +58,6 @@ class StatusChip(QFrame):
         self.label.setText(text)
         self.dot.set_color(color)
 
-
-class StatCard(QFrame):
-    """Card hiển thị 1 con số lớn (TOTAL / OK / NG)."""
-
-    PALETTES = {
-        # num_color, border (subtle tinted)
-        "total": ("#79c0ff", "#1f4a64"),
-        "ok":    ("#7ee787", "#1d4a2c"),
-        "ng":    ("#ffa198", "#5a2925"),
-    }
-
-    def __init__(self, label: str, kind: str = "total", parent=None):
-        super().__init__(parent)
-        self.setObjectName("StatCard")
-        num_color, border = self.PALETTES.get(kind, self.PALETTES["total"])
-        self.setMinimumHeight(98)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 12); lay.setSpacing(2)
-
-        lab = QLabel(label)
-        lab.setStyleSheet(
-            "color:#7d8590;font-size:10px;font-weight:700;letter-spacing:3px;"
-            "background:transparent;border:none;"
-        )
-        lay.addWidget(lab)
-        lay.addStretch(1)
-
-        self.num = QLabel("0")
-        self.num.setStyleSheet(
-            f"color:{num_color};font-size:34px;font-weight:700;"
-            "background:transparent;border:none;"
-        )
-        self.num.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        lay.addWidget(self.num)
-
-        self.sub = QLabel("")
-        self.sub.setStyleSheet(
-            "color:#7d8590;font-size:11px;"
-            "font-family:'JetBrains Mono',Consolas,monospace;"
-            "background:transparent;border:none;"
-        )
-        lay.addWidget(self.sub)
-
-        # use objectName selector so the border doesn't cascade to child widgets
-        self.setStyleSheet(
-            f"QFrame#StatCard{{background:#0f1620;border:1px solid {border};"
-            "border-radius:10px;}"
-        )
-
-    def set_value(self, value: int, sub: str = ""):
-        self.num.setText(str(value))
-        self.sub.setText(sub)
-
-
-class ImagePanel(QFrame):
-    """Khung hiển thị ảnh kiểm tra, có overlay product id + verdict."""
-
-    submit_clicked = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("Card")
-        self.setStyleSheet(
-            "QFrame#Card{background:#141b22;border:1px solid #2a3540;border-radius:12px;}"
-        )
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
-
-        # header
-        hdr = QFrame(); hdr.setStyleSheet("background:transparent;border:none;")
-        hl = QHBoxLayout(hdr); hl.setContentsMargins(16, 14, 16, 12); hl.setSpacing(10)
-        ic = QLabel(); ic.setPixmap(_camera_icon(18, "#3fb6f0"))
-        ic.setFixedSize(18, 18)
-        hl.addWidget(ic)
-        t = QLabel("HÌNH ẢNH KIỂM TRA")
-        t.setStyleSheet("color:#9aa4ae;font-size:11px;font-weight:700;letter-spacing:3px;background:transparent;")
-        hl.addWidget(t)
-        hl.addStretch(1)
-
-        self.submit_btn = QPushButton("Submit")
-        self.submit_btn.setObjectName("Ghost")
-        self.submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.submit_btn.clicked.connect(self.submit_clicked.emit)
-        hl.addWidget(self.submit_btn)
-
-        self.meta = QLabel("chưa có ảnh")
-        self.meta.setStyleSheet(
-            "color:#7d8590;font-size:11px;font-family:'JetBrains Mono',Consolas,monospace;background:transparent;"
-        )
-        hl.addWidget(self.meta)
-        outer.addWidget(hdr)
-
-        sep = QFrame(); sep.setObjectName("Separator")
-        sep.setStyleSheet("background:#2a3540;max-height:1px;min-height:1px;")
-        outer.addWidget(sep)
-
-        # frame area
-        wrap = QFrame(); wrap.setStyleSheet("background:transparent;border:none;")
-        wl = QVBoxLayout(wrap); wl.setContentsMargins(14, 14, 14, 14)
-        self.image_label = ImageLabel()
-        wl.addWidget(self.image_label)
-        outer.addWidget(wrap, 1)
-
-    def set_image(self, pil_or_qimage, meta: str = ""):
-        if pil_or_qimage is None:
-            self.image_label.set_placeholder()
-        else:
-            qimg = _to_qimage(pil_or_qimage)
-            self.image_label.set_image(qimg)
-        if meta:
-            self.meta.setText(meta)
-
-    def set_verdict(self, ok: bool | None, product_id: str = ""):
-        self.image_label.set_verdict(ok, product_id)
-
-
-class ImageLabel(QLabel):
-    """QLabel custom: vẽ placeholder striped + overlay verdict khi không có ảnh thật."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumSize(400, 300)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._qimg: QImage | None = None
-        self._verdict: bool | None = None
-        self._product_id = ""
-
-    def set_image(self, qimg: QImage):
-        self._qimg = qimg
-        self.update()
-
-    def set_placeholder(self):
-        self._qimg = None
-        self.update()
-
-    def set_verdict(self, ok, product_id):
-        self._verdict = ok
-        self._product_id = product_id
-        self.update()
-
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = self.rect().adjusted(0, 0, -1, -1)
-
-        # rounded clip
-        from PySide6.QtGui import QPainterPath
-        path = QPainterPath()
-        path.addRoundedRect(r, 10, 10)
-        p.setClipPath(path)
-
-        # background
-        if self._qimg is not None:
-            scaled = self._qimg.scaled(
-                r.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = r.x() + (r.width() - scaled.width()) // 2
-            y = r.y() + (r.height() - scaled.height()) // 2
-            p.fillRect(r, QColor("#0a0f14"))
-            p.drawImage(x, y, scaled)
-        else:
-            # striped placeholder
-            p.fillRect(r, QColor("#0a1015"))
-            p.setPen(Qt.PenStyle.NoPen)
-            stripe = QColor("#0d141a")
-            step = 24
-            for off in range(-r.height(), r.width(), step):
-                p.setBrush(QBrush(stripe))
-                from PySide6.QtCore import QPoint
-                pts = [
-                    QPoint(off,           r.bottom()),
-                    QPoint(off + 12,      r.bottom()),
-                    QPoint(off + 12 + r.height(), r.top()),
-                    QPoint(off + r.height(),      r.top()),
-                ]
-                from PySide6.QtGui import QPolygon
-                p.drawPolygon(QPolygon(pts))
-
-            # center text
-            p.setPen(QColor("#4a5663"))
-            f = QFont("JetBrains Mono"); f.setPointSize(10); f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
-            p.setFont(f)
-            p.drawText(r, Qt.AlignmentFlag.AlignCenter, "[ camera feed · chưa có ảnh ]")
-
-        # overlays
-        p.setClipping(False)
-        if self._product_id:
-            self._draw_pill(p, r.left() + 18, r.top() + 18, f"  {self._product_id}  ", QColor("#e6edf3"))
-        if self._verdict is True:
-            self._draw_verdict(p, r, "PASS", QColor("#7ee787"), QColor(46, 160, 67, 30))
-        elif self._verdict is False:
-            self._draw_verdict(p, r, "FAIL", QColor("#ffa198"), QColor(248, 81, 73, 30))
-        p.end()
-
-    def _draw_pill(self, p: QPainter, x: int, y: int, text: str, color: QColor):
-        f = QFont("JetBrains Mono"); f.setPointSize(10); f.setBold(True)
-        p.setFont(f)
-        fm = p.fontMetrics()
-        w = fm.horizontalAdvance(text) + 12
-        h = fm.height() + 8
-        rect = self.rect().adjusted(x, y, 0, 0)
-        from PySide6.QtCore import QRectF
-        pr = QRectF(x, y, w, h)
-        p.setBrush(QBrush(QColor(10, 14, 19, 220)))
-        p.setPen(QPen(QColor("#2a3540")))
-        p.drawRoundedRect(pr, 6, 6)
-        p.setPen(QPen(color))
-        p.drawText(pr, Qt.AlignmentFlag.AlignCenter, text)
-
-    def _draw_verdict(self, p: QPainter, r, text: str, fg: QColor, bg: QColor):
-        f = QFont("Inter"); f.setPointSize(28); f.setBold(True)
-        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 3)
-        p.setFont(f)
-        fm = p.fontMetrics()
-        w = fm.horizontalAdvance(text) + 48
-        h = fm.height() + 24
-        from PySide6.QtCore import QRectF
-        x = r.right() - w - 18
-        y = r.bottom() - h - 18
-        pr = QRectF(x, y, w, h)
-        border = QColor(fg); border.setAlpha(120)
-        p.setBrush(QBrush(bg))
-        p.setPen(QPen(border, 1.5))
-        p.drawRoundedRect(pr, 12, 12)
-        p.setPen(QPen(fg))
-        p.drawText(pr, Qt.AlignmentFlag.AlignCenter, text)
 
 
 class OplImageWorker(QObject):
@@ -364,50 +132,6 @@ class OplImageWorker(QObject):
             self.finished.emit()
 
 
-# ── icon helpers ─────────────────────────────────────────────────
-def _camera_icon(size: int, color: str) -> QPixmap:
-    pm = QPixmap(size, size); pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color)); pen.setWidthF(1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-    s = size
-    from PySide6.QtCore import QRectF
-    p.drawRoundedRect(QRectF(s*0.10, s*0.22, s*0.80, s*0.62), 2, 2)
-    p.drawEllipse(QRectF(s*0.32, s*0.36, s*0.36, s*0.36))
-    p.end()
-    return pm
-
-
-# ── PIL/numpy → QImage ───────────────────────────────────────────
-def _to_qimage(src) -> QImage:
-    """Chấp nhận PIL.Image, numpy ndarray, hoặc QImage."""
-    if isinstance(src, QImage):
-        return src
-    # PIL
-    try:
-        from PIL import Image
-        if isinstance(src, Image.Image):
-            img = src.convert("RGBA")
-            data = img.tobytes("raw", "RGBA")
-            return QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888).copy()
-    except ImportError:
-        pass
-    # numpy
-    try:
-        import numpy as np
-        if isinstance(src, np.ndarray):
-            arr = src
-            if arr.ndim == 2:
-                h, w = arr.shape
-                return QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
-            if arr.ndim == 3 and arr.shape[2] in (3, 4):
-                h, w, ch = arr.shape
-                fmt = QImage.Format.Format_RGB888 if ch == 3 else QImage.Format.Format_RGBA8888
-                return QImage(arr.data, w, h, w*ch, fmt).copy()
-    except ImportError:
-        pass
-    raise TypeError(f"Không hỗ trợ kiểu ảnh: {type(src)}")
 
 
 # ── main window ──────────────────────────────────────────────────
@@ -417,16 +141,12 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.employee_id = employee_id
         self.employee_name = employee_name or "—"
-        self._total = 0
-        self._ok = 0
-        self._ng = 0
-        self._scan_times: deque[float] = deque()
         self._started_at = time.time()
 
         self.setWindowTitle("Riser cable — Giao diện chính")
         self.setWindowIcon(QIcon(make_brand_pixmap(64)))
-        self.resize(1500, 900)
-        self.setMinimumSize(1180, 720)
+        self.resize(560, 780)
+        self.setMinimumSize(460, 600)
 
         self._build_ui()
         self._setup_clock()
@@ -445,23 +165,12 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_topbar())
 
         body = QFrame(); body.setStyleSheet("background:#0b1015;border:none;")
-        bl = QHBoxLayout(body)
+        bl = QVBoxLayout(body)
         bl.setContentsMargins(14, 14, 14, 14); bl.setSpacing(14)
         body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        # left: image panel
-        self.image_panel = ImagePanel()
-        self.image_panel.submit_clicked.connect(self._on_submit_clicked)
-        bl.addWidget(self.image_panel, 3)
-
-        # right: info + stats + log
-        right = QFrame(); right.setStyleSheet("background:transparent;border:none;")
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(14)
-        right.setMinimumWidth(420); right.setMaximumWidth(520)
-        rl.addWidget(self._build_info_stats_card(), 0)
-        rl.addWidget(self._build_log_card(), 1)
-        bl.addWidget(right, 0)
+        bl.addWidget(self._build_info_card(), 0)
+        bl.addWidget(self._build_log_card(), 1)
 
         root.addWidget(body, 1)
         root.addWidget(self._build_statusbar())
@@ -546,8 +255,8 @@ class MainWindow(QMainWindow):
 
         return bar
 
-    # ── info + stats ─────────────────────────────────────────
-    def _build_info_stats_card(self) -> QWidget:
+    # ── info card ────────────────────────────────────────────
+    def _build_info_card(self) -> QWidget:
         card = QFrame(); card.setObjectName("Card")
         card.setStyleSheet(
             "QFrame#Card{background:#141b22;border:1px solid #2a3540;border-radius:12px;}"
@@ -565,43 +274,6 @@ class MainWindow(QMainWindow):
         self._info_row(rl, "Tên nhân viên", self.employee_name)
         self._info_row(rl, "Trạm", config.STATION_NAME)
         lay.addWidget(rows)
-
-        lay.addWidget(self._panel_header("SẢN LƯỢNG CA", "07:30 — now", _chart_icon, border_top=True))
-
-        stats_wrap = QFrame()
-        sl = QHBoxLayout(stats_wrap)
-        sl.setContentsMargins(18, 4, 18, 14); sl.setSpacing(8)
-        self.card_total = StatCard("TOTAL", "total")
-        self.card_ok    = StatCard("OK",    "ok")
-        self.card_ng    = StatCard("NG",    "ng")
-        sl.addWidget(self.card_total, 6)
-        sl.addWidget(self.card_ok,    5)
-        sl.addWidget(self.card_ng,    5)
-        lay.addWidget(stats_wrap)
-
-        # yield
-        yield_wrap = QFrame()
-        yl = QVBoxLayout(yield_wrap)
-        yl.setContentsMargins(18, 0, 18, 18); yl.setSpacing(8)
-        self.yield_bar = QProgressBar(); self.yield_bar.setRange(0, 1000)
-        self.yield_bar.setValue(0); self.yield_bar.setFixedHeight(8)
-        self.yield_bar.setTextVisible(False)
-        self.yield_bar.setStyleSheet(
-            "QProgressBar{background:#0a0f14;border:1px solid #2a3540;border-radius:5px;}"
-            "QProgressBar::chunk{background:#2ea043;border-radius:4px;}"
-        )
-        yl.addWidget(self.yield_bar)
-
-        meta_row = QHBoxLayout()
-        lab = QLabel("YIELD")
-        lab.setStyleSheet("color:#7d8590;font-size:11px;font-family:'JetBrains Mono',Consolas,monospace;")
-        self.yield_value_lbl = QLabel("—")
-        self.yield_value_lbl.setStyleSheet(
-            "color:#7ee787;font-size:11px;font-weight:600;font-family:'JetBrains Mono',Consolas,monospace;"
-        )
-        meta_row.addWidget(lab); meta_row.addStretch(1); meta_row.addWidget(self.yield_value_lbl)
-        yl.addLayout(meta_row)
-        lay.addWidget(yield_wrap)
 
         return card
 
@@ -705,7 +377,6 @@ class MainWindow(QMainWindow):
         up = int(time.time() - self._started_at)
         h, m, s = up // 3600, (up % 3600) // 60, up % 60
         self.sb_uptime.setText(f"Uptime {h}h {m:02d}m {s:02d}s")
-        self._refresh_stats()
 
     # ── PLC wiring ───────────────────────────────────────────
     def _setup_plc(self):
@@ -726,7 +397,6 @@ class MainWindow(QMainWindow):
         self.plc.error.connect(lambda e: self._log(e, "PLC", level="err"))
         self.plc.fatal.connect(lambda e: self._log(e, "PLC", level="err"))
         self.plc.result.connect(self._on_plc_result)
-        self.plc.image.connect(self._on_plc_image)
         self.plc.finished.connect(self._plc_thread.quit)
         self._plc_thread.start()
         self._last_result_ts = time.time()
@@ -786,13 +456,11 @@ class MainWindow(QMainWindow):
         api_txt = "200 OK" if api_ok else "fail"
         self._log(f"{code} → API {api_txt}, ghi D250={plc_value}", tag, level=level)
 
-    # ── OPL submit (nút Submit trên header ảnh) ──────────────
-    def _on_submit_clicked(self):
+    # ── OPL upload (auto trigger sau mỗi PLC verdict) ────────
+    def _trigger_opl_upload(self):
         if getattr(self, "_opl_thread", None) is not None:
-            return  # đang chạy, bỏ qua click thừa
-        self.image_panel.submit_btn.setEnabled(False)
-        self.image_panel.meta.setText("đang tìm ảnh mới nhất…")
-        self._log("Submit: tìm ảnh OPL mới nhất", "SYS")
+            return  # đang chạy, bỏ qua trigger trùng
+        self._log("Tìm ảnh OPL mới nhất…", "SYS")
 
         self._opl_thread = QThread(self)
         self._opl_worker = OplImageWorker(
@@ -808,8 +476,7 @@ class MainWindow(QMainWindow):
         self._opl_worker.finished.connect(self._opl_thread.quit)
         self._opl_thread.start()
 
-    def _on_opl_image_ready(self, name: str, qimg: QImage):
-        self.image_panel.set_image(qimg, name)
+    def _on_opl_image_ready(self, name: str, _qimg: QImage):
         self._log(f"Đã load ảnh: {name}", "SYS", level="ok")
 
     def _on_opl_upload_done(self, ok: bool, msg: str):
@@ -817,7 +484,6 @@ class MainWindow(QMainWindow):
         self._log(f"Upload: {msg}", "SYS", level=level)
 
     def _on_opl_finished(self):
-        self.image_panel.submit_btn.setEnabled(True)
         self._opl_thread = None
         self._opl_worker = None
 
@@ -830,40 +496,15 @@ class MainWindow(QMainWindow):
         self._last_result_ts = now
         self._set_chip(self.cycle_chip, f"Cycle {cycle:.2f}s", "#3fb6f0")
         self.sb_cycle.lbl.setText(f"Cycle {cycle:.2f}s")
-        # counts
-        self._total += 1
-        if ok:    self._ok  += 1
-        else:     self._ng  += 1
-        self._scan_times.append(now)
-        self._refresh_stats()
-        # info + verdict
+        # info
         self._product_lbl.setText(pid or "—")
-        self.image_panel.set_verdict(ok, pid)
-        self.image_panel.meta.setText(
-            f"{datetime.now().strftime('%H:%M:%S')} · cycle {cycle:.2f}s"
-        )
         # log
         if ok:
             self._log(f"{pid} — pass 9/9", "OK", level="ok")
         else:
             self._log(f"{pid} — site fail", "NG", level="err")
-
-    def _on_plc_image(self, img):
-        self.image_panel.set_image(img, datetime.now().strftime("%H:%M:%S · live"))
-
-    # ── stats refresh ────────────────────────────────────────
-    def _refresh_stats(self):
-        cutoff = time.time() - 300  # 5 phút
-        while self._scan_times and self._scan_times[0] < cutoff:
-            self._scan_times.popleft()
-        recent = len(self._scan_times)
-        self.card_total.set_value(self._total, f"↑ {recent} / 5 phút")
-        ratio_ok = (self._ok / self._total) if self._total else 0
-        ratio_ng = (self._ng / self._total) if self._total else 0
-        self.card_ok.set_value(self._ok, f"{ratio_ok*100:.1f}%")
-        self.card_ng.set_value(self._ng, f"{ratio_ng*100:.1f}%")
-        self.yield_bar.setValue(int(ratio_ok * 1000))
-        self.yield_value_lbl.setText(f"{ratio_ok*100:.2f}%")
+        # auto đẩy ảnh OPL lên MES
+        self._trigger_opl_upload()
 
     # ── log ──────────────────────────────────────────────────
     def _log(self, message: str, tag: str = "INFO", level: str = "info", detail: str = ""):
@@ -916,27 +557,6 @@ def _user_icon(size: int, color: str) -> QPixmap:
     from PySide6.QtCore import QRectF
     p.drawEllipse(QRectF(size*0.30, size*0.14, size*0.40, size*0.40))
     p.drawArc(QRectF(size*0.14, size*0.50, size*0.72, size*0.72), 0, 180 * 16)
-    p.end()
-    return pm
-
-
-def _chart_icon(size: int, color: str) -> QPixmap:
-    pm = QPixmap(size, size); pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color)); pen.setWidthF(1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    from PySide6.QtGui import QPolygonF
-    from PySide6.QtCore import QPointF
-    p.drawLine(QPointF(size*0.16, size*0.16), QPointF(size*0.16, size*0.84))
-    p.drawLine(QPointF(size*0.16, size*0.84), QPointF(size*0.88, size*0.84))
-    poly = QPolygonF([
-        QPointF(size*0.28, size*0.66),
-        QPointF(size*0.46, size*0.48),
-        QPointF(size*0.62, size*0.58),
-        QPointF(size*0.84, size*0.30),
-    ])
-    p.drawPolyline(poly)
     p.end()
     return pm
 
