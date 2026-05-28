@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 from login_window import LoginWindow
 from main_window import MainWindow
+from settings_window import load_settings_overrides
 
 
 def load_stylesheet() -> str:
@@ -25,6 +26,8 @@ def load_stylesheet() -> str:
 
 
 def main():
+    load_settings_overrides()  # patch config từ settings.json (nếu có)
+
     app = QApplication(sys.argv)
     app.setApplicationName("Riser cable")
     app.setOrganizationName("Riser cable")

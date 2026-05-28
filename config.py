@@ -1,4 +1,8 @@
-"""Cấu hình app - chỉnh ở đây thay vì hardcode trong code."""
+"""Cấu hình app - chỉnh ở đây thay vì hardcode trong code.
+
+Giá trị trong file này là DEFAULT. settings.json cùng folder sẽ
+override khi app khởi động (xem settings_window.load_settings_overrides).
+"""
 
 # ── Barcode scanner (badge reader) ──────────────────────────
 SCANNER_PORT       = "COM4"
@@ -6,6 +10,7 @@ SCANNER_BAUDRATE   = 9600
 SCANNER_READ_SIZE  = 8       # số byte tối đa cho 1 lần đọc badge
 SCANNER_TIMEOUT    = 0.5     # giây - càng nhỏ stop càng nhanh
 PRODUCT_READ_SIZE  = 64      # số byte tối đa cho 1 lần đọc mã sản phẩm
+Staff              = ""      # mã NV mặc định (auto-fill login)
 
 # ── API xác thực nhân viên ─────────────────────────────────
 # Để rỗng → fallback dùng employees.py local.
@@ -21,6 +26,8 @@ PLC_POLL_HZ           = 5                # số lần poll PLC / giây
 PLC_SIMULATED         = True             # True → chạy giả lập, False → đọc PLC thật
 
 # ── Station / SFC ──────────────────────────────────────────
+STATION_NAME = "AOI-C219B-S1"
+ON_OFF_SFC   = False                     # True → push clipThroughStation; False → bỏ qua
 sn_link1 = "http://10.222.48.213:8888/v2/pass/mes/tsc/check/TSC-VN/tsc_vn1/AOI-C219B-S1?sn="
 sn_link2 = "&station_id=AOI-C219B-S1"
 link_post_img= "//10.222.48.222/cdpaoi/AOI-C219B-S1/"

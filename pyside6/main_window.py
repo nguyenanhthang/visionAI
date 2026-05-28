@@ -25,9 +25,11 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMainWindow, QSizePolicy, QTextEdit,
-    QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSizePolicy,
+    QTextEdit, QVBoxLayout, QWidget,
 )
+
+from settings_window import SettingsDialog
 
 import config
 from login_window import StatusDot, make_brand_pixmap
@@ -265,6 +267,20 @@ class MainWindow(QMainWindow):
             "padding-left:10px;border-left:1px solid #2a3540;"
         )
         lay.addWidget(self.clock_lbl)
+
+        # settings button
+        self.settings_btn = QPushButton("⚙")
+        self.settings_btn.setObjectName("Ghost")
+        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.setToolTip("Cài đặt")
+        self.settings_btn.setFixedSize(32, 30)
+        self.settings_btn.setStyleSheet(
+            "QPushButton{background:#101820;color:#9aa4ae;border:1px solid #2a3540;"
+            "border-radius:6px;font-size:16px;}"
+            "QPushButton:hover{color:#3fb6f0;border-color:#3fb6f0;}"
+        )
+        self.settings_btn.clicked.connect(self._open_settings)
+        lay.addWidget(self.settings_btn)
 
         # user
         user_box = QFrame(); user_box.setStyleSheet("background:transparent;border:none;")
@@ -572,6 +588,9 @@ class MainWindow(QMainWindow):
 
     # ── SFC clipThroughStation push ──────────────────────────
     def _push_sfc_result(self, sn: str, result: str):
+        if not getattr(config, "ON_OFF_SFC", True):
+            self._log(f"SFC tắt — bỏ qua push {sn} {result}", "SYS")
+            return
         if not config.link_sfc:
             return
         payload = {
@@ -595,6 +614,14 @@ class MainWindow(QMainWindow):
 
     def _on_sfc_done(self, ok: bool, msg: str):
         self._log(msg, "SYS", level=("ok" if ok else "err"))
+
+    # ── settings ─────────────────────────────────────────────
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec() == SettingsDialog.DialogCode.Accepted:
+            # vài thứ apply được ngay
+            self.station_lbl.setText(config.STATION_NAME)
+            self._log("Đã lưu cài đặt", "SYS", level="ok")
 
     # ── log ──────────────────────────────────────────────────
     def _log(self, message: str, tag: str = "INFO", level: str = "info", detail: str = ""):
