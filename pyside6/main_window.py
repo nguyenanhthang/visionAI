@@ -66,6 +66,9 @@ class OplImageWorker(QObject):
     - Subfolder + ảnh đều chọn theo mtime giảm dần để không lệ
       thuộc vào quy ước đặt tên (YYYYMMDD, test1/test2, …).
     - Upload = shutil.copy2 sang upload_dir (UNC share của hệ thống).
+    - File đích đổi tên: ``{sn}_{YYYY.MM.DD HH.MM.SS}_{verdict_label}{ext}``
+      ví dụ ``P1715102-98-D_SFVN26139D00055_2026.05.21 07.25.36_Passed.png``.
+      Đặt vào subfolder ngày hôm nay (``YYYYMMDD``).
     """
 
     image_ready = Signal(str, QImage)   # filename, QImage
@@ -76,10 +79,13 @@ class OplImageWorker(QObject):
     _IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 
     def __init__(self, root_dir: str, upload_dir: str = "",
+                 sn: str = "", verdict_label: str = "",
                  parent: QObject | None = None):
         super().__init__(parent)
         self.root_dir = root_dir
         self.upload_dir = upload_dir
+        self.sn = sn or "UNKNOWN"
+        self.verdict_label = verdict_label or "Unknown"
 
     @Slot()
     def run(self):
@@ -118,12 +124,15 @@ class OplImageWorker(QObject):
 
             if self.upload_dir:
                 try:
-                    today = datetime.now().strftime("%Y%m%d")
+                    now = datetime.now()
+                    today = now.strftime("%Y%m%d")
+                    ts = now.strftime("%Y.%m.%d %H.%M.%S")
+                    new_name = f"{self.sn}_{ts}_{self.verdict_label}{latest_img.suffix}"
                     dest_parent = Path(self.upload_dir) / today
                     dest_parent.mkdir(parents=True, exist_ok=True)
-                    dest = dest_parent / latest_img.name
+                    dest = dest_parent / new_name
                     shutil.copy2(str(latest_img), str(dest))
-                    self.upload_done.emit(True, f"đã copy → {dest}")
+                    self.upload_done.emit(True, f"đã copy → {dest.name}")
                 except Exception as exc:
                     self.upload_done.emit(False, f"upload lỗi: {exc}")
         except Exception as exc:
@@ -501,15 +510,17 @@ class MainWindow(QMainWindow):
         )
 
     # ── OPL upload (auto trigger sau mỗi PLC verdict) ────────
-    def _trigger_opl_upload(self):
+    def _trigger_opl_upload(self, sn: str, verdict_label: str):
         if getattr(self, "_opl_thread", None) is not None:
             return  # đang chạy, bỏ qua trigger trùng
-        self._log("Tìm ảnh OPL mới nhất…", "SYS")
+        self._log(f"Tìm ảnh OPL mới nhất cho {sn} ({verdict_label})…", "SYS")
 
         self._opl_thread = QThread(self)
         self._opl_worker = OplImageWorker(
             root_dir=config.OPL_ATTACHMENT_DIR,
             upload_dir=config.link_post_img,
+            sn=sn,
+            verdict_label=verdict_label,
         )
         self._opl_worker.moveToThread(self._opl_thread)
         self._opl_thread.started.connect(self._opl_worker.run)
@@ -548,11 +559,11 @@ class MainWindow(QMainWindow):
         label = result or ("PASS" if ok else "FAIL")
         tag, level = ("OK", "ok") if ok else ("NG", "err")
         self._log(f"AOI verdict: {pid or '—'} → {label}", tag, level=level)
-        # đẩy kết quả lên SFC clipThroughStation
+        # đẩy kết quả lên SFC + đẩy ảnh OPL
         if result in ("PASS", "FAIL"):
+            verdict_label = "Passed" if result == "PASS" else "Failed"
             self._push_sfc_result(pid, result)
-        # auto đẩy ảnh OPL lên MES
-        self._trigger_opl_upload()
+            self._trigger_opl_upload(pid, verdict_label)
 
     # ── SFC clipThroughStation push ──────────────────────────
     def _push_sfc_result(self, sn: str, result: str):
