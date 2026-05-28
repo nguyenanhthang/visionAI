@@ -14,11 +14,11 @@ API_EMPLOYEE_URL_PREFIX = ""
 API_REQUEST_TIMEOUT     = 5  # giây
 
 # ── PLC (Inovance H3U/H5U qua Modbus TCP) ─────────────────
-PLC_IP            = "192.168.1.10"   # IP PLC
-PLC_TRIGGER_ADDR  = 0                # holding register đọc trigger (4 word liên tiếp)
-PLC_VERDICT_ADDR  = 250              # holding register ghi kết quả OK/NG (1=OK, 0=NG)
-PLC_POLL_HZ       = 5                # số lần poll PLC / giây
-PLC_SIMULATED     = True             # True → chạy giả lập, False → đọc PLC thật
+PLC_IP                = "192.168.1.10"   # IP PLC
+PLC_RESULT_ADDR       = 300              # holding register AOI ghi verdict: 1=OK, 2=NG
+PLC_SCAN_RESULT_ADDR  = 250              # holding register Scanner ghi sau khi check SFC
+PLC_POLL_HZ           = 5                # số lần poll PLC / giây
+PLC_SIMULATED         = True             # True → chạy giả lập, False → đọc PLC thật
 
 # ── Station / SFC ──────────────────────────────────────────
 sn_link1 = "http://10.222.48.213:8888/v2/pass/mes/tsc/check/TSC-VN/tsc_vn1/AOI-C219B-S1?sn="

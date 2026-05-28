@@ -89,25 +89,29 @@ class SimulatedPLCWorker(PLCWorker):
 class H3U_PLCWorker(PLCWorker):
     """Đọc Inovance H3U/H5U qua Modbus TCP (h3u_h5u.py).
 
-    Override _poll để decode register thật. Scaffold dưới đọc 4 register
-    liên tiếp từ ``trigger_addr`` và phát hiện rising edge ở word đầu
-    và cuối — sửa lại theo wiring line của bạn.
+    Poll register ``result_addr`` (mặc định 300) — AOI ghi verdict vào đây:
+        1 → OK   → emit {"ok": True,  "result": "PASS"}
+        2 → NG   → emit {"ok": False, "result": "FAIL"}
+        khác → idle, không emit.
+
+    Chỉ emit khi giá trị thay đổi để tránh push trùng; PLC nên reset
+    register về 0 sau khi app ghi nhận verdict.
     """
 
     def __init__(self, ip: str, poll_interval: float = 0.2,
-                 trigger_addr: int = 0,
+                 result_addr: int = 300,
                  parent: QObject | None = None):
         super().__init__(poll_interval=poll_interval, parent=parent)
         self.ip = ip
-        self.trigger_addr = trigger_addr
-        self._prev_trigger_right = 0
-        self._prev_trigger_left = 0
+        self.result_addr = result_addr
+        self._prev_val = None
 
     def _connect(self):
         import h3u_h5u
-        v = h3u_h5u.read_data_h3u(self.ip, self.trigger_addr)
+        v = h3u_h5u.read_data_h3u(self.ip, self.result_addr)
         if v is None:
             raise RuntimeError(f"PLC {self.ip} không phản hồi (Modbus TCP)")
+        self._prev_val = v
 
     def _disconnect(self):
         try:
@@ -118,18 +122,11 @@ class H3U_PLCWorker(PLCWorker):
 
     def _poll(self):
         import h3u_h5u
-        regs = h3u_h5u.read_multi_data_h3u(self.ip, self.trigger_addr, 4)
-        if not regs:
+        val = h3u_h5u.read_data_h3u(self.ip, self.result_addr)
+        if val is None or val == self._prev_val:
             return
-
-        trig_right = regs[0]
-        trig_left  = regs[3]
-
-        # rising edge → emit result giả (thay bằng logic AOI thật)
-        if trig_right and not self._prev_trigger_right:
-            self.result.emit({"product_id": "RIGHT", "ok": True})
-        if trig_left and not self._prev_trigger_left:
-            self.result.emit({"product_id": "LEFT", "ok": True})
-
-        self._prev_trigger_right = trig_right
-        self._prev_trigger_left  = trig_left
+        self._prev_val = val
+        if val == 1:
+            self.result.emit({"ok": True, "result": "PASS"})
+        elif val == 2:
+            self.result.emit({"ok": False, "result": "FAIL"})

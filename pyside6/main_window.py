@@ -132,6 +132,44 @@ class OplImageWorker(QObject):
             self.finished.emit()
 
 
+class SfcPushWorker(QObject):
+    """POST kết quả verdict lên MES clipThroughStation.
+
+    Payload: {sn, stationName, empNo, result}. Response code=200 → ok,
+    khác → log lỗi (vd 406 "下一制程为 EOL-S").
+    """
+
+    done     = Signal(bool, str)   # ok, message
+    finished = Signal()
+
+    def __init__(self, url: str, payload: dict, timeout: float = 5.0,
+                 parent: QObject | None = None):
+        super().__init__(parent)
+        self.url = url
+        self.payload = payload
+        self.timeout = timeout
+
+    @Slot()
+    def run(self):
+        sn = self.payload.get("sn", "")
+        result = self.payload.get("result", "")
+        try:
+            import requests
+            r = requests.post(self.url, json=self.payload, timeout=self.timeout)
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            code = body.get("code")
+            msg  = body.get("msg", "")
+            if code == 200:
+                self.done.emit(True, f"SFC {sn} {result} ok")
+            else:
+                self.done.emit(False, f"SFC {sn} {result} fail code={code} {msg}")
+        except Exception as exc:
+            self.done.emit(False, f"SFC {sn} {result} lỗi: {exc}")
+        finally:
+            self.finished.emit()
 
 
 # ── main window ──────────────────────────────────────────────────
@@ -142,6 +180,7 @@ class MainWindow(QMainWindow):
         self.employee_id = employee_id
         self.employee_name = employee_name or "—"
         self._started_at = time.time()
+        self._current_sn = ""
 
         self.setWindowTitle("Riser cable — Giao diện chính")
         self.setWindowIcon(QIcon(make_brand_pixmap(64)))
@@ -388,7 +427,7 @@ class MainWindow(QMainWindow):
         else:
             self.plc = H3U_PLCWorker(
                 ip=config.PLC_IP,
-                trigger_addr=config.PLC_TRIGGER_ADDR,
+                result_addr=config.PLC_RESULT_ADDR,
                 poll_interval=1.0 / max(config.PLC_POLL_HZ, 1),
             )
         self.plc.moveToThread(self._plc_thread)
@@ -424,7 +463,7 @@ class MainWindow(QMainWindow):
             sn_check_prefix=config.sn_link1,
             sn_check_suffix=config.sn_link2,
             plc_ip=config.PLC_IP,
-            plc_verdict_addr=config.PLC_VERDICT_ADDR,
+            plc_scan_result_addr=config.PLC_SCAN_RESULT_ADDR,
             request_timeout=config.API_REQUEST_TIMEOUT,
         )
         self.product_scanner.moveToThread(self._scan_thread)
@@ -448,6 +487,7 @@ class MainWindow(QMainWindow):
         self.sb_scanner.dot.set_color("#7d8590")
 
     def _on_product_scanned(self, code: str):
+        self._current_sn = code
         self._product_lbl.setText(code)
         self._log(f"Đã quét mã SP: {code}", "SYS")
 
@@ -455,7 +495,10 @@ class MainWindow(QMainWindow):
         tag = "OK" if api_ok else "NG"
         level = "ok" if api_ok else "err"
         api_txt = "200 OK" if api_ok else "fail"
-        self._log(f"{code} → API {api_txt}, ghi D250={plc_value}", tag, level=level)
+        self._log(
+            f"{code} → API {api_txt}, ghi reg {config.PLC_SCAN_RESULT_ADDR}={plc_value}",
+            tag, level=level,
+        )
 
     # ── OPL upload (auto trigger sau mỗi PLC verdict) ────────
     def _trigger_opl_upload(self):
@@ -489,8 +532,9 @@ class MainWindow(QMainWindow):
         self._opl_worker = None
 
     def _on_plc_result(self, data: dict):
-        pid = data.get("product_id", "")
+        pid = data.get("product_id", "") or self._current_sn
         ok = data.get("ok")
+        result = data.get("result", "")  # "PASS" / "FAIL" cho clipThroughStation
         # cycle
         now = time.time()
         cycle = now - self._last_result_ts
@@ -498,14 +542,43 @@ class MainWindow(QMainWindow):
         self._set_chip(self.cycle_chip, f"Cycle {cycle:.2f}s", "#3fb6f0")
         self.sb_cycle.lbl.setText(f"Cycle {cycle:.2f}s")
         # info
-        self._product_lbl.setText(pid or "—")
-        # log
-        if ok:
-            self._log(f"{pid} — pass 9/9", "OK", level="ok")
-        else:
-            self._log(f"{pid} — site fail", "NG", level="err")
+        if pid:
+            self._product_lbl.setText(pid)
+        # log verdict
+        label = result or ("PASS" if ok else "FAIL")
+        tag, level = ("OK", "ok") if ok else ("NG", "err")
+        self._log(f"AOI verdict: {pid or '—'} → {label}", tag, level=level)
+        # đẩy kết quả lên SFC clipThroughStation
+        if result in ("PASS", "FAIL"):
+            self._push_sfc_result(pid, result)
         # auto đẩy ảnh OPL lên MES
         self._trigger_opl_upload()
+
+    # ── SFC clipThroughStation push ──────────────────────────
+    def _push_sfc_result(self, sn: str, result: str):
+        if not config.link_sfc:
+            return
+        payload = {
+            "sn": sn,
+            "stationName": config.STATION_NAME,
+            "empNo": self.employee_id,
+            "result": result,
+        }
+        thread = QThread(self)
+        worker = SfcPushWorker(config.link_sfc, payload,
+                               timeout=config.API_REQUEST_TIMEOUT)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_sfc_done)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._sfc_jobs = getattr(self, "_sfc_jobs", [])
+        self._sfc_jobs.append((thread, worker))
+        thread.start()
+
+    def _on_sfc_done(self, ok: bool, msg: str):
+        self._log(msg, "SYS", level=("ok" if ok else "err"))
 
     # ── log ──────────────────────────────────────────────────
     def _log(self, message: str, tag: str = "INFO", level: str = "info", detail: str = ""):

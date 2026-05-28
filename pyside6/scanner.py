@@ -223,7 +223,7 @@ class ProductScanner(QObject):
         sn_check_prefix: str = "",
         sn_check_suffix: str = "",
         plc_ip: str = "",
-        plc_verdict_addr: int = 250,
+        plc_scan_result_addr: int = 250,
         request_timeout: float = 5.0,
         parent: QObject | None = None,
     ):
@@ -235,7 +235,7 @@ class ProductScanner(QObject):
         self.sn_check_prefix = sn_check_prefix
         self.sn_check_suffix = sn_check_suffix
         self.plc_ip = plc_ip
-        self.plc_verdict_addr = plc_verdict_addr
+        self.plc_scan_result_addr = plc_scan_result_addr
         self.request_timeout = request_timeout
 
         self._stop = False
@@ -318,7 +318,7 @@ class ProductScanner(QObject):
             return
         try:
             import h3u_h5u
-            if not h3u_h5u.write_data_h3u(self.plc_ip, self.plc_verdict_addr, value):
-                self.error.emit(f"Ghi PLC reg {self.plc_verdict_addr} thất bại")
+            if not h3u_h5u.write_data_h3u(self.plc_ip, self.plc_scan_result_addr, value):
+                self.error.emit(f"Ghi PLC reg {self.plc_scan_result_addr} thất bại")
         except Exception as exc:
-            self.error.emit(f"Lỗi ghi PLC reg {self.plc_verdict_addr}: {exc}")
+            self.error.emit(f"Lỗi ghi PLC reg {self.plc_scan_result_addr}: {exc}")
