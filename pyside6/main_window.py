@@ -293,10 +293,10 @@ class ImageLabel(QLabel):
 
 
 class OplImageWorker(QObject):
-    """Tìm folder ngày mới nhất + ảnh mới nhất trong OPL, load + upload.
+    """Tìm subfolder mới nhất + ảnh mới nhất → load + upload.
 
-    - root_dir/<YYYYMMDD>/<YYYYMMDDhhmmss>.jpg
-    - Sort folder + file theo TÊN giảm dần để chọn "mới nhất".
+    - Subfolder + ảnh đều chọn theo mtime giảm dần để không lệ
+      thuộc vào quy ước đặt tên (YYYYMMDD, test1/test2, …).
     - Upload = shutil.copy2 sang upload_dir (UNC share của hệ thống).
     """
 
@@ -321,21 +321,20 @@ class OplImageWorker(QObject):
                 self.error.emit(f"Folder gốc không tồn tại: {root}")
                 return
 
-            date_folders = sorted(
-                (p for p in root.iterdir()
-                 if p.is_dir() and p.name.isdigit() and len(p.name) == 8),
-                key=lambda p: p.name,
+            subfolders = sorted(
+                (p for p in root.iterdir() if p.is_dir()),
+                key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
-            if not date_folders:
-                self.error.emit(f"{root.name} không có folder YYYYMMDD nào")
+            if not subfolders:
+                self.error.emit(f"{root.name} không có subfolder nào")
                 return
-            latest_folder = date_folders[0]
+            latest_folder = subfolders[0]
 
             imgs = sorted(
                 (p for p in latest_folder.iterdir()
                  if p.is_file() and p.suffix.lower() in self._IMG_EXTS),
-                key=lambda p: p.name,
+                key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
             if not imgs:
