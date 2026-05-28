@@ -350,7 +350,8 @@ class OplImageWorker(QObject):
 
             if self.upload_dir:
                 try:
-                    dest_parent = Path(self.upload_dir)
+                    today = datetime.now().strftime("%Y%m%d")
+                    dest_parent = Path(self.upload_dir) / today
                     dest_parent.mkdir(parents=True, exist_ok=True)
                     dest = dest_parent / latest_img.name
                     shutil.copy2(str(latest_img), str(dest))
