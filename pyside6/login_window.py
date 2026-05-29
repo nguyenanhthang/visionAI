@@ -169,6 +169,10 @@ class LoginWindow(QDialog):
         self.settings_btn.setFixedSize(34, 34)
         self.settings_btn.setIcon(QIcon(gear_icon(20, "#9aa4ae")))
         self.settings_btn.setIconSize(QSize(20, 20))
+        # KHÔNG để Enter/scanner kích hoạt nút này (tránh mở Settings khi đăng nhập)
+        self.settings_btn.setAutoDefault(False)
+        self.settings_btn.setDefault(False)
+        self.settings_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.settings_btn.setStyleSheet(
             "QPushButton{background:#101820;border:1px solid #2a3540;border-radius:8px;}"
             "QPushButton:hover{border-color:#3fb6f0;}"
@@ -200,9 +204,14 @@ class LoginWindow(QDialog):
         self.login_btn.setObjectName("Primary")
         self.login_btn.setMinimumHeight(42)
         self.login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.login_btn.setAutoDefault(True)
+        self.login_btn.setDefault(True)
         self.login_btn.clicked.connect(self._handle_manual_login)
         card_l.addWidget(self.login_btn)
         card_l.addSpacing(6)
+
+        # focus mặc định vào ô nhập mã (không phải nút ⚙)
+        self.entry.setFocus()
 
         # scanner pill
         scanner = QFrame(); scanner.setObjectName("CardSunken")

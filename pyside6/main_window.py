@@ -275,6 +275,9 @@ class MainWindow(QMainWindow):
         self.settings_btn.setFixedSize(34, 30)
         self.settings_btn.setIcon(QIcon(gear_icon(20, "#9aa4ae")))
         self.settings_btn.setIconSize(QSize(20, 20))
+        self.settings_btn.setAutoDefault(False)
+        self.settings_btn.setDefault(False)
+        self.settings_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.settings_btn.setStyleSheet(
             "QPushButton{background:#101820;border:1px solid #2a3540;border-radius:6px;}"
             "QPushButton:hover{border-color:#3fb6f0;}"

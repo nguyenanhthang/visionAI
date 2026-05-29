@@ -11,7 +11,7 @@ worker thread đang chạy — dialog cảnh báo sau khi save.
 
 from __future__ import annotations
 
-import json
+import re
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QPointF
@@ -25,21 +25,14 @@ from PySide6.QtWidgets import (
 import config
 
 
-SETTINGS_FILE = Path(__file__).resolve().parent.parent / "settings.json"
-
-
 def load_settings_overrides() -> dict:
-    """Đọc settings.json và patch attr lên module config."""
-    if not SETTINGS_FILE.exists():
-        return {}
-    try:
-        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    for k, v in data.items():
-        if hasattr(config, k):
-            setattr(config, k, v)
-    return data
+    """Giữ lại cho tương thích — config.py giờ là nguồn chân lý duy nhất.
+
+    Trước đây đọc settings.json override; giờ Settings ghi thẳng vào
+    config.py nên không cần override. Vẫn no-op an toàn để main.py
+    gọi mà không lỗi.
+    """
+    return {}
 
 
 def gear_icon(size: int, color: str) -> QPixmap:
@@ -65,10 +58,33 @@ def gear_icon(size: int, color: str) -> QPixmap:
 
 
 def save_settings(data: dict):
-    SETTINGS_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    """Ghi THẲNG các giá trị vào config.py (giữ comment inline).
+
+    - Dùng config.__file__ → đúng file đang được import, không phụ
+      thuộc cấu trúc folder.
+    - Mỗi key: thay phần value của dòng ``KEY = ...`` bằng repr(value);
+      comment ``# …`` cuối dòng được giữ nguyên.
+    - Sau khi ghi file, setattr luôn lên module config để các giá trị
+      runtime-safe (STATION_NAME, ON_OFF_SFC…) áp dụng ngay.
+    """
+    cfg_path = Path(config.__file__)
+    content = cfg_path.read_text(encoding="utf-8")
+
+    for key, value in data.items():
+        literal = repr(value)
+        # KEY = <value>  [# comment] — value không chứa '#'/newline
+        pat = re.compile(
+            rf'^({re.escape(key)}\s*=\s*)([^\n#]*?)(\s*#[^\n]*)?$',
+            re.MULTILINE,
+        )
+        if pat.search(content):
+            content = pat.sub(
+                lambda m: f"{m.group(1)}{literal}{m.group(3) or ''}",
+                content, count=1,
+            )
+
+    cfg_path.write_text(content, encoding="utf-8")
+
     for k, v in data.items():
         if hasattr(config, k):
             setattr(config, k, v)
@@ -267,7 +283,7 @@ class SettingsDialog(QDialog):
             save_settings(self._collect())
             QMessageBox.information(
                 self, "Đã lưu",
-                "Cài đặt đã lưu vào settings.json.\n\n"
+                "Cài đặt đã ghi vào config.py.\n\n"
                 "Một số mục (PLC IP, COM port, Poll Hz…) sẽ chỉ có "
                 "hiệu lực sau khi khởi động lại app.",
             )
