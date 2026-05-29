@@ -174,10 +174,10 @@ class BadgeScanner(QObject):
 
     def _validate(self, badge_id: str):
         """Ưu tiên API; nếu không config thì fallback local."""
-        if not self.token_url or not self.employee_url_prefix or requests is None:
-            self._validate_local(badge_id)
-        else:
-            self._validate_api(badge_id)
+        # if not self.token_url or not self.employee_url_prefix or requests is None:
+        # self._validate_local(badge_id)
+        # else:
+        self._validate_api(badge_id)
 
     def _validate_local(self, badge_id: str):
         name = employees.lookup(badge_id)
@@ -296,15 +296,15 @@ class ProductScanner(QObject):
         return raw.decode("ascii", errors="ignore").strip()
 
     def _check_api(self, code: str) -> bool:
-        if not self.sn_check_prefix or requests is None:
-            # Không cấu hình API → coi như "lấy được mã" → D250 = 1.
-            return True
+        # if not self.sn_check_prefix or requests is None:
+        #     # Không cấu hình API → coi như "lấy được mã" → D250 = 1.
+        #     return True
         url = self.sn_check_prefix + code + self.sn_check_suffix
         try:
             r = requests.get(url, timeout=self.request_timeout)
-            if r.status_code == 200:
+            if r.text == "0":
                 return True
-            self.error.emit(f"API trả {r.status_code} cho mã {code}")
+            self.error.emit(f"API trả {r.text} cho mã {code}")
             return False
         except requests.Timeout:
             self.error.emit(f"API timeout khi check mã {code}")

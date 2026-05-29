@@ -29,12 +29,11 @@ from PySide6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget,
 )
 
-from settings_window import SettingsDialog, gear_icon
-
 import config
 from login_window import StatusDot, make_brand_pixmap
 from plc_worker import SimulatedPLCWorker, H3U_PLCWorker
 from scanner import ProductScanner
+from settings_window import SettingsDialog, gear_icon
 
 
 # ── tiny widgets ─────────────────────────────────────────────────

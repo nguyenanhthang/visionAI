@@ -14,9 +14,7 @@ from __future__ import annotations
 
 import random
 import time
-
 from PySide6.QtCore import QObject, Signal, Slot
-
 
 class PLCWorker(QObject):
     """Base class: vòng lặp poll PLC trên thread riêng."""
@@ -40,6 +38,7 @@ class PLCWorker(QObject):
         try:
             self._connect()
             self.connected.emit()
+            
             while not self._stop:
                 try:
                     self._poll()
@@ -51,6 +50,7 @@ class PLCWorker(QObject):
                 while slept < self.poll_interval and not self._stop:
                     time.sleep(min(step, self.poll_interval - slept))
                     slept += step
+
         except Exception as exc:
             self.fatal.emit(repr(exc))
         finally:
@@ -128,5 +128,7 @@ class H3U_PLCWorker(PLCWorker):
         self._prev_val = val
         if val == 1:
             self.result.emit({"ok": True, "result": "PASS"})
+            h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
         elif val == 2:
             self.result.emit({"ok": False, "result": "FAIL"})
+            h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)

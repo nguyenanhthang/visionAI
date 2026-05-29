@@ -244,8 +244,8 @@ class LoginWindow(QDialog):
             baudrate=config.SCANNER_BAUDRATE,
             read_size=config.SCANNER_READ_SIZE,
             serial_timeout=config.SCANNER_TIMEOUT,
-            token_url=config.API_TOKEN_URL,
-            employee_url_prefix=config.API_EMPLOYEE_URL_PREFIX,
+            token_url=config.token_link,
+            employee_url_prefix=config.emp_link,
             request_timeout=config.API_REQUEST_TIMEOUT,
         )
         self.scanner.moveToThread(self._scanner_thread)
@@ -322,14 +322,14 @@ class LoginWindow(QDialog):
             return  # đang gọi API, bỏ qua click thừa
 
         # Không config API → fallback local lookup
-        if not config.API_TOKEN_URL or not config.API_EMPLOYEE_URL_PREFIX:
-            name = employees.lookup(eid)
-            if name is None:
-                self._flag_field_error()
-                self._log(f"Mã nhân viên '{eid}' không tồn tại.", "err")
-                return
-            self._finish_login(eid, name)
-            return
+        # if not config.API_TOKEN_URL or not config.API_EMPLOYEE_URL_PREFIX:
+        #     name = employees.lookup(eid)
+        #     if name is None:
+        #         self._flag_field_error()
+        #         self._log(f"Mã nhân viên '{eid}' không tồn tại.", "err")
+        #         return
+        #     self._finish_login(eid, name)
+        #     return
 
         # Có config API → gọi API trên worker thread
         self.login_btn.setEnabled(False)
@@ -338,8 +338,8 @@ class LoginWindow(QDialog):
 
         self._manual_thread = QThread(self)
         self._manual_worker = ManualLoginWorker(
-            token_url=config.API_TOKEN_URL,
-            employee_url_prefix=config.API_EMPLOYEE_URL_PREFIX,
+            token_url=config.token_link,
+            employee_url_prefix=config.emp_link,
             badge_id=eid,
             request_timeout=config.API_REQUEST_TIMEOUT,
         )
