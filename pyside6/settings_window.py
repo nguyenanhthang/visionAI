@@ -11,7 +11,9 @@ worker thread đang chạy — dialog cảnh báo sau khi save.
 
 from __future__ import annotations
 
+import json
 import re
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QPointF
@@ -25,14 +27,33 @@ from PySide6.QtWidgets import (
 import config
 
 
-def load_settings_overrides() -> dict:
-    """Giữ lại cho tương thích — config.py giờ là nguồn chân lý duy nhất.
+def _is_frozen() -> bool:
+    """True khi đang chạy bundle PyInstaller (.exe)."""
+    return getattr(sys, "frozen", False)
 
-    Trước đây đọc settings.json override; giờ Settings ghi thẳng vào
-    config.py nên không cần override. Vẫn no-op an toàn để main.py
-    gọi mà không lỗi.
+
+def _external_settings_path() -> Path:
+    """File sidecar settings.json cạnh executable (frozen mode)."""
+    return Path(sys.executable).parent / "settings.json"
+
+
+def load_settings_overrides() -> dict:
+    """Frozen mode: load settings.json cạnh .exe → override config attrs.
+    Source mode: no-op (config.py là nguồn chân lý duy nhất).
     """
-    return {}
+    if not _is_frozen():
+        return {}
+    p = _external_settings_path()
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    for k, v in data.items():
+        if hasattr(config, k):
+            setattr(config, k, v)
+    return data
 
 
 def gear_icon(size: int, color: str) -> QPixmap:
@@ -57,37 +78,53 @@ def gear_icon(size: int, color: str) -> QPixmap:
     return pm
 
 
-def save_settings(data: dict):
-    """Ghi THẲNG các giá trị vào config.py (giữ comment inline).
+def save_settings(data: dict) -> Path:
+    """Ghi config + trả về Path đã ghi (để hộp thoại báo chính xác).
 
-    - Dùng config.__file__ → đúng file đang được import, không phụ
-      thuộc cấu trúc folder.
-    - Mỗi key: thay phần value của dòng ``KEY = ...`` bằng repr(value);
-      comment ``# …`` cuối dòng được giữ nguyên.
-    - Sau khi ghi file, setattr luôn lên module config để các giá trị
-      runtime-safe (STATION_NAME, ON_OFF_SFC…) áp dụng ngay.
+    - Source mode (chạy ``python main.py``): ghi THẲNG vào config.py,
+      giữ comment inline. Mở file trong editor sẽ thấy giá trị mới.
+    - Frozen mode (chạy .exe PyInstaller): ``config.py`` nằm trong
+      bundle tạm ``_MEI*`` (read-only + biến mất sau khi đóng). Phải
+      ghi sidecar ``settings.json`` cạnh executable; main.py gọi
+      ``load_settings_overrides()`` lúc khởi động để áp lại.
+
+    Cả 2 mode đều setattr lên module config ngay để các giá trị
+    runtime-safe áp dụng không cần restart.
     """
-    cfg_path = Path(config.__file__)
-    content = cfg_path.read_text(encoding="utf-8")
-
-    for key, value in data.items():
-        literal = repr(value)
-        # KEY = <value>  [# comment] — value không chứa '#'/newline
-        pat = re.compile(
-            rf'^({re.escape(key)}\s*=\s*)([^\n#]*?)(\s*#[^\n]*)?$',
-            re.MULTILINE,
+    if _is_frozen():
+        target = _external_settings_path()
+        merged: dict = {}
+        if target.exists():
+            try:
+                merged = json.loads(target.read_text(encoding="utf-8"))
+            except Exception:
+                merged = {}
+        merged.update(data)
+        target.write_text(
+            json.dumps(merged, indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
-        if pat.search(content):
-            content = pat.sub(
-                lambda m: f"{m.group(1)}{literal}{m.group(3) or ''}",
-                content, count=1,
+    else:
+        target = Path(config.__file__)
+        content = target.read_text(encoding="utf-8")
+        for key, value in data.items():
+            literal = repr(value)
+            pat = re.compile(
+                rf'^({re.escape(key)}\s*=\s*)([^\n#]*?)(\s*#[^\n]*)?$',
+                re.MULTILINE,
             )
-
-    cfg_path.write_text(content, encoding="utf-8")
+            if pat.search(content):
+                content = pat.sub(
+                    lambda m: f"{m.group(1)}{literal}{m.group(3) or ''}",
+                    content, count=1,
+                )
+        target.write_text(content, encoding="utf-8")
 
     for k, v in data.items():
         if hasattr(config, k):
             setattr(config, k, v)
+
+    return target
 
 
 class _DirField(QWidget):
@@ -280,10 +317,10 @@ class SettingsDialog(QDialog):
 
     def _on_save(self):
         try:
-            save_settings(self._collect())
+            written = save_settings(self._collect())
             QMessageBox.information(
                 self, "Đã lưu",
-                "Cài đặt đã ghi vào config.py.\n\n"
+                f"Cài đặt đã ghi vào:\n{written}\n\n"
                 "Một số mục (PLC IP, COM port, Poll Hz…) sẽ chỉ có "
                 "hiệu lực sau khi khởi động lại app.",
             )
