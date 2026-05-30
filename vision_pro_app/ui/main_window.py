@@ -22,6 +22,7 @@ from ui.tool_library import ToolLibraryPanel
 from ui.properties_panel import PropertiesPanel
 from ui.results_panel import ResultsPanel
 from ui.image_viewer import ImageViewerPanel
+from ui.loading_screen import BusyOverlay
 # NodeDetailDialog (3027 dòng) lazy-import trong _open_node_detail — không
 # cần lúc khởi động, giảm thời gian import startup.
 from core.plc import PLCManager
@@ -176,6 +177,10 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._restore_state()
         self._emit_progress(70, "Giao diện sẵn sàng")
+
+        # Overlay 'đang mở…' hiện khi bấm node để dựng dialog nặng (lazy-build).
+        self._busy = BusyOverlay(self)
+        self._detail_pending: set = set()  # node_id đang dựng dialog (chống trùng)
 
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._tick)
@@ -496,35 +501,50 @@ class MainWindow(QMainWindow):
         if not self._graph or node_id not in self._graph.nodes:
             return
 
-        # Nếu dialog đã mở, bring to front
+        # Dialog đã mở → bring to front (tức thì, không cần overlay).
         dlg = self._detail_dialogs.get(node_id)
         if dlg and dlg.isVisible():
             dlg.raise_()
             dlg.activateWindow()
             return
 
-        node = self._graph.nodes[node_id]
+        # Đang dựng dialog cho node này rồi (double double-click) → bỏ qua.
+        if node_id in self._detail_pending:
+            return
+        self._detail_pending.add(node_id)
 
-        # PatMax / PatFind → mở PatMaxDialog chuyên dụng. YOLO Detect đi
-        # qua NodeDetailDialog mặc định (có file picker + info panel +
-        # tune params); YOLO Studio mở riêng từ toolbar để train.
-        if node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
-            from ui.patmax_dialog import PatMaxDialog
-            dlg = PatMaxDialog(node, self._graph, self)
-            dlg.run_requested.connect(self._on_detail_run)
-            dlg.model_trained.connect(lambda: self._canvas.aoi_scene.refresh_node(node_id))
-            dlg.finished.connect(lambda _, nid=node_id: self._detail_dialogs.pop(nid, None))
+        # Hiện overlay 'đang mở…' NGAY, rồi dựng dialog nặng ở tick event-loop
+        # kế (singleShot) để overlay kịp render — tránh cảm giác "đơ" khi
+        # lazy-import + dựng NodeDetailDialog/PatMaxDialog lần đầu.
+        self._busy.show_busy(f"Đang mở {self._graph.nodes[node_id].name}…")
+        QTimer.singleShot(0, lambda nid=node_id: self._build_node_detail(nid))
+
+    def _build_node_detail(self, node_id: str):
+        """Dựng + show dialog chi tiết (chạy ở tick sau khi overlay đã hiện)."""
+        try:
+            if not self._graph or node_id not in self._graph.nodes:
+                return
+            node = self._graph.nodes[node_id]
+
+            # PatMax / PatFind → PatMaxDialog chuyên dụng. YOLO Detect đi qua
+            # NodeDetailDialog mặc định; YOLO Studio mở riêng từ toolbar.
+            if node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
+                from ui.patmax_dialog import PatMaxDialog
+                dlg = PatMaxDialog(node, self._graph, self)
+                dlg.run_requested.connect(self._on_detail_run)
+                dlg.model_trained.connect(
+                    lambda: self._canvas.aoi_scene.refresh_node(node_id))
+            else:
+                from ui.node_detail_dialog import NodeDetailDialog
+                dlg = NodeDetailDialog(node, self._graph, self)
+                dlg.run_requested.connect(self._on_detail_run)
+            dlg.finished.connect(
+                lambda _, nid=node_id: self._detail_dialogs.pop(nid, None))
             self._detail_dialogs[node_id] = dlg
             dlg.show()
-            return
-
-        # Các tool khác → NodeDetailDialog (lazy-import — chỉ load khi cần)
-        from ui.node_detail_dialog import NodeDetailDialog
-        dlg = NodeDetailDialog(node, self._graph, self)
-        dlg.run_requested.connect(self._on_detail_run)
-        dlg.finished.connect(lambda _, nid=node_id: self._detail_dialogs.pop(nid, None))
-        self._detail_dialogs[node_id] = dlg
-        dlg.show()
+        finally:
+            self._detail_pending.discard(node_id)
+            self._busy.hide_busy()
 
     def _on_detail_run(self, node_id: str):
         """Node chạy từ detail dialog → refresh canvas + viewer."""
