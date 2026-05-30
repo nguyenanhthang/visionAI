@@ -354,12 +354,18 @@ class FlowGraph:
         return out
 
     @classmethod
-    def from_dict(cls, d: dict) -> "FlowGraph":
+    def from_dict(cls, d: dict, progress_cb=None) -> "FlowGraph":
+        """progress_cb(pct: float) — optional, gọi sau mỗi node để báo tiến
+        độ (dùng khi load nền file lớn: decode PatMaxModel base64 nặng)."""
         g = cls()
-        for nd in d.get("nodes", []):
+        nds = d.get("nodes", [])
+        total = max(1, len(nds))
+        for i, nd in enumerate(nds):
             if nd["tool_id"] in TOOL_BY_ID:
                 node = NodeInstance.from_dict(nd)
                 g.nodes[node.node_id] = node
+            if progress_cb:
+                progress_cb((i + 1) / total * 100.0)
         for cd in d.get("connections", []):
             try:
                 g.connections.append(Connection.from_dict(cd))
@@ -376,9 +382,9 @@ class FlowGraph:
                       default=_json_safe)
 
     @classmethod
-    def load(cls, path: str) -> "FlowGraph":
+    def load(cls, path: str, progress_cb=None) -> "FlowGraph":
         with open(path, "r", encoding="utf-8") as f:
-            return cls.from_dict(json.load(f))
+            return cls.from_dict(json.load(f), progress_cb=progress_cb)
 
 
 def _json_safe(obj):
