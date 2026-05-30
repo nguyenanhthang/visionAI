@@ -190,6 +190,24 @@ class MainWindow(QMainWindow):
         # tab bar, properties → user thấy ảnh chiếm toàn màn hình ngay.
         # F11 hoặc Esc hoặc View → Full Image View để thoát.
         QTimer.singleShot(0, lambda: self._act_full_view.setChecked(True))
+        # Prefetch import các dialog nặng ở thread nền (sau khi UI đã hiện) →
+        # lần đầu bấm node / mở YOLO Studio dựng nhanh hơn, bớt kẹt main thread.
+        QTimer.singleShot(1200, self._prewarm_heavy_dialogs)
+
+    def _prewarm_heavy_dialogs(self):
+        """Prefetch import module dialog nặng ở thread nền. Import chỉ parse
+        module + define class (KHÔNG tạo widget) → an toàn chạy ngoài main
+        thread; lần đầu mở dialog đỡ phải trả phí import → bớt kẹt."""
+        import threading
+
+        def _work():
+            for mod in ("ui.node_detail_dialog", "ui.patmax_dialog",
+                        "ui.yolo_studio"):
+                try:
+                    __import__(mod)
+                except Exception:
+                    pass
+        threading.Thread(target=_work, daemon=True, name="prewarm").start()
 
     def _emit_progress(self, pct: int, msg: str):
         """Báo tiến độ cho splash khởi động (no-op nếu không có on_progress)."""
@@ -513,9 +531,10 @@ class MainWindow(QMainWindow):
             return
         self._detail_pending.add(node_id)
 
-        # Hiện overlay 'đang mở…' NGAY, rồi dựng dialog nặng ở tick event-loop
-        # kế (singleShot) để overlay kịp render — tránh cảm giác "đơ" khi
-        # lazy-import + dựng NodeDetailDialog/PatMaxDialog lần đầu.
+        # Con trỏ busy (OS vẽ → VẪN QUAY khi main thread block, vd Windows) +
+        # overlay 'đang mở…'. Dựng dialog nặng ở tick event-loop kế (singleShot)
+        # để overlay + con trỏ kịp đổi trước khi main thread bận dựng.
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         self._busy.show_busy(f"Đang mở {self._graph.nodes[node_id].name}…")
         QTimer.singleShot(0, lambda nid=node_id: self._build_node_detail(nid))
 
@@ -545,6 +564,7 @@ class MainWindow(QMainWindow):
         finally:
             self._detail_pending.discard(node_id)
             self._busy.hide_busy()
+            QApplication.restoreOverrideCursor()
 
     def _on_detail_run(self, node_id: str):
         """Node chạy từ detail dialog → refresh canvas + viewer."""

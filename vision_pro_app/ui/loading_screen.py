@@ -12,7 +12,7 @@ from typing import Optional
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QProgressBar,
                                QFrame, QApplication)
-from PySide6.QtCore import Qt, QEventLoop, QTimer
+from PySide6.QtCore import Qt, QEventLoop
 from PySide6.QtGui import QPixmap
 
 
@@ -117,14 +117,21 @@ class BusyOverlay(QWidget):
     """Lớp phủ 'đang tải' phủ lên parent — hiện trong lúc dựng dialog nặng
     (đồng bộ trên main thread, vd NodeDetailDialog / PatMaxDialog khi bấm node).
 
+    LƯU Ý quan trọng: KHÔNG dùng spinner tự quay trong card. Widget vẽ trên
+    main thread → khi main thread bận dựng dialog, event loop kẹt nên mọi
+    QTimer/QMovie/QProgressBar đều đứng yên (không animate được). Chuyển động
+    trực quan để báo "đang bận" do con trỏ Qt.WaitCursor của OS đảm nhiệm —
+    trên Windows con trỏ vẫn quay kể cả khi app đang block. Card chỉ hiện glyph
+    chờ tĩnh (⏳) + text để không trông như spinner bị đơ.
+
     Cách dùng:
         self._busy = BusyOverlay(main_window)   # tạo 1 lần
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         self._busy.show_busy("Đang mở Blob Analysis…")
         QTimer.singleShot(0, build_dialog)      # dựng ở tick kế → overlay kịp vẽ
-        ... build ... self._busy.hide_busy()
+        ... build ...
+        self._busy.hide_busy(); QApplication.restoreOverrideCursor()
     """
-
-    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # spinner braille
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -133,8 +140,7 @@ class BusyOverlay(QWidget):
             #BusyOverlay{background:rgba(6,10,20,160);}
             #busy_card{background:#0d1220;border:1px solid #00d4ff;
                        border-radius:8px;}
-            #busy_spin{color:#00d4ff;font-size:26px;font-weight:700;
-                       background:transparent;}
+            #busy_spin{color:#00d4ff;font-size:30px;background:transparent;}
             #busy_text{color:#e2e8f0;font-size:13px;font-weight:600;
                        background:transparent;}
         """)
@@ -146,7 +152,7 @@ class BusyOverlay(QWidget):
         cl = QVBoxLayout(card)
         cl.setContentsMargins(32, 22, 32, 22)
         cl.setSpacing(10)
-        self._spin = QLabel(self._FRAMES[0])
+        self._spin = QLabel("⏳")
         self._spin.setObjectName("busy_spin")
         self._spin.setAlignment(Qt.AlignCenter)
         self._text = QLabel("Đang tải…")
@@ -155,16 +161,7 @@ class BusyOverlay(QWidget):
         cl.addWidget(self._spin)
         cl.addWidget(self._text)
         lay.addWidget(card)
-
-        self._fi = 0
-        self._timer = QTimer(self)
-        self._timer.setInterval(80)
-        self._timer.timeout.connect(self._tick)
         self.hide()
-
-    def _tick(self):
-        self._fi = (self._fi + 1) % len(self._FRAMES)
-        self._spin.setText(self._FRAMES[self._fi])
 
     def show_busy(self, text: str = "Đang tải…"):
         self._text.setText(text)
@@ -173,10 +170,9 @@ class BusyOverlay(QWidget):
             self.setGeometry(p.rect())
         self.show()
         self.raise_()
-        self._timer.start()
-        # Pump 1 nhịp để overlay vẽ ngay trước khi main thread bận dựng dialog.
+        # Pump 1 nhịp để overlay + con trỏ busy vẽ ngay trước khi main thread
+        # bận dựng dialog.
         QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     def hide_busy(self):
-        self._timer.stop()
         self.hide()
