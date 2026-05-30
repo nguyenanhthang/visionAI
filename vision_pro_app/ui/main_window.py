@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
         # Overlay 'đang mở…' hiện khi bấm node để dựng dialog nặng (lazy-build).
         self._busy = BusyOverlay(self)
         self._detail_pending: set = set()  # node_id đang dựng dialog (chống trùng)
+        self._heavy_pending: set = set()   # label dialog toolbar đang dựng
 
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._tick)
@@ -202,7 +203,8 @@ class MainWindow(QMainWindow):
 
         def _work():
             for mod in ("ui.node_detail_dialog", "ui.patmax_dialog",
-                        "ui.yolo_studio"):
+                        "ui.yolo_studio", "ui.plc_dialog", "ui.sfc_dialog",
+                        "ui.camera_dialog"):
                 try:
                     __import__(mod)
                 except Exception:
@@ -974,12 +976,32 @@ class MainWindow(QMainWindow):
         marker = "• " if self._dirty else ""
         self.setWindowTitle(f"{marker}Vision Ultimate — {fname}")
 
+    # ── Heavy dialog open (overlay + busy cursor) ─────────────────
+    def _open_heavy_dialog(self, label: str, build_fn):
+        """Mở 1 dialog nặng (toolbar) với overlay + con trỏ busy giống node-
+        detail: hiện overlay 'đang mở…' + WaitCursor NGAY, rồi chạy build_fn()
+        (import + dựng + show dialog) ở tick event-loop kế để overlay kịp vẽ.
+        Bring-to-front (nếu dialog đang mở) phải check TRƯỚC khi gọi hàm này."""
+        if label in self._heavy_pending:
+            return
+        self._heavy_pending.add(label)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._busy.show_busy(f"Đang mở {label}…")
+
+        def _run():
+            try:
+                build_fn()
+            finally:
+                self._heavy_pending.discard(label)
+                self._busy.hide_busy()
+                QApplication.restoreOverrideCursor()
+        QTimer.singleShot(0, _run)
+
     # ── About ─────────────────────────────────────────────────────
     def _open_yolo_studio(self, initial_image=None):
         """Mở YOLO Studio dialog — độc lập với pipeline. Studio chỉ
         label + train + save file; user trỏ file đó vào YOLO Detect
         node bằng tay (Browse) trong pipeline."""
-        from ui.yolo_studio import YoloStudioDialog
         # QPushButton.clicked / QAction.triggered emit `checked: bool` làm
         # arg đầu — nếu connect trực tiếp slot này, initial_image sẽ là
         # bool thay vì ndarray. Coerce về None.
@@ -990,8 +1012,7 @@ class MainWindow(QMainWindow):
                 if node:
                     initial_image = node.outputs.get("image")
 
-        # Single-instance: đang mở → bring-to-front thay vì dựng dialog nặng
-        # (2461 dòng + load ultralytics) lần nữa.
+        # Single-instance: đang mở → bring-to-front (tức thì, không overlay).
         if self._yolo_dialog is not None:
             try:
                 if self._yolo_dialog.isVisible():
@@ -1001,10 +1022,15 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 self._yolo_dialog = None   # C++ object đã bị xóa
 
-        dlg = YoloStudioDialog(self, initial_image)
-        dlg.finished.connect(lambda *_: setattr(self, "_yolo_dialog", None))
-        self._yolo_dialog = dlg
-        dlg.show()
+        def _build():
+            # Import trong builder (dưới overlay) — yolo_studio 2461 dòng +
+            # ultralytics nặng, đã được pre-warm ở thread nền lúc khởi động.
+            from ui.yolo_studio import YoloStudioDialog
+            dlg = YoloStudioDialog(self, initial_image)
+            dlg.finished.connect(lambda *_: setattr(self, "_yolo_dialog", None))
+            self._yolo_dialog = dlg
+            dlg.show()
+        self._open_heavy_dialog("YOLO Studio", _build)
 
     def _current_node_id_for_yolo(self):
         """Trả về node_id đang được chọn (nếu có)."""
@@ -1015,32 +1041,41 @@ class MainWindow(QMainWindow):
 
     # ── PLC ───────────────────────────────────────────────────────
     def _open_plc_dialog(self):
-        from ui.plc_dialog import PLCDialog
         if self._plc_dialog and self._plc_dialog.isVisible():
             self._plc_dialog.set_graph(self._graph)
             self._plc_dialog.raise_()
             self._plc_dialog.activateWindow()
             return
-        self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
-        self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
-        self._plc_dialog.showMaximized()
+
+        def _build():
+            from ui.plc_dialog import PLCDialog
+            self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
+            self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
+            self._plc_dialog.showMaximized()
+        self._open_heavy_dialog("PLC", _build)
 
     def _open_sfc_dialog(self):
-        from ui.sfc_dialog import SfcDialog
         if self._sfc_dialog and self._sfc_dialog.isVisible():
             self._sfc_dialog.set_graph(self._graph)
             self._sfc_dialog.raise_()
             self._sfc_dialog.activateWindow()
             return
-        self._sfc_dialog = SfcDialog(self._sfc_manager, self._graph, self)
-        self._sfc_dialog.showMaximized()
+
+        def _build():
+            from ui.sfc_dialog import SfcDialog
+            self._sfc_dialog = SfcDialog(self._sfc_manager, self._graph, self)
+            self._sfc_dialog.showMaximized()
+        self._open_heavy_dialog("SFC / MES", _build)
 
     def _open_camera_dialog(self):
-        from ui.camera_dialog import CameraSetupDialog
         if getattr(self, "_cam_dialog", None) and self._cam_dialog.isVisible():
             self._cam_dialog.raise_(); self._cam_dialog.activateWindow(); return
-        self._cam_dialog = CameraSetupDialog(self)
-        self._cam_dialog.show()
+
+        def _build():
+            from ui.camera_dialog import CameraSetupDialog
+            self._cam_dialog = CameraSetupDialog(self)
+            self._cam_dialog.show()
+        self._open_heavy_dialog("Camera", _build)
 
     def _on_plc_trigger(self, acquire_node_id: str = ""):
         """PLC kích hoạt → tuỳ cấu hình SFC sequence:
