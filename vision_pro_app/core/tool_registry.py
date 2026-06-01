@@ -2120,6 +2120,15 @@ def _get_paddle_ocr(lang: str):
     r = _PADDLE_OCRS.get(code)
     if r is not None:
         return r
+    # PaddleOCR 3.x chạy inference ở chế độ PIR (new IR) → một số bản
+    # paddlepaddle văng NotImplementedError 'ConvertPirAttribute2RuntimeAttribute
+    # not support'. Tắt PIR TRƯỚC khi import paddle (chỉ ăn nếu paddle chưa được
+    # import trong process) để dùng IR cũ, ổn định hơn.
+    import os as _os
+    for _flag in ("FLAGS_enable_pir_api",
+                  "FLAGS_enable_pir_in_executor",
+                  "FLAGS_enable_new_ir_in_executor"):
+        _os.environ.setdefault(_flag, "0")
     from paddleocr import PaddleOCR
     last = None
     for kw in ({"use_angle_cls": True, "lang": code},            # 2.x
