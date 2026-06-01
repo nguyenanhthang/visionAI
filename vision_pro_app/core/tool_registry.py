@@ -3971,6 +3971,189 @@ def proc_modbus_write(inputs, params):
     return {"image": img, "ok": ok, "status": status}
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  MATH / FORMULA  +  IMAGE PRE-PROCESSING (bổ sung)
+# ═══════════════════════════════════════════════════════════════════
+def proc_math(inputs, params):
+    """Tính 1 công thức số học từ các input (A, B, C… — thêm port qua right-
+    click). An toàn: chỉ cho dùng hàm toán whitelist, không có builtins. Tuỳ chọn
+    so sánh với ngưỡng → port `pass`. None/True/False tự quy về 0/1/0."""
+    import math as _m
+    import operator as _op
+    expr = str(params.get("expression", "A+B"))
+    env = {n: getattr(_m, n) for n in
+           ("sqrt", "sin", "cos", "tan", "atan", "atan2", "degrees", "radians",
+            "log", "log10", "exp", "floor", "ceil", "fabs", "hypot", "copysign")}
+    env.update({"abs": abs, "min": min, "max": max, "round": round,
+                "pi": _m.pi, "e": _m.e, "pow": pow})
+    for k, v in inputs.items():
+        if not (isinstance(k, str) and not k.startswith("_")):
+            continue
+        if isinstance(v, bool):
+            env[k] = 1.0 if v else 0.0
+        elif v is None:
+            env[k] = 0.0
+        else:
+            try:
+                env[k] = float(v)
+            except Exception:
+                env[k] = 0.0
+    result, err = None, ""
+    try:
+        result = eval(expr, {"__builtins__": {}}, env)   # noqa: S307 — whitelist env
+        result = float(result)
+    except Exception as ex:
+        err = f"{type(ex).__name__}: {ex}"
+    op = str(params.get("operator", "none"))
+    out = {"result": result if result is not None else 0.0}
+    if err:
+        out["pass"] = False
+        out["error"] = err
+    elif op != "none":
+        thr = float(params.get("threshold", 0.0))
+        cmp = {">": _op.gt, ">=": _op.ge, "<": _op.lt, "<=": _op.le,
+               "==": _op.eq, "!=": _op.ne}.get(op, _op.gt)
+        out["pass"] = bool(cmp(result, thr))
+    else:
+        out["pass"] = True
+    return out
+
+
+def proc_rotate_flip(inputs, params):
+    """Xoay (góc bất kỳ) + lật ảnh. expand=True → mở rộng canvas để không cắt góc."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    out = img
+    _a = inputs.get("angle")
+    ang = float(_a) if _a is not None else float(params.get("angle", 0.0))
+    if abs(ang) > 1e-6:
+        h, w = out.shape[:2]
+        cx, cy = w / 2.0, h / 2.0
+        M = cv2.getRotationMatrix2D((cx, cy), ang, 1.0)
+        if params.get("expand", True):
+            cos, sin = abs(M[0, 0]), abs(M[0, 1])
+            nw, nh = int(h * sin + w * cos), int(h * cos + w * sin)
+            M[0, 2] += nw / 2.0 - cx
+            M[1, 2] += nh / 2.0 - cy
+            out = cv2.warpAffine(out, M, (nw, nh))
+        else:
+            out = cv2.warpAffine(out, M, (w, h))
+    flip = str(params.get("flip", "none"))
+    if flip == "horizontal":
+        out = cv2.flip(out, 1)
+    elif flip == "vertical":
+        out = cv2.flip(out, 0)
+    elif flip == "both":
+        out = cv2.flip(out, -1)
+    return {"image": out}
+
+
+def proc_perspective(inputs, params):
+    """Nắn phối cảnh 4 điểm → hình chữ nhật out_w×out_h (deskew ảnh nghiêng).
+    4 điểm nguồn mặc định = 4 góc ảnh; sửa toạ độ ở Params để nắn."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    h, w = img.shape[:2]
+    def g(k, d):
+        try:
+            return float(params.get(k, d))
+        except Exception:
+            return float(d)
+    src = np.float32([[g("x1", 0), g("y1", 0)], [g("x2", w), g("y2", 0)],
+                      [g("x3", w), g("y3", h)], [g("x4", 0), g("y4", h)]])
+    ow = int(params.get("out_w", 0) or w)
+    oh = int(params.get("out_h", 0) or h)
+    dst = np.float32([[0, 0], [ow, 0], [ow, oh], [0, oh]])
+    try:
+        M = cv2.getPerspectiveTransform(src, dst)
+        out = cv2.warpPerspective(img, M, (ow, oh))
+    except Exception:
+        out = img
+    return {"image": out}
+
+
+def proc_enhance_contrast(inputs, params):
+    """Tăng tương phản / cân bằng sáng: CLAHE, Equalize, Gamma, Brightness-Contrast.
+    Tốt cho OCR/khuyết tật khi ảnh sáng không đều."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    mode = str(params.get("mode", "clahe"))
+    out = img
+    if mode == "clahe":
+        clip = max(0.1, float(params.get("clip_limit", 2.0)))
+        tile = max(1, int(params.get("tile", 8)))
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tile, tile))
+        if img.ndim == 3:
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            out = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
+        else:
+            out = clahe.apply(img)
+    elif mode == "equalize":
+        if img.ndim == 3:
+            ycc = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+            ycc[:, :, 0] = cv2.equalizeHist(ycc[:, :, 0])
+            out = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR)
+        else:
+            out = cv2.equalizeHist(img)
+    elif mode == "gamma":
+        gm = max(0.01, float(params.get("gamma", 1.0)))
+        lut = np.array([((i / 255.0) ** (1.0 / gm)) * 255
+                        for i in range(256)], dtype=np.uint8)
+        out = cv2.LUT(img, lut)
+    elif mode == "brightness_contrast":
+        out = cv2.convertScaleAbs(img, alpha=float(params.get("contrast", 1.0)),
+                                  beta=float(params.get("brightness", 0.0)))
+    return {"image": out}
+
+
+def proc_smooth(inputs, params):
+    """Lọc nhiễu giữ cạnh: Median (muối tiêu) hoặc Bilateral (mịn nhưng giữ biên)."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    method = str(params.get("method", "median"))
+    if method == "median":
+        k = int(params.get("ksize", 3))
+        if k % 2 == 0:
+            k += 1
+        out = cv2.medianBlur(img, max(1, k))
+    elif method == "bilateral":
+        out = cv2.bilateralFilter(img, int(params.get("d", 9)),
+                                  float(params.get("sigma_color", 75)),
+                                  float(params.get("sigma_space", 75)))
+    else:
+        out = img
+    return {"image": out}
+
+
+def proc_edge_filter(inputs, params):
+    """Trích cạnh: Canny / Sobel / Laplacian → ảnh cạnh (port `edges` + `image`)."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    gray = _gray(img)
+    method = str(params.get("method", "canny"))
+    if method == "canny":
+        edges = cv2.Canny(gray, int(params.get("threshold1", 50)),
+                          int(params.get("threshold2", 150)))
+    elif method == "sobel":
+        k = int(params.get("ksize", 3)) | 1
+        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=k)
+        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=k)
+        edges = cv2.convertScaleAbs(cv2.magnitude(gx, gy))
+    elif method == "laplacian":
+        edges = cv2.convertScaleAbs(
+            cv2.Laplacian(gray, cv2.CV_64F, ksize=int(params.get("ksize", 3)) | 1))
+    else:
+        edges = gray
+    out = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR) if params.get("as_color", False) else edges
+    return {"image": out, "edges": edges}
+
+
 TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
@@ -4705,6 +4888,73 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_scratch_detect, ""),
 
   # ── IMAGE PROCESSING ────────────────────────────────────────────
+  ToolDef("rotate_flip","Rotate / Flip","Image Processing",
+    "Xoay ảnh góc bất kỳ + lật. expand=True mở rộng canvas để không cắt góc. "
+    "Nối port 'angle' (vd từ PatMax) để xoay theo góc đo được.",
+    "#2c3e50","🔄",
+    [PortDef("image","image"),PortDef("angle","number",required=False)],
+    [PortDef("image","image")],
+    [P("angle","Angle (°)","float",0,-360,360,step=1,use_slider=True,
+       tooltip="Góc xoay (CCW). Port 'angle' nếu nối sẽ ưu tiên hơn giá trị này."),
+     P("expand","Expand canvas","bool",True,
+       tooltip="Mở rộng khung để không cắt mất góc khi xoay."),
+     P("flip","Flip","enum","none",choices=["none","horizontal","vertical","both"])],
+    proc_rotate_flip,""),
+
+  ToolDef("perspective","Perspective Warp","Image Processing",
+    "Nắn phối cảnh 4 điểm → hình chữ nhật out_w×out_h (deskew ảnh chụp nghiêng). "
+    "4 điểm nguồn mặc định = 4 góc ảnh; sửa toạ độ để nắn.",
+    "#2c3e50","🪞",
+    [PortDef("image","image")],[PortDef("image","image")],
+    [P("x1","Top-Left X","int",0,0,99999),P("y1","Top-Left Y","int",0,0,99999),
+     P("x2","Top-Right X","int",0,0,99999),P("y2","Top-Right Y","int",0,0,99999),
+     P("x3","Bot-Right X","int",0,0,99999),P("y3","Bot-Right Y","int",0,0,99999),
+     P("x4","Bot-Left X","int",0,0,99999),P("y4","Bot-Left Y","int",0,0,99999),
+     P("out_w","Output Width","int",0,0,99999,tooltip="0 = giữ chiều rộng ảnh gốc"),
+     P("out_h","Output Height","int",0,0,99999,tooltip="0 = giữ chiều cao ảnh gốc")],
+    proc_perspective,""),
+
+  ToolDef("enhance_contrast","Enhance Contrast","Image Processing",
+    "Tăng tương phản / cân bằng sáng — CLAHE, Equalize, Gamma, Brightness-Contrast. "
+    "Giúp OCR/khuyết tật khi ảnh sáng không đều hoặc nhạt.",
+    "#2c3e50","🌗",
+    [PortDef("image","image")],[PortDef("image","image")],
+    [P("mode","Mode","enum","clahe",
+       choices=["clahe","equalize","gamma","brightness_contrast"]),
+     P("clip_limit","CLAHE Clip","float",2.0,0.1,40,step=0.1,
+       visible_if={"mode":"clahe"}),
+     P("tile","CLAHE Tile","int",8,1,64,visible_if={"mode":"clahe"}),
+     P("gamma","Gamma","float",1.0,0.05,5.0,step=0.05,visible_if={"mode":"gamma"}),
+     P("contrast","Contrast (α)","float",1.0,0,4,step=0.05,
+       visible_if={"mode":"brightness_contrast"}),
+     P("brightness","Brightness (β)","float",0,-128,128,step=1,
+       visible_if={"mode":"brightness_contrast"})],
+    proc_enhance_contrast,""),
+
+  ToolDef("smooth","Smooth (Median/Bilateral)","Image Processing",
+    "Lọc nhiễu giữ cạnh — Median (muối-tiêu) hoặc Bilateral (mịn nhưng giữ biên).",
+    "#2c3e50","💧",
+    [PortDef("image","image")],[PortDef("image","image")],
+    [P("method","Method","enum","median",choices=["median","bilateral"]),
+     P("ksize","Median ksize (lẻ)","int",3,1,99,visible_if={"method":"median"}),
+     P("d","Bilateral d","int",9,1,50,visible_if={"method":"bilateral"}),
+     P("sigma_color","Sigma Color","float",75,1,300,visible_if={"method":"bilateral"}),
+     P("sigma_space","Sigma Space","float",75,1,300,visible_if={"method":"bilateral"})],
+    proc_smooth,""),
+
+  ToolDef("edge_filter","Edge Filter","Image Processing",
+    "Trích cạnh — Canny / Sobel / Laplacian → ảnh cạnh (port 'edges' + 'image').",
+    "#2c3e50","📈",
+    [PortDef("image","image")],
+    [PortDef("image","image"),PortDef("edges","image")],
+    [P("method","Method","enum","canny",choices=["canny","sobel","laplacian"]),
+     P("threshold1","Canny Thresh1","int",50,0,500,visible_if={"method":"canny"}),
+     P("threshold2","Canny Thresh2","int",150,0,500,visible_if={"method":"canny"}),
+     P("ksize","Kernel size (lẻ)","int",3,1,31,visible_if={"method":"sobel"}),
+     P("as_color","Xuất ảnh màu (BGR)","bool",False,
+       tooltip="Bật để chồng/hiển thị cùng ảnh màu; tắt = ảnh xám 1 kênh.")],
+    proc_edge_filter,""),
+
   ToolDef("image_convert","Image Convert","Image Processing",
     "Chuyển đổi format ảnh + resize tuỳ chọn — TImageConvertTool","#2c3e50","🔄",
     [PortDef("image","image")],[PortDef("image","image")],
@@ -4839,6 +5089,24 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_calibrate_grid, "TCalibCheckerboardTool"),
 
   # ── LOGIC & FLOW ────────────────────────────────────────────────
+  ToolDef("math","Math / Formula","Logic & Flow",
+    "Tính công thức số học từ các input A, B, C… (chuột phải → Add Input để thêm). "
+    "Hàm cho phép: sqrt sin cos tan atan2 log log10 exp floor ceil abs min max "
+    "round hypot, hằng pi/e. Vd: (A+B)/2, hypot(A,B), abs(A-B). Tuỳ chọn so sánh "
+    "ngưỡng → port 'pass' để nối Judge.",
+    "#1c1c2e","🧮",
+    [PortDef("A","number",required=False),PortDef("B","number",required=False)],
+    [PortDef("result","number"),PortDef("pass","bool")],
+    [P("expression","Formula","str","A+B",
+       tooltip="Biểu thức theo tên port (A,B,C…). Vd (A+B)/2, hypot(A,B), abs(A-B)."),
+     P("operator","Compare (→ pass)","enum","none",
+       choices=["none",">",">=","<","<=","==","!="],
+       tooltip="none = pass luôn True (chỉ tính result). Khác → pass = result OP threshold."),
+     P("threshold","Threshold","float",0,-1e12,1e12,step=0.1,
+       tooltip="Ngưỡng so sánh khi operator ≠ none.")],
+    proc_math,"",
+    extra_input_type="number"),
+
   ToolDef("logic_and","AND Gate","Logic & Flow","Logic AND","#1c1c2e","∧",
     [PortDef("A","bool"),PortDef("B","bool")],[PortDef("result","bool")],
     [],proc_logic_and,""),
