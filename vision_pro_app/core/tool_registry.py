@@ -2113,24 +2113,30 @@ def _ocr_lang_to_paddle(lang: str) -> str:
 
 def _get_paddle_ocr(lang: str):
     """Lazy-init + cache PaddleOCR (load model lần đầu ~5-20s). Thử nhiều chữ
-    ký constructor để chịu được đổi API giữa PaddleOCR 2.x và 3.x
-    (use_angle_cls/show_log bị bỏ ở 3.x, đổi thành use_textline_orientation)."""
+    ký constructor để chịu được đổi API PaddleOCR 2.x↔3.x: 3.x BỎ `show_log`,
+    đổi `use_angle_cls`→`use_textline_orientation`, và báo tham số lạ bằng
+    ValueError('Unknown argument: …') chứ không phải TypeError."""
     code = _ocr_lang_to_paddle(lang)
     r = _PADDLE_OCRS.get(code)
     if r is not None:
         return r
     from paddleocr import PaddleOCR
     last = None
-    for kw in ({"use_angle_cls": True, "lang": code, "show_log": False},
-               {"use_angle_cls": True, "lang": code},
-               {"use_textline_orientation": True, "lang": code},
-               {"lang": code}):
+    for kw in ({"use_angle_cls": True, "lang": code},            # 2.x
+               {"use_textline_orientation": True, "lang": code}, # 3.x
+               {"lang": code}):                                  # tối giản
         try:
             r = PaddleOCR(**kw)
             break
-        except TypeError as e:
-            last = e
-            r = None
+        except (TypeError, ValueError) as e:
+            # Chỉ bỏ qua khi là lỗi "tham số lạ" → thử chữ ký khác. Lỗi khác
+            # (tải model/network) → raise để user thấy đúng nguyên nhân.
+            msg = str(e).lower()
+            if any(k in msg for k in ("argument", "unexpected keyword", "unknown")):
+                last = e
+                r = None
+                continue
+            raise
     if r is None:
         raise last or RuntimeError("PaddleOCR init failed")
     _PADDLE_OCRS[code] = r
@@ -2249,15 +2255,22 @@ def proc_ocr_max(inputs, params):
         img_in = proc_gray
         if img_in is not None and img_in.ndim == 2:
             img_in = cv2.cvtColor(img_in, cv2.COLOR_GRAY2BGR)
-        try:
-            results = reader.ocr(img_in, cls=True)
-        except TypeError:
+        results, last = None, None
+        for call in (lambda: reader.ocr(img_in, cls=True),   # 2.x
+                     lambda: reader.ocr(img_in),
+                     lambda: reader.predict(img_in)):          # 3.x
             try:
-                results = reader.ocr(img_in)
+                results = call()
+                break
+            except Exception as e:
+                last = e
+        if results is None:
+            raise last or RuntimeError("PaddleOCR: .ocr()/.predict() đều lỗi")
+        if not isinstance(results, (list, tuple, dict)):
+            try:
+                results = list(results)   # generator → list
             except Exception:
-                results = reader.predict(img_in)
-        except Exception:
-            results = reader.predict(img_in)
+                pass
         t_acc, c_acc, words = "", 0.0, 0
         for txt, sc, box in _parse_paddle_result(results):
             if not str(txt).strip():
