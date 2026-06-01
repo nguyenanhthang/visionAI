@@ -2109,6 +2109,28 @@ def _get_easyocr_reader(langs: List[str]):
     _EASYOCR_READERS[key] = r
     return r
 
+def _ensure_tesseract_cmd(custom_path: str = "") -> None:
+    """Trỏ pytesseract tới binary Tesseract khi KHÔNG có trên PATH. Ưu tiên
+    custom_path (param 'tesseract_path'); trống thì auto-dò vị trí cài mặc định
+    — Windows hay cài UB-Mannheim rồi quên thêm PATH nên pytesseract không thấy."""
+    import os, shutil
+    import pytesseract
+    if custom_path and os.path.isfile(custom_path):
+        pytesseract.pytesseract.tesseract_cmd = custom_path
+        return
+    cur = getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
+    # Đã trỏ tới file hợp lệ, hoặc có trên PATH → khỏi dò.
+    if (cur and os.path.isfile(cur)) or shutil.which(cur) or shutil.which("tesseract"):
+        return
+    for c in (r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+              r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+              os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+              "/usr/bin/tesseract", "/usr/local/bin/tesseract",
+              "/opt/homebrew/bin/tesseract"):
+        if c and os.path.isfile(c):
+            pytesseract.pytesseract.tesseract_cmd = c
+            return
+
 def proc_ocr_max(inputs, params):
     """TOCRMaxTool — Đọc & xác nhận ký tự (OCR).
 
@@ -2145,6 +2167,7 @@ def proc_ocr_max(inputs, params):
 
     def _run_tesseract():
         import pytesseract
+        _ensure_tesseract_cmd(str(params.get("tesseract_path", "") or ""))
         data = pytesseract.image_to_data(
             proc_gray, lang=lang,
             config=f"--psm {psm} --oem 3",
@@ -4355,6 +4378,11 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("psm","PSM Mode","int",6,0,13,
         tooltip="Tesseract Page Segmentation Mode — 6=block, 7=single line, 8=single word, "
                 "11=sparse text (chữ thưa, không layout cố định)."),
+     P("tesseract_path","Tesseract .exe (nếu ngoài PATH)","str","",
+        file_filter="Tesseract (tesseract.exe);;All Files (*)",
+        tooltip="Để TRỐNG = tự dò vị trí cài mặc định. Trỏ tới tesseract.exe nếu "
+                "đã cài Tesseract nhưng chưa thêm vào PATH "
+                "(vd C:\\Program Files\\Tesseract-OCR\\tesseract.exe)."),
      P("preprocess","Preprocess","enum","none",
         choices=["none","otsu","adaptive","binary"],
         tooltip="Binarize trước OCR — giúp tách chữ khỏi nền phức tạp / sáng không đều. "
