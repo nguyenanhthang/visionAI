@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import math
 import os
+import time
 
 @dataclass
 class PortDef:
@@ -3796,6 +3797,180 @@ def proc_yolo_detect(inputs, params):
         return _yolo_empty_outputs(vis)
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  CATEGORY: COMMUNICATION — gửi kết quả ra PLC / TCP / Modbus / HTTP
+#  (không thêm dependency: PLCManager sẵn có; socket/urllib stdlib)
+# ═══════════════════════════════════════════════════════════════════
+def _comms_template(tpl: str, inputs: dict) -> str:
+    """Điền {value}/{pass}/{text}/{ts} vào template; key thiếu → ''. Hỗ trợ
+    escape \\r \\n \\t khi nhập từ ô text."""
+    class _D(dict):
+        def __missing__(self, k):
+            return ""
+    p = inputs.get("pass")
+    d = _D(value=("" if inputs.get("value") is None else inputs.get("value")),
+           text=("" if inputs.get("text") is None else inputs.get("text")),
+           ts=time.strftime("%Y-%m-%d %H:%M:%S"))
+    d["pass"] = "" if p is None else ("PASS" if p else "FAIL")
+    try:
+        out = str(tpl).format_map(d)
+    except Exception:
+        out = str(tpl)
+    return out.replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t")
+
+
+def proc_plc_write(inputs, params):
+    """Ghi kết quả ra PLC qua PLCManager (DÙNG CHUNG kết nối với PLC dialog)."""
+    img = inputs.get("image")
+    ok, status = False, ""
+    try:
+        from core.plc import get_plc_manager, MemoryArea
+        mgr = get_plc_manager()
+        if not mgr.is_connected:
+            if params.get("auto_connect", True):
+                mgr.connect()
+            else:
+                raise RuntimeError("PLC chưa kết nối (mở PLC dialog kết nối, "
+                                   "hoặc bật Auto-connect).")
+        if str(params.get("mode", "pass_fail")) == "pass_fail":
+            passed = bool(inputs.get("pass"))
+            mgr.write_result(passed)
+            status = f"write_result({'PASS' if passed else 'FAIL'})"
+        else:
+            val = inputs.get("value")
+            if val is None:
+                val = params.get("value_default", 0)
+            area = MemoryArea[str(params.get("area", "DM_WORD"))]
+            addr = int(params.get("address", 0))
+            dt = str(params.get("data_type", "int16"))
+            mgr.write_value(area, addr, float(val), data_type=dt,
+                            scale=float(params.get("scale", 1.0)))
+            status = f"{area.value}[{addr}] = {val} ({dt})"
+        ok = True
+    except Exception as e:
+        status = f"PLC write lỗi: {e}"
+    print(f"[PLC Write] {status}")
+    return {"image": img, "ok": ok, "status": status}
+
+
+def proc_tcp_send(inputs, params):
+    """Gửi 1 chuỗi (theo template) tới host:port qua TCP socket (stdlib)."""
+    import socket
+    img = inputs.get("image")
+    data = _comms_template(params.get("template", "{pass};{value}\\r\\n"), inputs)
+    host = str(params.get("host", "127.0.0.1"))
+    port = int(params.get("port", 5000))
+    timeout = float(params.get("timeout", 2.0))
+    ok, status = False, ""
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.sendall(data.encode("utf-8", "replace"))
+            if params.get("wait_reply", False):
+                s.settimeout(timeout)
+                try:
+                    rep = s.recv(512).decode("utf-8", "replace")
+                    status = f"sent {len(data)}B, reply: {rep[:60]}"
+                except Exception:
+                    status = f"sent {len(data)}B (no reply)"
+            else:
+                status = f"sent {len(data)}B → {host}:{port}"
+        ok = True
+    except Exception as e:
+        status = f"TCP lỗi: {e}"
+    print(f"[TCP Send] {status}")
+    return {"image": img, "ok": ok, "sent": data, "status": status}
+
+
+def proc_http_post(inputs, params):
+    """POST kết quả tới URL qua urllib (stdlib — không cần requests)."""
+    import json, urllib.request
+    img = inputs.get("image")
+    url = str(params.get("url", "")).strip()
+    timeout = float(params.get("timeout", 5.0))
+    ok, status, code, resp = False, "", 0, ""
+    if not url:
+        return {"image": img, "ok": False, "response": "", "code": 0,
+                "status": "Chưa nhập URL"}
+    try:
+        p = inputs.get("pass")
+        if str(params.get("format", "json")) == "raw":
+            body = _comms_template(params.get("template", "{pass};{value}"),
+                                   inputs).encode("utf-8", "replace")
+            ctype = str(params.get("content_type", "text/plain"))
+        else:
+            payload = {"pass": (None if p is None else bool(p)),
+                       "value": inputs.get("value"),
+                       "text": inputs.get("text"),
+                       "ts": time.strftime("%Y-%m-%d %H:%M:%S")}
+            body = json.dumps(payload).encode("utf-8")
+            ctype = "application/json"
+        req = urllib.request.Request(url, data=body, method="POST",
+                                     headers={"Content-Type": ctype})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            code = getattr(r, "status", 200)
+            resp = r.read(2000).decode("utf-8", "replace")
+        ok = 200 <= int(code) < 300
+        status = f"POST {code} → {url}"
+    except Exception as e:
+        status = f"HTTP lỗi: {e}"
+    print(f"[HTTP POST] {status}")
+    return {"image": img, "ok": ok, "response": resp, "code": code, "status": status}
+
+
+def _value_to_modbus_regs(value, data_type, scale, word_order="ABCD"):
+    import struct
+    if data_type == "int16":
+        return [int(round(float(value))) & 0xFFFF]
+    if data_type in ("int32", "scaled_int32"):
+        mul = scale if data_type == "scaled_int32" else 1.0
+        iv = int(round(float(value) * mul)) & 0xFFFFFFFF
+        hi, lo = (iv >> 16) & 0xFFFF, iv & 0xFFFF
+        return [hi, lo] if word_order == "ABCD" else [lo, hi]
+    if data_type == "float32":
+        raw = struct.pack(">f", float(value))
+        hi = int.from_bytes(raw[0:2], "big")
+        lo = int.from_bytes(raw[2:4], "big")
+        return [hi, lo] if word_order == "ABCD" else [lo, hi]
+    return [int(round(float(value) * scale)) & 0xFFFF]   # scaled_int16
+
+
+def proc_modbus_write(inputs, params):
+    """Ghi holding register(s) qua Modbus-TCP bằng socket thuần (FC16) —
+    KHÔNG cần pymodbus. int16 = 1 thanh ghi; int32/float32 = 2 thanh ghi."""
+    import socket, struct
+    img = inputs.get("image")
+    host = str(params.get("host", "127.0.0.1"))
+    port = int(params.get("port", 502))
+    unit = int(params.get("unit", 1))
+    addr = int(params.get("register", 0))
+    timeout = float(params.get("timeout", 2.0))
+    ok, status = False, ""
+    try:
+        val = inputs.get("value")
+        if val is None:
+            p = inputs.get("pass")
+            val = (1 if p else 0) if p is not None else params.get("value_default", 0)
+        regs = _value_to_modbus_regs(val, str(params.get("data_type", "int16")),
+                                     float(params.get("scale", 1.0)),
+                                     str(params.get("word_order", "ABCD")))
+        qty = len(regs)
+        pdu = struct.pack(">BHHB", 0x10, addr, qty, qty * 2)
+        pdu += b"".join(struct.pack(">H", r & 0xFFFF) for r in regs)
+        mbap = struct.pack(">HHHB", 1, 0, len(pdu) + 1, unit & 0xFF)
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(mbap + pdu)
+            rep = s.recv(256)
+        if len(rep) >= 9 and (rep[7] & 0x80):
+            raise IOError(f"Modbus exception {rep[8]}")
+        ok = True
+        status = f"reg[{addr}] ← {val} ({qty}w) @ {host}:{port}"
+    except Exception as e:
+        status = f"Modbus lỗi: {e}"
+    print(f"[Modbus Write] {status}")
+    return {"image": img, "ok": ok, "status": status}
+
+
 TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
@@ -4791,6 +4966,88 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Tick + Run pipeline → reset counter về 0 ngay lần chạy đó.")],
     proc_yield_stats,""),
 
+  # ── COMMUNICATION ───────────────────────────────────────────────
+  ToolDef("plc_write","PLC Write","Communication",
+    "Ghi kết quả ra PLC mỗi chu kỳ — DÙNG CHUNG kết nối đã cấu hình ở "
+    "Tools → PLC Connection. Mode 'pass_fail' ghi mã PASS/FAIL vào vùng result; "
+    "mode 'value' ghi 1 số vào DM/CIO/W/H. Hỗ trợ Omron FINS & Inovance Modbus-TCP.",
+    "#0b3d2e","🔌",
+    [PortDef("pass","bool",required=False),
+     PortDef("value","number",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("ok","bool"),PortDef("status","any")],
+    [P("mode","Mode","enum","pass_fail",choices=["pass_fail","value"],
+       tooltip="pass_fail: ghi mã PASS/FAIL vào vùng result đã cấu hình. "
+               "value: ghi số ở port 'value' vào địa chỉ bên dưới."),
+     P("area","Memory Area","enum","DM_WORD",
+       choices=["DM_WORD","CIO_WORD","W_WORD","H_WORD"],
+       visible_if={"mode":"value"}),
+     P("address","Address","int",0,0,65535,visible_if={"mode":"value"}),
+     P("data_type","Data Type","enum","int16",
+       choices=["int16","int32","float32","scaled_int16","scaled_int32"],
+       visible_if={"mode":"value"}),
+     P("scale","Scale (cho scaled_*)","float",1.0,-1e9,1e9,step=0.1,
+       visible_if={"mode":"value"}),
+     P("auto_connect","Auto-connect","bool",True,
+       tooltip="Tự kết nối nếu PLC chưa connect (dùng config ở PLC dialog).")],
+    proc_plc_write,""),
+
+  ToolDef("tcp_send","TCP Send","Communication",
+    "Gửi 1 chuỗi tới host:port qua TCP socket (stdlib, không cần thư viện). "
+    "Template điền {pass}/{value}/{text}/{ts}; dùng \\r \\n cho CR/LF.",
+    "#0b3d2e","📡",
+    [PortDef("pass","bool",required=False),
+     PortDef("value","number",required=False),
+     PortDef("text","any",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("ok","bool"),
+     PortDef("sent","any"),PortDef("status","any")],
+    [P("host","Host","str","127.0.0.1"),
+     P("port","Port","int",5000,1,65535),
+     P("template","Template","str","{pass};{value}\\r\\n",
+       tooltip="Điền {pass}/{value}/{text}/{ts}. Dùng \\r \\n cho CR/LF."),
+     P("wait_reply","Đợi phản hồi","bool",False),
+     P("timeout","Timeout (s)","float",2.0,0.1,60,step=0.5)],
+    proc_tcp_send,""),
+
+  ToolDef("http_post","HTTP POST","Communication",
+    "POST kết quả tới URL qua urllib (stdlib, không cần requests). format "
+    "'json' gửi {pass,value,text,ts}; 'raw' gửi chuỗi theo template.",
+    "#0b3d2e","🌐",
+    [PortDef("pass","bool",required=False),
+     PortDef("value","number",required=False),
+     PortDef("text","any",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("ok","bool"),
+     PortDef("response","any"),PortDef("code","number"),PortDef("status","any")],
+    [P("url","URL","str","",tooltip="vd http://192.168.1.50:8080/result"),
+     P("format","Body Format","enum","json",choices=["json","raw"]),
+     P("template","Raw Template","str","{pass};{value}",
+       visible_if={"format":"raw"}),
+     P("content_type","Content-Type (raw)","str","text/plain",
+       visible_if={"format":"raw"}),
+     P("timeout","Timeout (s)","float",5.0,0.1,60,step=0.5)],
+    proc_http_post,""),
+
+  ToolDef("modbus_write","Modbus Write","Communication",
+    "Ghi holding register(s) qua Modbus-TCP bằng socket thuần (FC16) — KHÔNG "
+    "cần pymodbus. int16=1 reg; int32/float32=2 reg. 'value' trống → dùng pass (1/0).",
+    "#0b3d2e","🔧",
+    [PortDef("pass","bool",required=False),
+     PortDef("value","number",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("ok","bool"),PortDef("status","any")],
+    [P("host","Host","str","127.0.0.1"),
+     P("port","Port","int",502,1,65535),
+     P("unit","Unit/Slave ID","int",1,0,255),
+     P("register","Register (0-based)","int",0,0,65535),
+     P("data_type","Data Type","enum","int16",
+       choices=["int16","int32","float32","scaled_int16","scaled_int32"]),
+     P("scale","Scale (scaled_*)","float",1.0,-1e9,1e9,step=0.1),
+     P("word_order","Word Order (32-bit)","enum","ABCD",choices=["ABCD","CDAB"]),
+     P("timeout","Timeout (s)","float",2.0,0.1,60,step=0.5)],
+    proc_modbus_write,""),
+
   # ── YOLO DETECTION ─────────────────────────────────────────────
   ToolDef("yolo_detect","YOLO Detect","YOLO",
     "YOLOv8/v11 Object Detection & Segmentation. Add file model train sẵn "
@@ -4849,5 +5106,5 @@ CATEGORIES = [
     "Acquire Image","Pattern Find","Fixture","Caliper",
     "Blob Analysis","Edge & Geometry","Color Analysis","ID & Read",
     "Measurement","Surface Inspection","Image Processing",
-    "Calibration","Logic & Flow","Output & Display","YOLO"
+    "Calibration","Logic & Flow","Output & Display","Communication","YOLO"
 ]

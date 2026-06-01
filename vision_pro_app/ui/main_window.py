@@ -25,7 +25,7 @@ from ui.image_viewer import ImageViewerPanel
 from ui.loading_screen import BusyOverlay
 # NodeDetailDialog (3027 dòng) lazy-import trong _open_node_detail — không
 # cần lúc khởi động, giảm thời gian import startup.
-from core.plc import PLCManager
+from core.plc import PLCManager, get_plc_manager
 
 
 # ── Worker ────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ class MainWindow(QMainWindow):
         self._detail_dialogs: dict = {}   # node_id → NodeDetailDialog
 
         # PLC integration — persistent manager, shared with PLCDialog
-        self._plc_manager = PLCManager()
+        self._plc_manager = get_plc_manager()   # shared — node PLC Write dùng chung
         self._plc_dialog = None
         # Trigger route acquire_node_id cho lần run kế tiếp (set bởi
         # _on_plc_trigger, clear bởi _finalize_run). Rỗng = chạy toàn pipeline.

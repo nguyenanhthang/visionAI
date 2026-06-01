@@ -743,3 +743,15 @@ class PLCManager:
                 entry["error"] = str(e)
             report.append(entry)
         return report
+
+
+# ── Shared singleton ──────────────────────────────────────────────
+# Cho node trong pipeline (vd PLC Write) dùng CHUNG instance đã được cấu hình /
+# kết nối ở PLC dialog, thay vì mở kết nối mới.
+_SHARED_MANAGER: Optional["PLCManager"] = None
+
+def get_plc_manager() -> "PLCManager":
+    global _SHARED_MANAGER
+    if _SHARED_MANAGER is None:
+        _SHARED_MANAGER = PLCManager()
+    return _SHARED_MANAGER
