@@ -2099,6 +2099,80 @@ def _get_easyocr_reader(langs: List[str]):
     _EASYOCR_READERS[key] = r
     return r
 
+_PADDLE_OCRS: Dict[str, Any] = {}
+
+def _ocr_lang_to_paddle(lang: str) -> str:
+    """Map Tesseract code → PaddleOCR lang. Paddle dùng 1 lang chính nên lấy
+    phần đầu của 'vie+eng'."""
+    mapping = {"eng":"en", "vie":"vi", "jpn":"japan", "kor":"korean",
+               "chi_sim":"ch", "chi_tra":"chinese_cht", "fra":"french",
+               "deu":"german", "spa":"spanish", "rus":"ru", "ita":"it",
+               "por":"pt", "tha":"th"}
+    first = str(lang or "eng").replace("+", ",").split(",")[0].strip().lower()
+    return mapping.get(first, first or "en")
+
+def _get_paddle_ocr(lang: str):
+    """Lazy-init + cache PaddleOCR (load model lần đầu ~5-20s). Thử nhiều chữ
+    ký constructor để chịu được đổi API giữa PaddleOCR 2.x và 3.x
+    (use_angle_cls/show_log bị bỏ ở 3.x, đổi thành use_textline_orientation)."""
+    code = _ocr_lang_to_paddle(lang)
+    r = _PADDLE_OCRS.get(code)
+    if r is not None:
+        return r
+    from paddleocr import PaddleOCR
+    last = None
+    for kw in ({"use_angle_cls": True, "lang": code, "show_log": False},
+               {"use_angle_cls": True, "lang": code},
+               {"use_textline_orientation": True, "lang": code},
+               {"lang": code}):
+        try:
+            r = PaddleOCR(**kw)
+            break
+        except TypeError as e:
+            last = e
+            r = None
+    if r is None:
+        raise last or RuntimeError("PaddleOCR init failed")
+    _PADDLE_OCRS[code] = r
+    return r
+
+def _parse_paddle_result(results):
+    """Chuẩn hoá kết quả PaddleOCR (2.x list / 3.x OCRResult-dict) →
+    list[(text, score, box)]. Chịu được nhiều biến thể return format."""
+    out = []
+    if not results:
+        return out
+    first = results[0] if isinstance(results, (list, tuple)) else results
+    # PaddleOCR 3.x: list các OCRResult (dict-subclass) với rec_texts/rec_scores
+    if isinstance(first, dict) and ("rec_texts" in first or "rec_text" in first):
+        items = results if isinstance(results, (list, tuple)) else [results]
+        for res in items:
+            texts  = res.get("rec_texts") or res.get("rec_text") or []
+            scores = res.get("rec_scores") or res.get("rec_score") or []
+            polys  = (res.get("rec_polys") or res.get("dt_polys")
+                      or res.get("rec_boxes") or [])
+            for i, txt in enumerate(texts):
+                sc  = float(scores[i]) if i < len(scores) else 1.0
+                box = polys[i] if i < len(polys) else None
+                out.append((txt, sc, box))
+        return out
+    # PaddleOCR 2.x: results = [ lines ]; line = [box, (text, score)]
+    lines = first if isinstance(first, (list, tuple)) else results
+    for line in (lines or []):
+        if not line:
+            continue
+        try:
+            box = line[0]
+            payload = line[1]
+            if isinstance(payload, (list, tuple)):
+                txt, sc = payload[0], float(payload[1])
+            else:
+                txt, sc = payload, 1.0
+            out.append((txt, sc, box))
+        except Exception:
+            continue
+    return out
+
 def proc_ocr_max(inputs, params):
     """TOCRMaxTool — Đọc & xác nhận ký tự (OCR).
 
@@ -2108,7 +2182,10 @@ def proc_ocr_max(inputs, params):
          pip:    `pip install pytesseract`).
       • easyocr   — `pip install easyocr` (không cần binary, tốt với
         diacritics + nền phức tạp; load model lần đầu ~5-15s).
-      • auto      — thử tesseract trước, fallback easyocr nếu fail.
+      • paddleocr — `pip install paddleocr paddlepaddle` (độ chính xác cao
+        cho hoá đơn/chứng từ + tiếng Việt; load model lần đầu ~5-20s).
+      • auto      — thử lần lượt tesseract → easyocr → paddleocr, dùng
+        engine đầu tiên chạy được.
 
     Preprocess: 'otsu' / 'adaptive' / 'binary' giúp tách chữ khỏi nền
     phức tạp trước khi đẩy vào engine.
@@ -2167,6 +2244,35 @@ def proc_ocr_max(inputs, params):
             cv2.polylines(vis, [pts], True, (0, 200, 255), _t(1, s))
         return t_acc.strip(), c_acc / max(words, 1)
 
+    def _run_paddleocr():
+        reader = _get_paddle_ocr(lang)
+        img_in = proc_gray
+        if img_in is not None and img_in.ndim == 2:
+            img_in = cv2.cvtColor(img_in, cv2.COLOR_GRAY2BGR)
+        try:
+            results = reader.ocr(img_in, cls=True)
+        except TypeError:
+            try:
+                results = reader.ocr(img_in)
+            except Exception:
+                results = reader.predict(img_in)
+        except Exception:
+            results = reader.predict(img_in)
+        t_acc, c_acc, words = "", 0.0, 0
+        for txt, sc, box in _parse_paddle_result(results):
+            if not str(txt).strip():
+                continue
+            t_acc += str(txt) + " "
+            c_acc += float(sc) * 100.0
+            words += 1
+            if box is not None:
+                try:
+                    pts = np.array(box, dtype=np.int32).reshape(-1, 2)
+                    cv2.polylines(vis, [pts], True, (0, 200, 255), _t(1, s))
+                except Exception:
+                    pass
+        return t_acc.strip(), c_acc / max(words, 1)
+
     def _explain(e):
         # Map exception → (is_setup_issue, short human message).
         # Setup issues = missing module / missing binary → có lệnh cài cụ thể.
@@ -2180,35 +2286,35 @@ def proc_ocr_max(inputs, params):
         return False, f"{name}: {msg}"
 
     try:
-        if engine == "tesseract":
-            text, conf = _run_tesseract()
-            used = "tesseract"
-        elif engine == "easyocr":
-            text, conf = _run_easyocr()
-            used = "easyocr"
-        else:
-            try:
-                text, conf = _run_tesseract()
-                used = "tesseract"
-            except Exception as e1:
+        runners = {"tesseract": _run_tesseract,
+                   "easyocr":   _run_easyocr,
+                   "paddleocr": _run_paddleocr}
+        if engine in runners:
+            text, conf = runners[engine]()
+            used = engine
+        else:   # auto — thử lần lượt, dùng engine đầu tiên chạy được
+            errs = {}
+            for name in ("tesseract", "easyocr", "paddleocr"):
                 try:
-                    text, conf = _run_easyocr()
-                    used = "easyocr"
-                except Exception as e2:
-                    t_setup, t_msg = _explain(e1)
-                    e_setup, e_msg = _explain(e2)
-                    if t_setup and e_setup:
-                        # Cả 2 đều chưa cài → hướng dẫn cài nhanh nhất.
-                        text = ("[OCR chưa cài engine nào] Chạy: "
-                                "pip install easyocr  "
-                                "(khuyên dùng — không cần binary, hỗ trợ tiếng Việt tốt). "
-                                "Hoặc: pip install pytesseract + cài Tesseract binary "
-                                "(Windows: UB-Mannheim installer; Ubuntu: apt install "
-                                "tesseract-ocr tesseract-ocr-vie; macOS: brew install "
-                                "tesseract tesseract-lang).")
-                    else:
-                        text = f"[OCR fail] tesseract: {t_msg} | easyocr: {e_msg}"
-                    conf = 0.0
+                    text, conf = runners[name]()
+                    used = name
+                    break
+                except Exception as ex:
+                    errs[name] = ex
+            else:
+                setups = {n: _explain(e) for n, e in errs.items()}
+                if all(v[0] for v in setups.values()):
+                    text = ("[OCR chưa cài engine nào] Khuyên dùng PaddleOCR: "
+                            "pip install paddleocr paddlepaddle  "
+                            "(chính xác cao cho hoá đơn + tiếng Việt). "
+                            "Hoặc: pip install easyocr  (nhẹ hơn, không cần binary). "
+                            "Hoặc: pip install pytesseract + Tesseract binary "
+                            "(Windows: UB-Mannheim; Ubuntu: apt install tesseract-ocr "
+                            "tesseract-ocr-vie).")
+                else:
+                    text = "[OCR fail] " + " | ".join(
+                        f"{n}: {m}" for n, (_s, m) in setups.items())
+                conf = 0.0
     except ModuleNotFoundError as e:
         mod = (str(e).split("'")[1] if "'" in str(e) else str(e))
         text = (f"[{mod} chưa cài] pip install {mod}"
@@ -4328,20 +4434,24 @@ TOOL_REGISTRY: List[ToolDef] = [
 
   ToolDef("ocr_max","OCR Max","ID & Read",
     "Nhận dạng & xác nhận ký tự — TOCRMaxTool. "
-    "Engine 'auto' tự fallback tesseract→easyocr. "
-    "Cài: pip install pytesseract (+ tesseract-ocr binary & langpack vie) "
-    "hoặc pip install easyocr (không cần binary, tốt cho tiếng Việt + nền phức tạp).",
+    "Engine 'auto' tự fallback tesseract→easyocr→paddleocr. "
+    "Cài: pip install paddleocr paddlepaddle (chính xác cao cho hoá đơn + tiếng Việt) "
+    "hoặc pip install easyocr (nhẹ, không cần binary) "
+    "hoặc pip install pytesseract (+ tesseract-ocr binary & langpack vie).",
     "#3d0c02","🔤",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("text","any"),
      PortDef("pass","bool"),PortDef("confidence","number")],
     [P("engine","OCR Engine","enum","auto",
-        choices=["auto","tesseract","easyocr"],
-        tooltip="auto: thử tesseract → easyocr. easyocr không cần Tesseract binary; "
-                "tốt cho tiếng Việt + nền phức tạp nhưng nặng (PyTorch, ~5-15s load lần đầu)."),
+        choices=["auto","tesseract","easyocr","paddleocr"],
+        tooltip="auto: thử tesseract → easyocr → paddleocr. "
+                "paddleocr: độ chính xác cao cho hoá đơn/chứng từ + tiếng Việt "
+                "(pip install paddleocr paddlepaddle; ~5-20s load lần đầu). "
+                "easyocr: nhẹ hơn, không cần binary."),
      P("lang","Language","str","eng",
         tooltip="Tesseract code: eng, vie, jpn, kor, chi_sim, 'vie+eng'… "
-                "EasyOCR auto-map: vie→vi, jpn→ja. Tiếng Việt = 'vie'."),
+                "EasyOCR auto-map: vie→vi, jpn→ja. PaddleOCR auto-map: vie→vi, "
+                "jpn→japan, chi_sim→ch. Tiếng Việt = 'vie'."),
      P("psm","PSM Mode","int",6,0,13,
         tooltip="Tesseract Page Segmentation Mode — 6=block, 7=single line, 8=single word, "
                 "11=sparse text (chữ thưa, không layout cố định)."),
