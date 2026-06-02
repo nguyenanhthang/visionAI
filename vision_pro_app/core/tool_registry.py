@@ -4154,6 +4154,197 @@ def proc_edge_filter(inputs, params):
     return {"image": out, "edges": edges}
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  GOLDEN COMPARE / PRESENCE / GEOMETRY MỞ RỘNG / INTENSITY (ưu tiên vừa)
+# ═══════════════════════════════════════════════════════════════════
+def proc_image_math(inputs, params):
+    """Phép toán 2 ảnh: absdiff/subtract/add/blend/multiply/and/or/xor.
+    Tự resize + khớp số kênh ảnh B theo A. Thiếu B → trả ảnh A."""
+    a = inputs.get("image")
+    if a is None:
+        return {"image": None}
+    b = inputs.get("image_b")
+    if b is None:
+        return {"image": a}
+    if a.shape[:2] != b.shape[:2]:
+        b = cv2.resize(b, (a.shape[1], a.shape[0]))
+    if a.ndim == 3 and b.ndim == 2:
+        b = cv2.cvtColor(b, cv2.COLOR_GRAY2BGR)
+    elif a.ndim == 2 and b.ndim == 3:
+        b = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
+    op = str(params.get("op", "absdiff"))
+    alpha = float(params.get("alpha", 0.5))
+    fmap = {
+        "absdiff":  lambda: cv2.absdiff(a, b),
+        "subtract": lambda: cv2.subtract(a, b),
+        "add":      lambda: cv2.add(a, b),
+        "blend":    lambda: cv2.addWeighted(a, alpha, b, 1.0 - alpha, 0.0),
+        "multiply": lambda: cv2.multiply(a, b, scale=1.0 / 255.0),
+        "and":      lambda: cv2.bitwise_and(a, b),
+        "or":       lambda: cv2.bitwise_or(a, b),
+        "xor":      lambda: cv2.bitwise_xor(a, b),
+    }
+    return {"image": fmap.get(op, fmap["absdiff"])()}
+
+
+def proc_golden_compare(inputs, params):
+    """So ảnh với MẪU CHUẨN (golden): absdiff → threshold → đếm vùng khác biệt.
+    reference lấy từ port 'reference' (ưu tiên) hoặc file 'reference_path'.
+    PASS khi tổng diện tích lỗi ≤ max_defect_area."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "pass": False, "defect_area": 0, "defect_count": 0}
+    vis = _bgr(img.copy()); s = _draw_scale(vis)
+    ref = inputs.get("reference")
+    if ref is None:
+        path = str(params.get("reference_path", "") or "")
+        if path:
+            ref = cv2.imread(path)
+    if ref is None:
+        return {"image": vis, "pass": False, "defect_area": 0, "defect_count": 0,
+                "status": "Chưa có ảnh chuẩn (nối 'reference' hoặc đặt reference_path)"}
+    g1, g2 = _gray(img), _gray(ref)
+    if g1.shape != g2.shape:
+        g2 = cv2.resize(g2, (g1.shape[1], g1.shape[0]))
+    bl = int(params.get("blur", 3))
+    if bl > 0:
+        bl |= 1
+        g1 = cv2.GaussianBlur(g1, (bl, bl), 0)
+        g2 = cv2.GaussianBlur(g2, (bl, bl), 0)
+    diff = cv2.absdiff(g1, g2)
+    _, mask = cv2.threshold(diff, int(params.get("threshold", 30)), 255, cv2.THRESH_BINARY)
+    k = int(params.get("morph", 2))
+    if k > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_a = float(params.get("min_blob_area", 10))
+    defects = [c for c in cnts if cv2.contourArea(c) >= min_a]
+    area = int(sum(cv2.contourArea(c) for c in defects))
+    for c in defects:
+        x, y, w, h = cv2.boundingRect(c)
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 0, 255), _t(2, s))
+    passed = area <= float(params.get("max_defect_area", 50))
+    return {"image": vis, "diff": diff, "pass": passed,
+            "defect_area": area, "defect_count": len(defects)}
+
+
+def proc_presence(inputs, params):
+    """Kiểm CÓ/THIẾU vật trong ROI theo intensity / edge_density / fill_ratio.
+    PASS (present) khi score nằm trong [min_score, max_score]."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "pass": False, "present": False, "score": 0.0}
+    vis = _bgr(img.copy()); s = _draw_scale(vis)
+    H, W = img.shape[:2]
+    x = max(0, min(int(params.get("x", 0)), W - 1))
+    y = max(0, min(int(params.get("y", 0)), H - 1))
+    w = int(params.get("w", 0)) or (W - x)   # 0 = full width
+    h = int(params.get("h", 0)) or (H - y)
+    w = max(1, min(w, W - x)); h = max(1, min(h, H - y))
+    roi = _gray(img)[y:y + h, x:x + w]
+    method = str(params.get("method", "intensity"))
+    if method == "edge_density":
+        e = cv2.Canny(roi, 50, 150)
+        score = float(np.count_nonzero(e)) / max(1, roi.size) * 100.0
+    elif method == "fill_ratio":
+        ttype = cv2.THRESH_BINARY_INV if params.get("dark_object", False) else cv2.THRESH_BINARY
+        _, m = cv2.threshold(roi, int(params.get("fill_threshold", 127)), 255, ttype)
+        score = float(np.count_nonzero(m)) / max(1, m.size) * 100.0
+    else:
+        score = float(np.mean(roi))
+    present = float(params.get("min_score", 0)) <= score <= float(params.get("max_score", 1e12))
+    cv2.rectangle(vis, (x, y), (x + w, y + h),
+                  (0, 200, 0) if present else (0, 0, 255), _t(2, s))
+    return {"image": vis, "pass": present, "present": present, "score": round(score, 3)}
+
+
+def _geo_in(inputs, params, key):
+    v = inputs.get(key)
+    return float(v) if v is not None else float(params.get(key, 0))
+
+
+def proc_line_intersect(inputs, params):
+    """Giao điểm 2 đường (mỗi đường = x1,y1,x2,y2). Song song → pass=False."""
+    import math as _m
+    ax1, ay1, ax2, ay2 = (_geo_in(inputs, params, k) for k in ("l1x1", "l1y1", "l1x2", "l1y2"))
+    bx1, by1, bx2, by2 = (_geo_in(inputs, params, k) for k in ("l2x1", "l2y1", "l2x2", "l2y2"))
+    img = inputs.get("image")
+    vis = _bgr(img.copy()) if img is not None else None
+    d = (ax1 - ax2) * (by1 - by2) - (ay1 - ay2) * (bx1 - bx2)
+    if abs(d) < 1e-9:
+        return {"image": vis, "pass": False, "x": 0.0, "y": 0.0,
+                "angle": 0.0, "parallel": True}
+    px = ((ax1 * ay2 - ay1 * ax2) * (bx1 - bx2) - (ax1 - ax2) * (bx1 * by2 - by1 * bx2)) / d
+    py = ((ax1 * ay2 - ay1 * ax2) * (by1 - by2) - (ay1 - ay2) * (bx1 * by2 - by1 * bx2)) / d
+    a1 = _m.degrees(_m.atan2(ay2 - ay1, ax2 - ax1))
+    a2 = _m.degrees(_m.atan2(by2 - by1, bx2 - bx1))
+    ang = abs(a1 - a2) % 180.0
+    ang = min(ang, 180.0 - ang)
+    if vis is not None:
+        s = _draw_scale(vis)
+        cv2.circle(vis, (int(px), int(py)), max(3, _t(4, s)), (0, 255, 255), -1)
+    return {"image": vis, "pass": True, "x": round(px, 3), "y": round(py, 3),
+            "angle": round(ang, 3), "parallel": False}
+
+
+def proc_dist_line_line(inputs, params):
+    """Khoảng cách (khe hở) giữa 2 đường — pdist từ điểm của line2 tới line1.
+    Trả distance (mid), dist_start, dist_end. PASS khi distance trong [min,max]."""
+    import math as _m
+    ax1, ay1, ax2, ay2 = (_geo_in(inputs, params, k) for k in ("l1x1", "l1y1", "l1x2", "l1y2"))
+    bx1, by1, bx2, by2 = (_geo_in(inputs, params, k) for k in ("l2x1", "l2y1", "l2x2", "l2y2"))
+    dx, dy = ax2 - ax1, ay2 - ay1
+    L = _m.hypot(dx, dy)
+    def pdist(px, py):
+        if L < 1e-9:
+            return _m.hypot(px - ax1, py - ay1)
+        return abs(dy * (px - ax1) - dx * (py - ay1)) / L
+    d1, d2 = pdist(bx1, by1), pdist(bx2, by2)
+    dm = pdist((bx1 + bx2) / 2.0, (by1 + by2) / 2.0)
+    img = inputs.get("image")
+    vis = _bgr(img.copy()) if img is not None else None
+    passed = float(params.get("min_distance", -1e12)) <= dm <= float(params.get("max_distance", 1e12))
+    return {"image": vis, "pass": passed, "distance": round(dm, 3),
+            "dist_start": round(d1, 3), "dist_end": round(d2, 3)}
+
+
+def proc_line_relation(inputs, params):
+    """GD&T góc: parallel (target 0°), perpendicular (90°), hoặc angle (target tuỳ).
+    deviation = |góc_giữa − target|; PASS khi deviation ≤ tolerance."""
+    a1 = _geo_in(inputs, params, "angle1")
+    a2 = _geo_in(inputs, params, "angle2")
+    mode = str(params.get("mode", "parallel"))
+    target = {"parallel": 0.0, "perpendicular": 90.0,
+              "angle": float(params.get("target", 0))}.get(mode, 0.0)
+    diff = abs(a1 - a2) % 180.0
+    diff = min(diff, 180.0 - diff)
+    dev = abs(diff - target)
+    passed = dev <= float(params.get("tolerance", 1.0))
+    return {"pass": passed, "deviation": round(dev, 4), "angle_between": round(diff, 4)}
+
+
+def proc_intensity_stats(inputs, params):
+    """Thống kê cường độ trong ROI: mean/std/min/max (kiểm sáng/exposure).
+    PASS khi mean trong [min_mean, max_mean]."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "pass": False, "mean": 0, "std": 0, "min": 0, "max": 0}
+    vis = _bgr(img.copy()); s = _draw_scale(vis)
+    H, W = img.shape[:2]
+    x = max(0, min(int(params.get("x", 0)), W - 1))
+    y = max(0, min(int(params.get("y", 0)), H - 1))
+    w = int(params.get("w", 0)) or (W - x)   # 0 = full width
+    h = int(params.get("h", 0)) or (H - y)
+    w = max(1, min(w, W - x)); h = max(1, min(h, H - y))
+    g = _gray(img)[y:y + h, x:x + w]
+    mn, sd = float(np.mean(g)), float(np.std(g))
+    mi, ma = int(np.min(g)), int(np.max(g))
+    cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 200, 255), _t(2, s))
+    passed = float(params.get("min_mean", 0)) <= mn <= float(params.get("max_mean", 255))
+    return {"image": vis, "pass": passed, "mean": round(mn, 2), "std": round(sd, 2),
+            "min": mi, "max": ma}
+
+
 TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
@@ -4576,6 +4767,19 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_create_polygon, ""),
 
   # ── COLOR ───────────────────────────────────────────────────────
+  ToolDef("intensity_stats","Intensity Stats","Color Analysis",
+    "Thống kê cường độ trong ROI: mean / std / min / max (kiểm sáng, exposure, "
+    "hỗ trợ presence). ROI W/H = 0 → full ảnh. PASS khi mean ∈ [min_mean, max_mean].",
+    "#6b2737","📊",
+    [PortDef("image","image")],
+    [PortDef("image","image"),PortDef("mean","number"),PortDef("std","number"),
+     PortDef("min","number"),PortDef("max","number"),PortDef("pass","bool")],
+    [P("x","ROI X","int",0,0,99999),P("y","ROI Y","int",0,0,99999),
+     P("w","ROI W (0=full)","int",0,0,99999),P("h","ROI H (0=full)","int",0,0,99999),
+     P("min_mean","Min Mean (PASS)","float",0,0,255),
+     P("max_mean","Max Mean (PASS)","float",255,0,255)],
+    proc_intensity_stats,""),
+
   ToolDef("color_picker","Color Picker","Color Analysis",
     "Click chuột lấy màu → xuất HSV range","#6b2737","🎨",
     [PortDef("image","image"),
@@ -4752,6 +4956,46 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_ocr_max, "TOCRMaxTool"),
 
   # ── MEASUREMENT ─────────────────────────────────────────────────
+  ToolDef("line_intersect","Line Intersection","Measurement",
+    "Giao điểm 2 đường (mỗi đường nối x1/y1/x2/y2 từ Line / Find Line). "
+    "Xuất điểm giao (x,y) + góc giữa 2 đường. Song song → pass=False.",
+    "#134074","✛",
+    [PortDef("image","image",required=False),
+     PortDef("l1x1","number"),PortDef("l1y1","number"),
+     PortDef("l1x2","number"),PortDef("l1y2","number"),
+     PortDef("l2x1","number"),PortDef("l2y1","number"),
+     PortDef("l2x2","number"),PortDef("l2y2","number")],
+    [PortDef("image","image"),PortDef("x","number"),PortDef("y","number"),
+     PortDef("angle","number"),PortDef("parallel","bool"),PortDef("pass","bool")],
+    [],proc_line_intersect,""),
+
+  ToolDef("dist_line_line","Distance Line-Line","Measurement",
+    "Khe hở giữa 2 đường — khoảng cách vuông góc từ line2 tới line1 (distance = "
+    "điểm giữa; dist_start/dist_end = 2 đầu). PASS khi distance trong [min,max].",
+    "#134074","‖",
+    [PortDef("image","image",required=False),
+     PortDef("l1x1","number"),PortDef("l1y1","number"),
+     PortDef("l1x2","number"),PortDef("l1y2","number"),
+     PortDef("l2x1","number"),PortDef("l2y1","number"),
+     PortDef("l2x2","number"),PortDef("l2y2","number")],
+    [PortDef("image","image"),PortDef("distance","number"),
+     PortDef("dist_start","number"),PortDef("dist_end","number"),PortDef("pass","bool")],
+    [P("min_distance","Min Distance","float",-1e9,-1e12,1e12),
+     P("max_distance","Max Distance","float",1e9,-1e12,1e12)],
+    proc_dist_line_line,""),
+
+  ToolDef("line_relation","Line Relation (GD&T)","Measurement",
+    "Quan hệ góc 2 đường: parallel (0°) / perpendicular (90°) / angle (target tuỳ). "
+    "Nối angle1, angle2 từ Find Line / Line. deviation = |góc giữa − target|; "
+    "PASS khi deviation ≤ tolerance.",
+    "#134074","∡",
+    [PortDef("angle1","number"),PortDef("angle2","number")],
+    [PortDef("pass","bool"),PortDef("deviation","number"),PortDef("angle_between","number")],
+    [P("mode","Mode","enum","parallel",choices=["parallel","perpendicular","angle"]),
+     P("target","Target angle (°)","float",0,0,180,visible_if={"mode":"angle"}),
+     P("tolerance","Tolerance (°)","float",1.0,0,90,step=0.1)],
+    proc_line_relation,""),
+
   ToolDef("dist_point","Distance Point-Point","Measurement",
     "Đo khoảng cách 2 điểm — TDistancePointPointTool. "
     "Calib 'Two Points' = nội suy tuyến tính từ 2 cặp (px, mm) đã đo.",
@@ -4857,6 +5101,42 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_area, "TMeasureRectangleTool"),
 
   # ── SURFACE INSPECTION ──────────────────────────────────────────
+  ToolDef("golden_compare","Golden Compare","Surface Inspection",
+    "So ảnh với MẪU CHUẨN (golden): absdiff → threshold → đếm vùng khác biệt. "
+    "Nối ảnh chuẩn vào port 'reference', hoặc đặt 'reference_path' tới 1 file ảnh. "
+    "PASS khi tổng diện tích lỗi ≤ max_defect_area.",
+    "#4a0404","🆚",
+    [PortDef("image","image"),PortDef("reference","image",required=False)],
+    [PortDef("image","image"),PortDef("diff","image"),PortDef("pass","bool"),
+     PortDef("defect_area","number"),PortDef("defect_count","number")],
+    [P("reference_path","Reference image (nếu không nối port)","str","",
+       tooltip="Để trống nếu đã nối port 'reference'; hoặc trỏ tới 1 file ảnh chuẩn."),
+     P("blur","Blur tolerance","int",3,0,31,
+       tooltip="Làm mờ trước khi so để bớt lệch nhiễu nhỏ. 0 = tắt."),
+     P("threshold","Diff Threshold","int",30,0,255,use_slider=True),
+     P("morph","Morph clean","int",2,0,15,tooltip="Open bỏ đốm nhiễu nhỏ. 0 = tắt."),
+     P("min_blob_area","Min defect blob (px)","float",10,0,1e7),
+     P("max_defect_area","Max total defect (px) để PASS","float",50,0,1e9)],
+    proc_golden_compare,""),
+
+  ToolDef("presence","Presence / Absence","Surface Inspection",
+    "Kiểm CÓ/THIẾU vật trong ROI theo intensity / edge_density / fill_ratio. "
+    "present=True khi score ∈ [min_score, max_score]. ROI W/H = 0 → full ảnh.",
+    "#4a0404","✅",
+    [PortDef("image","image")],
+    [PortDef("image","image"),PortDef("pass","bool"),
+     PortDef("present","bool"),PortDef("score","number")],
+    [P("x","ROI X","int",0,0,99999),P("y","ROI Y","int",0,0,99999),
+     P("w","ROI W (0=full)","int",0,0,99999),P("h","ROI H (0=full)","int",0,0,99999),
+     P("method","Method","enum","intensity",
+       choices=["intensity","edge_density","fill_ratio"],
+       tooltip="intensity: độ sáng TB. edge_density: %điểm cạnh. fill_ratio: %điểm foreground."),
+     P("fill_threshold","Fill threshold","int",127,0,255,visible_if={"method":"fill_ratio"}),
+     P("dark_object","Vật tối trên nền sáng","bool",False,visible_if={"method":"fill_ratio"}),
+     P("min_score","Min score (present)","float",0,-1e9,1e9),
+     P("max_score","Max score (present)","float",1e9,-1e9,1e12)],
+    proc_presence,""),
+
   ToolDef("surface_defect","Surface Defect","Surface Inspection",
     "Phát hiện khuyết tật bề mặt","#4a0404","🔴",
     [PortDef("image","image"),PortDef("reference","image",required=False)],
@@ -4888,6 +5168,18 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_scratch_detect, ""),
 
   # ── IMAGE PROCESSING ────────────────────────────────────────────
+  ToolDef("image_math","Image Math (2 ảnh)","Image Processing",
+    "Phép toán 2 ảnh: absdiff/subtract/add/blend/multiply/and/or/xor. "
+    "Tự resize + khớp kênh ảnh B theo A. Dùng cho golden-compare thủ công, "
+    "ghép mask, trộn ảnh…",
+    "#2c3e50","➕",
+    [PortDef("image","image"),PortDef("image_b","image")],
+    [PortDef("image","image")],
+    [P("op","Operation","enum","absdiff",
+       choices=["absdiff","subtract","add","blend","multiply","and","or","xor"]),
+     P("alpha","Blend alpha (A)","float",0.5,0,1,step=0.05,visible_if={"op":"blend"})],
+    proc_image_math,""),
+
   ToolDef("rotate_flip","Rotate / Flip","Image Processing",
     "Xoay ảnh góc bất kỳ + lật. expand=True mở rộng canvas để không cắt góc. "
     "Nối port 'angle' (vd từ PatMax) để xoay theo góc đo được.",
