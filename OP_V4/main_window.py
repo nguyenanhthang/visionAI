@@ -189,9 +189,10 @@ class DataExportWorker(QObject):
     - Nguồn: ``<src_dir>/<ngày>.xls`` — lấy cột B→I (8 giá trị) của
       DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ liệu).
     - Đích:  ``<dst_dir>/<ngày>.xls`` — append dòng
-      ``[times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2]``;
+      ``[times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2, result]``;
       header ghi 1 lần ở đầu file.
-    - ``times`` = giờ nhận verdict, ``SN`` = mã sản phẩm đang quét.
+    - ``times`` = giờ nhận verdict, ``SN`` = mã sản phẩm đang quét,
+      ``result`` = "OK" / "NG".
 
     xlwt không append trực tiếp .xls → đọc lại toàn bộ file đích rồi
     ghi lại (header + dòng cũ + dòng mới) dưới ``_file_lock`` để 2 verdict
@@ -202,16 +203,18 @@ class DataExportWorker(QObject):
     finished = Signal()
 
     HEADER = ["times", "SN", "L1-1", "L1-2", "L2-1", "L2-2",
-              "L3-1", "L3-2", "L4-1", "L4-2"]
+              "L3-1", "L3-2", "L4-1", "L4-2", "result"]
     _SRC_COLS = range(1, 9)          # cột B..I (0-based: 1..8)
     _file_lock = threading.Lock()    # serialize ghi file đích
 
     def __init__(self, src_dir: str, dst_dir: str, sn: str = "",
-                 date_fmt: str = "%Y%m%d", parent: QObject | None = None):
+                 result: str = "", date_fmt: str = "%Y%m%d",
+                 parent: QObject | None = None):
         super().__init__(parent)
         self.src_dir = src_dir
         self.dst_dir = dst_dir
         self.sn = sn or ""
+        self.result = result or ""
         self.date_fmt = date_fmt or "%Y%m%d"
 
     @Slot()
@@ -236,7 +239,7 @@ class DataExportWorker(QObject):
                 self.done.emit(False, f"{src.name} không có dòng dữ liệu")
                 return
 
-            row = [now.strftime("%Y-%m-%d %H:%M:%S"), self.sn, *measures]
+            row = [now.strftime("%Y-%m-%d %H:%M:%S"), self.sn, *measures, self.result]
 
             dst = Path(self.dst_dir) / f"{day}.xls"
             with self._file_lock:
@@ -680,7 +683,7 @@ class MainWindow(QMainWindow):
         self._opl_worker = None
 
     # ── Data export .xls (auto trigger sau mỗi PLC verdict) ───
-    def _trigger_data_export(self, sn: str):
+    def _trigger_data_export(self, sn: str, result: str = ""):
         src = getattr(config, "DATA_SRC_DIR", "")
         dst = getattr(config, "DATA_EXPORT_DIR", "")
         if not src or not dst:
@@ -690,6 +693,7 @@ class MainWindow(QMainWindow):
             src_dir=src,
             dst_dir=dst,
             sn=sn or self._current_sn,
+            result=result,
             date_fmt=getattr(config, "DATA_FILE_DATEFMT", "%Y%m%d"),
         )
         worker.moveToThread(thread)
@@ -731,9 +735,10 @@ class MainWindow(QMainWindow):
             else:
                 verdict_label = "Failed"
                 root_dir = config.OPL_NG_DIR
+            verdict = "OK" if result == "PASS" else "NG"
             self._push_sfc_result(pid, result)
             self._trigger_opl_upload(pid, verdict_label, root_dir)
-            self._trigger_data_export(pid)
+            self._trigger_data_export(pid, verdict)
 
     # ── SFC clipThroughStation push ──────────────────────────
     def _push_sfc_result(self, sn: str, result: str):

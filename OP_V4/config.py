@@ -47,7 +47,7 @@ OPL_NG_DIR = 'D:\\anh\\NG'
 # ── Data export (.xls log) ─────────────────────────────────
 # Mỗi tín hiệu PLC OK/NG: đọc dòng dữ liệu MỚI NHẤT (cột B→I = 8 giá trị)
 # của file  <DATA_SRC_DIR>\<ngày>.xls  rồi append 1 dòng
-#   [times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2]
+#   [times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2, result]  (result = OK/NG)
 # sang  <DATA_EXPORT_DIR>\<ngày>.xls  (header tạo 1 lần).
 # Để rỗng DATA_SRC_DIR hoặc DATA_EXPORT_DIR → tắt tính năng này.
 DATA_SRC_DIR      = ''          # folder chứa file .xls nguồn (đặt tên theo ngày)
