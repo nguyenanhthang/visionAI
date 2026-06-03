@@ -15,6 +15,7 @@ Layout giống mockup HTML:
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -180,6 +181,121 @@ class SfcPushWorker(QObject):
             self.done.emit(False, f"SFC {sn} {result} lỗi: {exc}")
         finally:
             self.finished.emit()
+
+
+class DataExportWorker(QObject):
+    """Append 1 dòng đo sang file .xls log theo ngày khi có verdict PLC.
+
+    - Nguồn: ``<src_dir>/<ngày>.xls`` — lấy cột B→I (8 giá trị) của
+      DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ liệu).
+    - Đích:  ``<dst_dir>/<ngày>.xls`` — append dòng
+      ``[times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2]``;
+      header ghi 1 lần ở đầu file.
+    - ``times`` = giờ nhận verdict, ``SN`` = mã sản phẩm đang quét.
+
+    xlwt không append trực tiếp .xls → đọc lại toàn bộ file đích rồi
+    ghi lại (header + dòng cũ + dòng mới) dưới ``_file_lock`` để 2 verdict
+    sát nhau không ghi đè lẫn nhau.
+    """
+
+    done     = Signal(bool, str)   # ok, message
+    finished = Signal()
+
+    HEADER = ["times", "SN", "L1-1", "L1-2", "L2-1", "L2-2",
+              "L3-1", "L3-2", "L4-1", "L4-2"]
+    _SRC_COLS = range(1, 9)          # cột B..I (0-based: 1..8)
+    _file_lock = threading.Lock()    # serialize ghi file đích
+
+    def __init__(self, src_dir: str, dst_dir: str, sn: str = "",
+                 date_fmt: str = "%Y%m%d", parent: QObject | None = None):
+        super().__init__(parent)
+        self.src_dir = src_dir
+        self.dst_dir = dst_dir
+        self.sn = sn or ""
+        self.date_fmt = date_fmt or "%Y%m%d"
+
+    @Slot()
+    def run(self):
+        try:
+            import xlrd
+            import xlwt
+        except ImportError:
+            self.done.emit(False, "Thiếu thư viện: pip install xlrd xlwt")
+            self.finished.emit()
+            return
+        try:
+            now = datetime.now()
+            day = now.strftime(self.date_fmt)
+            src = Path(self.src_dir) / f"{day}.xls"
+            if not src.exists():
+                self.done.emit(False, f"File .xls nguồn không tồn tại: {src.name}")
+                return
+
+            measures = self._read_latest_measures(xlrd, src)
+            if measures is None:
+                self.done.emit(False, f"{src.name} không có dòng dữ liệu")
+                return
+
+            row = [now.strftime("%Y-%m-%d %H:%M:%S"), self.sn, *measures]
+
+            dst = Path(self.dst_dir) / f"{day}.xls"
+            with self._file_lock:
+                Path(self.dst_dir).mkdir(parents=True, exist_ok=True)
+                old_rows = self._read_existing(xlrd, dst) if dst.exists() else []
+                self._write_all(xlwt, dst, old_rows + [row])
+
+            self.done.emit(True, f"Lưu data → {dst.name} (+1 dòng, SN {self.sn or '—'})")
+        except Exception as exc:
+            self.done.emit(False, f"Export .xls lỗi: {exc}")
+        finally:
+            self.finished.emit()
+
+    # ── helpers ──────────────────────────────────────────────
+    @classmethod
+    def _read_latest_measures(cls, xlrd, path: Path):
+        """Cột B→I của dòng cuối còn dữ liệu. None nếu file rỗng."""
+        sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
+        for r in range(sheet.nrows - 1, -1, -1):
+            cells = [cls._norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
+            if any(v != "" for v in cells):
+                return [cells[c] if c < len(cells) else "" for c in cls._SRC_COLS]
+        return None
+
+    @classmethod
+    def _read_existing(cls, xlrd, path: Path) -> list[list]:
+        """Đọc lại các dòng dữ liệu cũ của file đích (bỏ header)."""
+        try:
+            sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
+        except Exception:
+            return []
+        rows = []
+        for r in range(sheet.nrows):
+            vals = [cls._norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
+            if r == 0 and vals[:1] == [cls.HEADER[0]]:
+                continue  # bỏ header cũ — sẽ ghi lại
+            if any(v != "" for v in vals):
+                rows.append(vals)
+        return rows
+
+    @classmethod
+    def _write_all(cls, xlwt, path: Path, rows: list[list]):
+        wb = xlwt.Workbook(encoding="utf-8")
+        ws = wb.add_sheet("data")
+        for c, h in enumerate(cls.HEADER):
+            ws.write(0, c, h)
+        for ri, row in enumerate(rows, start=1):
+            for c, val in enumerate(row):
+                ws.write(ri, c, val)
+        wb.save(str(path))
+
+    @staticmethod
+    def _norm(v):
+        """xls trả số dạng float — số nguyên thì bỏ đuôi '.0'; None → ''."""
+        if v is None:
+            return ""
+        if isinstance(v, float) and v.is_integer():
+            return int(v)
+        return v
 
 
 # ── main window ──────────────────────────────────────────────────
@@ -563,6 +679,33 @@ class MainWindow(QMainWindow):
         self._opl_thread = None
         self._opl_worker = None
 
+    # ── Data export .xls (auto trigger sau mỗi PLC verdict) ───
+    def _trigger_data_export(self, sn: str):
+        src = getattr(config, "DATA_SRC_DIR", "")
+        dst = getattr(config, "DATA_EXPORT_DIR", "")
+        if not src or not dst:
+            return  # chưa cấu hình folder → bỏ qua
+        thread = QThread(self)
+        worker = DataExportWorker(
+            src_dir=src,
+            dst_dir=dst,
+            sn=sn or self._current_sn,
+            date_fmt=getattr(config, "DATA_FILE_DATEFMT", "%Y%m%d"),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_data_export_done)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._data_jobs = getattr(self, "_data_jobs", [])
+        self._data_jobs = [(t, w) for (t, w) in self._data_jobs if t.isRunning()]
+        self._data_jobs.append((thread, worker))
+        thread.start()
+
+    def _on_data_export_done(self, ok: bool, msg: str):
+        self._log(msg, "SYS", level=("ok" if ok else "err"))
+
     def _on_plc_result(self, data: dict):
         pid = data.get("product_id", "") or self._current_sn
         ok = data.get("ok")
@@ -590,6 +733,7 @@ class MainWindow(QMainWindow):
                 root_dir = config.OPL_NG_DIR
             self._push_sfc_result(pid, result)
             self._trigger_opl_upload(pid, verdict_label, root_dir)
+            self._trigger_data_export(pid)
 
     # ── SFC clipThroughStation push ──────────────────────────
     def _push_sfc_result(self, sn: str, result: str):

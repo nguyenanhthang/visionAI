@@ -43,3 +43,13 @@ token_link = 'http://10.222.48.213:8888/v2/platform/get/token?appid=e015ef3a23a8
 # lấy file ảnh có mtime mới nhất trong subfolder đó.
 OPL_OK_DIR = 'D:\\anh\\OK'
 OPL_NG_DIR = 'D:\\anh\\NG'
+
+# ── Data export (.xls log) ─────────────────────────────────
+# Mỗi tín hiệu PLC OK/NG: đọc dòng dữ liệu MỚI NHẤT (cột B→I = 8 giá trị)
+# của file  <DATA_SRC_DIR>\<ngày>.xls  rồi append 1 dòng
+#   [times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2]
+# sang  <DATA_EXPORT_DIR>\<ngày>.xls  (header tạo 1 lần).
+# Để rỗng DATA_SRC_DIR hoặc DATA_EXPORT_DIR → tắt tính năng này.
+DATA_SRC_DIR      = ''          # folder chứa file .xls nguồn (đặt tên theo ngày)
+DATA_EXPORT_DIR   = ''          # folder lưu file .xls đích (đặt tên theo ngày)
+DATA_FILE_DATEFMT = '%Y%m%d'    # định dạng tên file theo ngày (vd 20260603.xls)

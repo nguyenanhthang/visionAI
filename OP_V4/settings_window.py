@@ -223,6 +223,11 @@ class SettingsDialog(QDialog):
             ("OPL_NG_DIR",     "Folder ảnh NG",     "dir"),
             ("link_post_img",  "Folder đẩy ảnh",    "dir"),
         ],
+        "Data .xls": [
+            ("DATA_SRC_DIR",      "Folder .xls nguồn",      "dir"),
+            ("DATA_EXPORT_DIR",   "Folder .xls đích",       "dir"),
+            ("DATA_FILE_DATEFMT", "Định dạng tên (theo ngày)", "str"),
+        ],
     }
 
     def __init__(self, parent=None):
