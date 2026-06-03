@@ -1880,15 +1880,20 @@ class NodeDetailDialog(QDialog):
 
         elif tool.tool_id in ("create_rectangle", "create_circle",
                               "create_ellipse", "create_trapezoid",
-                              "create_polygon"):
+                              "create_polygon", "perspective"):
             # Create Shape tools — vẽ hình bằng kéo chuột (rect/circle/ellipse/
             # polygon). Trapezoid vẽ bằng bbox (shape "rect") → proc_ dựng hình
-            # thang theo top_ratio. Vẽ xong → ghi geometry vào params + rerun.
+            # thang theo top_ratio. Perspective: click 4 góc (polygon) → x1..y4.
+            # Vẽ xong → ghi geometry vào params + rerun.
             self._create_shape_key = {
                 "create_rectangle": "rect", "create_circle": "circle",
                 "create_ellipse": "ellipse", "create_trapezoid": "rect",
-                "create_polygon": "polygon"}[tool.tool_id]
-            if self._create_shape_key == "polygon":
+                "create_polygon": "polygon", "perspective": "polygon"}[tool.tool_id]
+            if tool.tool_id == "perspective":
+                hint = ("✏  Click 4 GÓC theo thứ tự: trên-trái → trên-phải → "
+                        "dưới-phải → dưới-trái, double-click để chốt. "
+                        "Hoặc nhập x1..y4 ở Params.")
+            elif self._create_shape_key == "polygon":
                 hint = ("✏  Click từng đỉnh trên ảnh, double-click để chốt "
                         "(≥3 điểm). Hoặc nhập cx/cy/r/Sides ở Params.")
             else:
@@ -2724,6 +2729,23 @@ class NodeDetailDialog(QDialog):
         """Vẽ xong shape → ghi geometry vào params + rerun (vẽ hình cố định)."""
         node = self._node
         d = dict(data or {})
+        # Perspective Warp: polygon 4 điểm → x1..y4 (theo thứ tự click).
+        if node.tool.tool_id == "perspective" and shape_type == "polygon":
+            pts = d.get("pts") or []
+            if len(pts) >= 4:
+                flat = [int(round(c)) for p in pts[:4] for c in p]
+                for k, v in zip(("x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4"), flat):
+                    node.params[k] = v
+                    pr = getattr(self, "_param_rows", {}).get(k)
+                    if pr is not None and hasattr(pr._editor, "setValue"):
+                        pr._editor.blockSignals(True)
+                        pr._editor.setValue(v)
+                        pr._editor.blockSignals(False)
+            if getattr(self, "_auto_run_cb", None) and self._auto_run_cb.isChecked():
+                self._auto_run_timer.start()
+            else:
+                self._on_run()
+            return
         updates = {}
         if shape_type in ("rect", "ellipse"):
             for k in ("x", "y", "w", "h"):
