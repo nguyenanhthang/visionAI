@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Project data & training artifacts (keep these out of version control)
+data/
+outputs/
+*.keras
+*.h5
+*.weights.h5
+
+# Tooling / OS
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+.vscode/
