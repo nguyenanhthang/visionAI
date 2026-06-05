@@ -6,11 +6,12 @@ ui/main_window.py — v3
 """
 from __future__ import annotations
 import os, time
-from typing import Optional
+from typing import Optional, Callable
 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                 QSplitter, QLabel, QPushButton, QStatusBar,
                                 QFileDialog, QMessageBox, QProgressBar,
+                                QProgressDialog,
                                 QFrame, QTabWidget, QApplication, QDialog)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QSettings
 from PySide6.QtGui import QAction, QKeySequence, QFont
@@ -21,8 +22,10 @@ from ui.tool_library import ToolLibraryPanel
 from ui.properties_panel import PropertiesPanel
 from ui.results_panel import ResultsPanel
 from ui.image_viewer import ImageViewerPanel
-from ui.node_detail_dialog import NodeDetailDialog
-from core.plc import PLCManager
+from ui.loading_screen import BusyOverlay
+# NodeDetailDialog (3027 dòng) lazy-import trong _open_node_detail — không
+# cần lúc khởi động, giảm thời gian import startup.
+from core.plc import PLCManager, get_plc_manager
 
 
 # ── Worker ────────────────────────────────────────────────────────
@@ -45,6 +48,37 @@ class PipelineWorker(QObject):
                 acquire_node_id=self.acquire_node_id or None,
             )
             self.finished.emit(results, (time.perf_counter() - t0) * 1000)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ── Pipeline load worker ──────────────────────────────────────────
+class PipelineLoadWorker(QObject):
+    """Nạp file .aoi/.json ở thread nền — đọc file + parse JSON + dựng
+    FlowGraph (decode PatMaxModel base64 nặng với file lớn) → không treo UI.
+    Chỉ tạo data model; widget canvas dựng trên main thread ở finished."""
+    progress = Signal(int, str)
+    finished = Signal(object)   # FlowGraph
+    error    = Signal(str)
+
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+
+    def run(self):
+        try:
+            import json
+            self.progress.emit(8, "Đang đọc file…")
+            with open(self.path, "r", encoding="utf-8") as f:
+                self.progress.emit(28, "Đang phân tích JSON…")
+                data = json.load(f)
+            self.progress.emit(45, "Đang dựng pipeline…")
+            graph = FlowGraph.from_dict(
+                data,
+                progress_cb=lambda p: self.progress.emit(
+                    45 + int(p * 0.5), "Đang dựng node…"))
+            self.progress.emit(100, "Hoàn tất")
+            self.finished.emit(graph)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -89,8 +123,11 @@ def _sep() -> QFrame:
 
 # ── Main Window ───────────────────────────────────────────────────
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, on_progress: Optional[Callable[[int, str], None]] = None):
         super().__init__()
+        # on_progress(pct, msg) — splash khởi động hook vào đây để hiện tiến
+        # độ dựng UI. None = chạy bình thường (vd khi test, không splash).
+        self._on_progress = on_progress
         self.setWindowTitle("NEO Vision Pro  v1.0")
         self.resize(1560, 940)
         self.setMinimumSize(1100, 700)
@@ -111,7 +148,7 @@ class MainWindow(QMainWindow):
         self._detail_dialogs: dict = {}   # node_id → NodeDetailDialog
 
         # PLC integration — persistent manager, shared with PLCDialog
-        self._plc_manager = PLCManager()
+        self._plc_manager = get_plc_manager()   # shared — node PLC Write dùng chung
         self._plc_dialog = None
         # Trigger route acquire_node_id cho lần run kế tiếp (set bởi
         # _on_plc_trigger, clear bởi _finalize_run). Rỗng = chạy toàn pipeline.
@@ -123,10 +160,28 @@ class MainWindow(QMainWindow):
         self._sfc_dialog = None
         self._sfc_pending_post = False  # set khi PLC trigger có sequence POST
 
+        # Single-instance cache cho dialog nặng (lazy-build): mở lần đầu mới
+        # dựng, đang mở thì bring-to-front thay vì tạo bản sao.
+        self._yolo_dialog = None
+        # Background loader (.aoi) — thread + worker + progress dialog.
+        self._load_thread: Optional[QThread] = None
+        self._load_worker = None
+        self._load_dialog = None
+        self._loading_path: str = ""
+
+        self._emit_progress(15, "Đang dựng giao diện…")
         self._build_ui()
+        self._emit_progress(50, "Đang tạo menu…")
         self._build_menu()
+        self._emit_progress(62, "Đang kết nối tín hiệu…")
         self._connect_signals()
         self._restore_state()
+        self._emit_progress(70, "Giao diện sẵn sàng")
+
+        # Overlay 'đang mở…' hiện khi bấm node để dựng dialog nặng (lazy-build).
+        self._busy = BusyOverlay(self)
+        self._detail_pending: set = set()  # node_id đang dựng dialog (chống trùng)
+        self._heavy_pending: set = set()   # label dialog toolbar đang dựng
 
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._tick)
@@ -136,6 +191,33 @@ class MainWindow(QMainWindow):
         # tab bar, properties → user thấy ảnh chiếm toàn màn hình ngay.
         # F11 hoặc Esc hoặc View → Full Image View để thoát.
         QTimer.singleShot(0, lambda: self._act_full_view.setChecked(True))
+        # Prefetch import các dialog nặng ở thread nền (sau khi UI đã hiện) →
+        # lần đầu bấm node / mở YOLO Studio dựng nhanh hơn, bớt kẹt main thread.
+        QTimer.singleShot(1200, self._prewarm_heavy_dialogs)
+
+    def _prewarm_heavy_dialogs(self):
+        """Prefetch import module dialog nặng ở thread nền. Import chỉ parse
+        module + define class (KHÔNG tạo widget) → an toàn chạy ngoài main
+        thread; lần đầu mở dialog đỡ phải trả phí import → bớt kẹt."""
+        import threading
+
+        def _work():
+            for mod in ("ui.node_detail_dialog", "ui.patmax_dialog",
+                        "ui.yolo_studio", "ui.plc_dialog", "ui.sfc_dialog",
+                        "ui.camera_dialog"):
+                try:
+                    __import__(mod)
+                except Exception:
+                    pass
+        threading.Thread(target=_work, daemon=True, name="prewarm").start()
+
+    def _emit_progress(self, pct: int, msg: str):
+        """Báo tiến độ cho splash khởi động (no-op nếu không có on_progress)."""
+        if self._on_progress:
+            try:
+                self._on_progress(pct, msg)
+            except Exception:
+                pass
 
     # ── UI BUILD ─────────────────────────────────────────────────
     def _build_ui(self):
@@ -439,34 +521,52 @@ class MainWindow(QMainWindow):
         if not self._graph or node_id not in self._graph.nodes:
             return
 
-        # Nếu dialog đã mở, bring to front
+        # Dialog đã mở → bring to front (tức thì, không cần overlay).
         dlg = self._detail_dialogs.get(node_id)
         if dlg and dlg.isVisible():
             dlg.raise_()
             dlg.activateWindow()
             return
 
-        node = self._graph.nodes[node_id]
+        # Đang dựng dialog cho node này rồi (double double-click) → bỏ qua.
+        if node_id in self._detail_pending:
+            return
+        self._detail_pending.add(node_id)
 
-        # PatMax / PatFind → mở PatMaxDialog chuyên dụng. YOLO Detect đi
-        # qua NodeDetailDialog mặc định (có file picker + info panel +
-        # tune params); YOLO Studio mở riêng từ toolbar để train.
-        if node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
-            from ui.patmax_dialog import PatMaxDialog
-            dlg = PatMaxDialog(node, self._graph, self)
-            dlg.run_requested.connect(self._on_detail_run)
-            dlg.model_trained.connect(lambda: self._canvas.aoi_scene.refresh_node(node_id))
-            dlg.finished.connect(lambda _, nid=node_id: self._detail_dialogs.pop(nid, None))
+        # Con trỏ busy (OS vẽ → VẪN QUAY khi main thread block, vd Windows) +
+        # overlay 'đang mở…'. Dựng dialog nặng ở tick event-loop kế (singleShot)
+        # để overlay + con trỏ kịp đổi trước khi main thread bận dựng.
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._busy.show_busy(f"Đang mở {self._graph.nodes[node_id].name}…")
+        QTimer.singleShot(0, lambda nid=node_id: self._build_node_detail(nid))
+
+    def _build_node_detail(self, node_id: str):
+        """Dựng + show dialog chi tiết (chạy ở tick sau khi overlay đã hiện)."""
+        try:
+            if not self._graph or node_id not in self._graph.nodes:
+                return
+            node = self._graph.nodes[node_id]
+
+            # PatMax / PatFind → PatMaxDialog chuyên dụng. YOLO Detect đi qua
+            # NodeDetailDialog mặc định; YOLO Studio mở riêng từ toolbar.
+            if node.tool.tool_id in ("patmax", "patmax_align", "patfind"):
+                from ui.patmax_dialog import PatMaxDialog
+                dlg = PatMaxDialog(node, self._graph, self)
+                dlg.run_requested.connect(self._on_detail_run)
+                dlg.model_trained.connect(
+                    lambda: self._canvas.aoi_scene.refresh_node(node_id))
+            else:
+                from ui.node_detail_dialog import NodeDetailDialog
+                dlg = NodeDetailDialog(node, self._graph, self)
+                dlg.run_requested.connect(self._on_detail_run)
+            dlg.finished.connect(
+                lambda _, nid=node_id: self._detail_dialogs.pop(nid, None))
             self._detail_dialogs[node_id] = dlg
             dlg.show()
-            return
-
-        # Các tool khác → NodeDetailDialog
-        dlg = NodeDetailDialog(node, self._graph, self)
-        dlg.run_requested.connect(self._on_detail_run)
-        dlg.finished.connect(lambda _, nid=node_id: self._detail_dialogs.pop(nid, None))
-        self._detail_dialogs[node_id] = dlg
-        dlg.show()
+        finally:
+            self._detail_pending.discard(node_id)
+            self._busy.hide_busy()
+            QApplication.restoreOverrideCursor()
 
     def _on_detail_run(self, node_id: str):
         """Node chạy từ detail dialog → refresh canvas + viewer."""
@@ -676,25 +776,86 @@ class MainWindow(QMainWindow):
             self._rebuild_canvas()
             self._update_title()
 
-    def load_pipeline_from_path(self, path: str) -> bool:
-        """Load .aoi/.json file vào canvas. Trả True nếu thành công.
-        Dùng được cả từ menu Open lẫn StartupAOIPicker → MainWindow."""
+    def load_pipeline_from_path(self, path: str, background: bool = True,
+                                progress_cb=None) -> bool:
+        """Load .aoi/.json file vào canvas.
+
+        background=True (mặc định, dùng cho menu Open / Switch Project khi app
+            đã chạy): nạp file ở thread nền + progress dialog → không treo UI.
+            Trả True nếu đã *bắt đầu* nạp (kết quả xử lý trong callback).
+        background=False (dùng lúc khởi động — splash đã lo feedback): nạp đồng
+            bộ, progress_cb(pct: float) báo tiến độ cho splash. Trả True nếu OK.
+        """
         if not self._maybe_save_changes():
             return False
-        try:
-            self._graph = FlowGraph.load(path)
-            self._current_file = path
-            self._rebuild_canvas()
-            self._add_recent_file(path)
-            # _rebuild_canvas → _on_graph_changed → _mark_dirty (false
-            # positive vì đó là load chứ không phải edit). Reset lại.
-            self._dirty = False
-            self._update_title()
-            self.statusBar().showMessage(f"Loaded: {path}", 3000)
+
+        if not background:
+            try:
+                graph = FlowGraph.load(path, progress_cb=progress_cb)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Cannot load:\n{e}")
+                return False
+            self._apply_loaded_graph(graph, path)
             return True
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Cannot load:\n{e}")
-            return False
+
+        # ── Background: thread nền + progress dialog ──────────────
+        if self._load_thread and self._load_thread.isRunning():
+            return False  # đang nạp file khác, bỏ qua
+
+        dlg = QProgressDialog("Đang nạp pipeline…", "", 0, 100, self)
+        dlg.setWindowTitle("Loading")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setCancelButton(None)          # không cho hủy giữa chừng
+        dlg.setMinimumDuration(150)        # file nhỏ nạp nhanh → không flash
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        self._load_dialog = dlg
+        self._loading_path = path
+
+        self._load_thread = QThread()
+        self._load_worker = PipelineLoadWorker(path)
+        self._load_worker.moveToThread(self._load_thread)
+        self._load_thread.started.connect(self._load_worker.run)
+        # QUAN TRỌNG: connect vào bound-method (QObject slot), KHÔNG dùng
+        # lambda. Lambda/hàm thường → Qt mặc định DirectConnection → callback
+        # chạy trong worker thread → tạo widget sai thread → crash. Bound-
+        # method của MainWindow → AutoConnection = QueuedConnection (main thread).
+        self._load_worker.progress.connect(self._on_bg_load_progress)
+        self._load_worker.finished.connect(self._on_bg_load_done)
+        self._load_worker.error.connect(self._on_bg_load_error)
+        self._load_worker.finished.connect(self._load_thread.quit)
+        self._load_worker.error.connect(self._load_thread.quit)
+        self._load_thread.start()
+        return True
+
+    def _apply_loaded_graph(self, graph: FlowGraph, path: str):
+        """Gắn graph đã nạp vào UI (chạy trên main thread)."""
+        self._graph = graph
+        self._current_file = path
+        self._rebuild_canvas()
+        self._add_recent_file(path)
+        # _rebuild_canvas → _on_graph_changed → _mark_dirty (false positive
+        # vì đó là load chứ không phải edit). Reset lại.
+        self._dirty = False
+        self._update_title()
+        self.statusBar().showMessage(f"Loaded: {path}", 3000)
+
+    def _on_bg_load_progress(self, pct: int, msg: str):
+        if self._load_dialog:
+            self._load_dialog.setLabelText(msg)
+            self._load_dialog.setValue(pct)
+
+    def _on_bg_load_done(self, graph: FlowGraph):
+        if self._load_dialog:
+            self._load_dialog.close()
+            self._load_dialog = None
+        self._apply_loaded_graph(graph, self._loading_path)
+
+    def _on_bg_load_error(self, msg: str):
+        if self._load_dialog:
+            self._load_dialog.close()
+            self._load_dialog = None
+        QMessageBox.critical(self, "Error", f"Cannot load:\n{msg}")
 
     @staticmethod
     def _get_recent_files() -> list:
@@ -815,12 +976,32 @@ class MainWindow(QMainWindow):
         marker = "• " if self._dirty else ""
         self.setWindowTitle(f"{marker}Vision Ultimate — {fname}")
 
+    # ── Heavy dialog open (overlay + busy cursor) ─────────────────
+    def _open_heavy_dialog(self, label: str, build_fn):
+        """Mở 1 dialog nặng (toolbar) với overlay + con trỏ busy giống node-
+        detail: hiện overlay 'đang mở…' + WaitCursor NGAY, rồi chạy build_fn()
+        (import + dựng + show dialog) ở tick event-loop kế để overlay kịp vẽ.
+        Bring-to-front (nếu dialog đang mở) phải check TRƯỚC khi gọi hàm này."""
+        if label in self._heavy_pending:
+            return
+        self._heavy_pending.add(label)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._busy.show_busy(f"Đang mở {label}…")
+
+        def _run():
+            try:
+                build_fn()
+            finally:
+                self._heavy_pending.discard(label)
+                self._busy.hide_busy()
+                QApplication.restoreOverrideCursor()
+        QTimer.singleShot(0, _run)
+
     # ── About ─────────────────────────────────────────────────────
     def _open_yolo_studio(self, initial_image=None):
         """Mở YOLO Studio dialog — độc lập với pipeline. Studio chỉ
         label + train + save file; user trỏ file đó vào YOLO Detect
         node bằng tay (Browse) trong pipeline."""
-        from ui.yolo_studio import YoloStudioDialog
         # QPushButton.clicked / QAction.triggered emit `checked: bool` làm
         # arg đầu — nếu connect trực tiếp slot này, initial_image sẽ là
         # bool thay vì ndarray. Coerce về None.
@@ -830,8 +1011,26 @@ class MainWindow(QMainWindow):
                 node = self._graph.nodes.get(self._current_node_id_for_yolo())
                 if node:
                     initial_image = node.outputs.get("image")
-        dlg = YoloStudioDialog(self, initial_image)
-        dlg.show()
+
+        # Single-instance: đang mở → bring-to-front (tức thì, không overlay).
+        if self._yolo_dialog is not None:
+            try:
+                if self._yolo_dialog.isVisible():
+                    self._yolo_dialog.raise_()
+                    self._yolo_dialog.activateWindow()
+                    return
+            except RuntimeError:
+                self._yolo_dialog = None   # C++ object đã bị xóa
+
+        def _build():
+            # Import trong builder (dưới overlay) — yolo_studio 2461 dòng +
+            # ultralytics nặng, đã được pre-warm ở thread nền lúc khởi động.
+            from ui.yolo_studio import YoloStudioDialog
+            dlg = YoloStudioDialog(self, initial_image)
+            dlg.finished.connect(lambda *_: setattr(self, "_yolo_dialog", None))
+            self._yolo_dialog = dlg
+            dlg.show()
+        self._open_heavy_dialog("YOLO Studio", _build)
 
     def _current_node_id_for_yolo(self):
         """Trả về node_id đang được chọn (nếu có)."""
@@ -842,32 +1041,41 @@ class MainWindow(QMainWindow):
 
     # ── PLC ───────────────────────────────────────────────────────
     def _open_plc_dialog(self):
-        from ui.plc_dialog import PLCDialog
         if self._plc_dialog and self._plc_dialog.isVisible():
             self._plc_dialog.set_graph(self._graph)
             self._plc_dialog.raise_()
             self._plc_dialog.activateWindow()
             return
-        self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
-        self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
-        self._plc_dialog.showMaximized()
+
+        def _build():
+            from ui.plc_dialog import PLCDialog
+            self._plc_dialog = PLCDialog(self._plc_manager, self._graph, self)
+            self._plc_dialog.trigger_fired.connect(self._on_plc_trigger)
+            self._plc_dialog.showMaximized()
+        self._open_heavy_dialog("PLC", _build)
 
     def _open_sfc_dialog(self):
-        from ui.sfc_dialog import SfcDialog
         if self._sfc_dialog and self._sfc_dialog.isVisible():
             self._sfc_dialog.set_graph(self._graph)
             self._sfc_dialog.raise_()
             self._sfc_dialog.activateWindow()
             return
-        self._sfc_dialog = SfcDialog(self._sfc_manager, self._graph, self)
-        self._sfc_dialog.showMaximized()
+
+        def _build():
+            from ui.sfc_dialog import SfcDialog
+            self._sfc_dialog = SfcDialog(self._sfc_manager, self._graph, self)
+            self._sfc_dialog.showMaximized()
+        self._open_heavy_dialog("SFC / MES", _build)
 
     def _open_camera_dialog(self):
-        from ui.camera_dialog import CameraSetupDialog
         if getattr(self, "_cam_dialog", None) and self._cam_dialog.isVisible():
             self._cam_dialog.raise_(); self._cam_dialog.activateWindow(); return
-        self._cam_dialog = CameraSetupDialog(self)
-        self._cam_dialog.show()
+
+        def _build():
+            from ui.camera_dialog import CameraSetupDialog
+            self._cam_dialog = CameraSetupDialog(self)
+            self._cam_dialog.show()
+        self._open_heavy_dialog("Camera", _build)
 
     def _on_plc_trigger(self, acquire_node_id: str = ""):
         """PLC kích hoạt → tuỳ cấu hình SFC sequence:
@@ -1056,8 +1264,17 @@ class MainWindow(QMainWindow):
         QSettings().setValue("geometry", self.saveGeometry())
         if self._is_running:
             self._stop_run()
+        # Chờ thread nạp file (nếu đang chạy) để không leak QThread.
+        if self._load_thread and self._load_thread.isRunning():
+            self._load_thread.quit()
+            self._load_thread.wait(3000)
         for dlg in list(self._detail_dialogs.values()):
             dlg.close()
+        if self._yolo_dialog is not None:
+            try:
+                self._yolo_dialog.close()
+            except RuntimeError:
+                pass
         try:
             self._plc_manager.disconnect()
         except Exception:

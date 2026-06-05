@@ -204,22 +204,36 @@ def main():
     #     chọn (recent / browse / new blank).
     #  3. Cancel picker → exit app.
     from ui.startup_picker import StartupAOIPicker
+    from ui.loading_screen import LoadingScreen
+
+    def _build_window(load_path: str):
+        """Splash → dựng MainWindow (kèm progress) → nạp project (đồng bộ,
+        splash đã lo feedback "không treo") → show → đóng splash."""
+        splash = LoadingScreen()
+        splash.show_message("Đang khởi tạo giao diện…", 5)
+        win = MainWindow(
+            on_progress=lambda pct, msg: splash.show_message(msg, pct))
+        if load_path:
+            splash.show_message("Đang nạp dự án…", 75)
+            win.load_pipeline_from_path(
+                load_path, background=False,
+                progress_cb=lambda p: splash.show_message(
+                    "Đang nạp dự án…", 75 + int(p * 0.2)))
+        splash.show_message("Hoàn tất", 100)
+        win.show()
+        splash.finish(win)
+        return win
+
     default = StartupAOIPicker.get_default_path()
     if default:
-        window = MainWindow()
-        window.load_pipeline_from_path(default)
-        window.show()
+        window = _build_window(default)
         sys.exit(app.exec())
 
     picker = StartupAOIPicker()
     if picker.exec() != QDialog.Accepted:
         sys.exit(0)
 
-    window = MainWindow()
-    chosen = picker.chosen_path()
-    if chosen:
-        window.load_pipeline_from_path(chosen)
-    window.show()
+    window = _build_window(picker.chosen_path() or "")
     sys.exit(app.exec())
 
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import math
 import os
+import time
 
 @dataclass
 class PortDef:
@@ -2088,16 +2089,48 @@ def _ocr_lang_to_easyocr(lang: str) -> List[str]:
         codes.append(mapping.get(p, p))
     return codes or ["en"]
 
+_EASYOCR_FAILED: Dict[tuple, str] = {}   # langs init lỗi → fast-fail tránh lag
+
 def _get_easyocr_reader(langs: List[str]):
-    """Lazy-init + cache EasyOCR Reader (load model ~5-15s lần đầu)."""
+    """Lazy-init + cache EasyOCR Reader (load model ~5-15s lần đầu). Nếu init
+    TỪNG lỗi (thiếu lib / tải model timeout) → fast-fail ngay, KHÔNG thử lại
+    đường chậm mỗi lần Run (đỡ lag). Restart app để thử lại sau khi đã sửa."""
     key = tuple(sorted(set(langs)))
     r = _EASYOCR_READERS.get(key)
     if r is not None:
         return r
-    import easyocr
-    r = easyocr.Reader(list(key), gpu=False, verbose=False)
+    if key in _EASYOCR_FAILED:
+        raise RuntimeError(_EASYOCR_FAILED[key])
+    try:
+        import easyocr
+        r = easyocr.Reader(list(key), gpu=False, verbose=False)
+    except Exception as e:
+        _EASYOCR_FAILED[key] = f"easyocr init lỗi (đã cache, restart để thử lại): {e}"
+        raise
     _EASYOCR_READERS[key] = r
     return r
+
+def _ensure_tesseract_cmd(custom_path: str = "") -> None:
+    """Trỏ pytesseract tới binary Tesseract khi KHÔNG có trên PATH. Ưu tiên
+    custom_path (param 'tesseract_path'); trống thì auto-dò vị trí cài mặc định
+    — Windows hay cài UB-Mannheim rồi quên thêm PATH nên pytesseract không thấy."""
+    import os, shutil
+    import pytesseract
+    if custom_path and os.path.isfile(custom_path):
+        pytesseract.pytesseract.tesseract_cmd = custom_path
+        return
+    cur = getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
+    # Đã trỏ tới file hợp lệ, hoặc có trên PATH → khỏi dò.
+    if (cur and os.path.isfile(cur)) or shutil.which(cur) or shutil.which("tesseract"):
+        return
+    for c in (r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+              r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+              os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
+              "/usr/bin/tesseract", "/usr/local/bin/tesseract",
+              "/opt/homebrew/bin/tesseract"):
+        if c and os.path.isfile(c):
+            pytesseract.pytesseract.tesseract_cmd = c
+            return
 
 def proc_ocr_max(inputs, params):
     """TOCRMaxTool — Đọc & xác nhận ký tự (OCR).
@@ -2135,6 +2168,7 @@ def proc_ocr_max(inputs, params):
 
     def _run_tesseract():
         import pytesseract
+        _ensure_tesseract_cmd(str(params.get("tesseract_path", "") or ""))
         data = pytesseract.image_to_data(
             proc_gray, lang=lang,
             config=f"--psm {psm} --oem 3",
@@ -3763,6 +3797,554 @@ def proc_yolo_detect(inputs, params):
         return _yolo_empty_outputs(vis)
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  CATEGORY: COMMUNICATION — gửi kết quả ra PLC / TCP / Modbus / HTTP
+#  (không thêm dependency: PLCManager sẵn có; socket/urllib stdlib)
+# ═══════════════════════════════════════════════════════════════════
+def _comms_template(tpl: str, inputs: dict) -> str:
+    """Điền {value}/{pass}/{text}/{ts} vào template; key thiếu → ''. Hỗ trợ
+    escape \\r \\n \\t khi nhập từ ô text."""
+    class _D(dict):
+        def __missing__(self, k):
+            return ""
+    p = inputs.get("pass")
+    d = _D(value=("" if inputs.get("value") is None else inputs.get("value")),
+           text=("" if inputs.get("text") is None else inputs.get("text")),
+           ts=time.strftime("%Y-%m-%d %H:%M:%S"))
+    d["pass"] = "" if p is None else ("PASS" if p else "FAIL")
+    try:
+        out = str(tpl).format_map(d)
+    except Exception:
+        out = str(tpl)
+    return out.replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t")
+
+
+def proc_plc_write(inputs, params):
+    """Ghi kết quả ra PLC qua PLCManager (DÙNG CHUNG kết nối với PLC dialog)."""
+    img = inputs.get("image")
+    ok, status = False, ""
+    try:
+        from core.plc import get_plc_manager, MemoryArea
+        mgr = get_plc_manager()
+        if not mgr.is_connected:
+            if params.get("auto_connect", True):
+                mgr.connect()
+            else:
+                raise RuntimeError("PLC chưa kết nối (mở PLC dialog kết nối, "
+                                   "hoặc bật Auto-connect).")
+        if str(params.get("mode", "pass_fail")) == "pass_fail":
+            passed = bool(inputs.get("pass"))
+            mgr.write_result(passed)
+            status = f"write_result({'PASS' if passed else 'FAIL'})"
+        else:
+            val = inputs.get("value")
+            if val is None:
+                val = params.get("value", 0)
+            area = MemoryArea[str(params.get("area", "DM_WORD"))]
+            addr = int(params.get("address", 0))
+            dt = str(params.get("data_type", "int16"))
+            mgr.write_value(area, addr, float(val), data_type=dt,
+                            scale=float(params.get("scale", 1.0)))
+            status = f"{area.value}[{addr}] = {val} ({dt})"
+        ok = True
+    except Exception as e:
+        status = f"PLC write lỗi: {e}"
+    print(f"[PLC Write] {status}")
+    return {"image": img, "ok": ok, "status": status}
+
+
+def proc_tcp_send(inputs, params):
+    """Gửi 1 chuỗi (theo template) tới host:port qua TCP socket (stdlib)."""
+    import socket
+    img = inputs.get("image")
+    data = _comms_template(params.get("template", "{pass};{value}\\r\\n"), inputs)
+    host = str(params.get("host", "127.0.0.1"))
+    port = int(params.get("port", 5000))
+    timeout = float(params.get("timeout", 2.0))
+    ok, status = False, ""
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.sendall(data.encode("utf-8", "replace"))
+            if params.get("wait_reply", False):
+                s.settimeout(timeout)
+                try:
+                    rep = s.recv(512).decode("utf-8", "replace")
+                    status = f"sent {len(data)}B, reply: {rep[:60]}"
+                except Exception:
+                    status = f"sent {len(data)}B (no reply)"
+            else:
+                status = f"sent {len(data)}B → {host}:{port}"
+        ok = True
+    except Exception as e:
+        status = f"TCP lỗi: {e}"
+    print(f"[TCP Send] {status}")
+    return {"image": img, "ok": ok, "sent": data, "status": status}
+
+
+def proc_http_post(inputs, params):
+    """POST kết quả tới URL qua urllib (stdlib — không cần requests)."""
+    import json, urllib.request
+    img = inputs.get("image")
+    url = str(params.get("url", "")).strip()
+    timeout = float(params.get("timeout", 5.0))
+    ok, status, code, resp = False, "", 0, ""
+    if not url:
+        return {"image": img, "ok": False, "response": "", "code": 0,
+                "status": "Chưa nhập URL"}
+    try:
+        p = inputs.get("pass")
+        if str(params.get("format", "json")) == "raw":
+            body = _comms_template(params.get("template", "{pass};{value}"),
+                                   inputs).encode("utf-8", "replace")
+            ctype = str(params.get("content_type", "text/plain"))
+        else:
+            payload = {"pass": (None if p is None else bool(p)),
+                       "value": inputs.get("value"),
+                       "text": inputs.get("text"),
+                       "ts": time.strftime("%Y-%m-%d %H:%M:%S")}
+            body = json.dumps(payload).encode("utf-8")
+            ctype = "application/json"
+        req = urllib.request.Request(url, data=body, method="POST",
+                                     headers={"Content-Type": ctype})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            code = getattr(r, "status", 200)
+            resp = r.read(2000).decode("utf-8", "replace")
+        ok = 200 <= int(code) < 300
+        status = f"POST {code} → {url}"
+    except Exception as e:
+        status = f"HTTP lỗi: {e}"
+    print(f"[HTTP POST] {status}")
+    return {"image": img, "ok": ok, "response": resp, "code": code, "status": status}
+
+
+def _value_to_modbus_regs(value, data_type, scale, word_order="ABCD"):
+    import struct
+    if data_type == "int16":
+        return [int(round(float(value))) & 0xFFFF]
+    if data_type in ("int32", "scaled_int32"):
+        mul = scale if data_type == "scaled_int32" else 1.0
+        iv = int(round(float(value) * mul)) & 0xFFFFFFFF
+        hi, lo = (iv >> 16) & 0xFFFF, iv & 0xFFFF
+        return [hi, lo] if word_order == "ABCD" else [lo, hi]
+    if data_type == "float32":
+        raw = struct.pack(">f", float(value))
+        hi = int.from_bytes(raw[0:2], "big")
+        lo = int.from_bytes(raw[2:4], "big")
+        return [hi, lo] if word_order == "ABCD" else [lo, hi]
+    return [int(round(float(value) * scale)) & 0xFFFF]   # scaled_int16
+
+
+def proc_modbus_write(inputs, params):
+    """Ghi holding register(s) qua Modbus-TCP bằng socket thuần (FC16) —
+    KHÔNG cần pymodbus. int16 = 1 thanh ghi; int32/float32 = 2 thanh ghi."""
+    import socket, struct
+    img = inputs.get("image")
+    host = str(params.get("host", "127.0.0.1"))
+    port = int(params.get("port", 502))
+    unit = int(params.get("unit", 1))
+    addr = int(params.get("register", 0))
+    timeout = float(params.get("timeout", 2.0))
+    ok, status = False, ""
+    try:
+        val = inputs.get("value")
+        if val is None:
+            p = inputs.get("pass")
+            val = (1 if p else 0) if p is not None else params.get("value", 0)
+        regs = _value_to_modbus_regs(val, str(params.get("data_type", "int16")),
+                                     float(params.get("scale", 1.0)),
+                                     str(params.get("word_order", "ABCD")))
+        qty = len(regs)
+        pdu = struct.pack(">BHHB", 0x10, addr, qty, qty * 2)
+        pdu += b"".join(struct.pack(">H", r & 0xFFFF) for r in regs)
+        mbap = struct.pack(">HHHB", 1, 0, len(pdu) + 1, unit & 0xFF)
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(mbap + pdu)
+            rep = s.recv(256)
+        if len(rep) >= 9 and (rep[7] & 0x80):
+            raise IOError(f"Modbus exception {rep[8]}")
+        ok = True
+        status = f"reg[{addr}] ← {val} ({qty}w) @ {host}:{port}"
+    except Exception as e:
+        status = f"Modbus lỗi: {e}"
+    print(f"[Modbus Write] {status}")
+    return {"image": img, "ok": ok, "status": status}
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  MATH / FORMULA  +  IMAGE PRE-PROCESSING (bổ sung)
+# ═══════════════════════════════════════════════════════════════════
+def proc_math(inputs, params):
+    """Tính 1 công thức số học từ các input (A, B, C… — thêm port qua right-
+    click). An toàn: chỉ cho dùng hàm toán whitelist, không có builtins. Tuỳ chọn
+    so sánh với ngưỡng → port `pass`. None/True/False tự quy về 0/1/0."""
+    import math as _m
+    import operator as _op
+    expr = str(params.get("expression", "A+B"))
+    env = {n: getattr(_m, n) for n in
+           ("sqrt", "sin", "cos", "tan", "atan", "atan2", "degrees", "radians",
+            "log", "log10", "exp", "floor", "ceil", "fabs", "hypot", "copysign")}
+    env.update({"abs": abs, "min": min, "max": max, "round": round,
+                "pi": _m.pi, "e": _m.e, "pow": pow})
+    for k, v in inputs.items():
+        if not (isinstance(k, str) and not k.startswith("_")):
+            continue
+        if isinstance(v, bool):
+            env[k] = 1.0 if v else 0.0
+        elif v is None:
+            env[k] = 0.0
+        else:
+            try:
+                env[k] = float(v)
+            except Exception:
+                env[k] = 0.0
+    result, err = None, ""
+    try:
+        result = eval(expr, {"__builtins__": {}}, env)   # noqa: S307 — whitelist env
+        result = float(result)
+    except Exception as ex:
+        err = f"{type(ex).__name__}: {ex}"
+    op = str(params.get("operator", "none"))
+    out = {"result": result if result is not None else 0.0}
+    if err:
+        out["pass"] = False
+        out["error"] = err
+    elif op != "none":
+        thr = float(params.get("threshold", 0.0))
+        cmp = {">": _op.gt, ">=": _op.ge, "<": _op.lt, "<=": _op.le,
+               "==": _op.eq, "!=": _op.ne}.get(op, _op.gt)
+        out["pass"] = bool(cmp(result, thr))
+    else:
+        out["pass"] = True
+    return out
+
+
+def proc_rotate_flip(inputs, params):
+    """Xoay (góc bất kỳ) + lật ảnh. expand=True → mở rộng canvas để không cắt góc."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    out = img
+    _a = inputs.get("angle")
+    ang = float(_a) if _a is not None else float(params.get("angle", 0.0))
+    if abs(ang) > 1e-6:
+        h, w = out.shape[:2]
+        cx, cy = w / 2.0, h / 2.0
+        M = cv2.getRotationMatrix2D((cx, cy), ang, 1.0)
+        if params.get("expand", True):
+            cos, sin = abs(M[0, 0]), abs(M[0, 1])
+            nw, nh = int(h * sin + w * cos), int(h * cos + w * sin)
+            M[0, 2] += nw / 2.0 - cx
+            M[1, 2] += nh / 2.0 - cy
+            out = cv2.warpAffine(out, M, (nw, nh))
+        else:
+            out = cv2.warpAffine(out, M, (w, h))
+    flip = str(params.get("flip", "none"))
+    if flip == "horizontal":
+        out = cv2.flip(out, 1)
+    elif flip == "vertical":
+        out = cv2.flip(out, 0)
+    elif flip == "both":
+        out = cv2.flip(out, -1)
+    return {"image": out}
+
+
+def proc_perspective(inputs, params):
+    """Nắn phối cảnh 4 điểm → hình chữ nhật out_w×out_h (deskew ảnh nghiêng).
+    4 điểm nguồn mặc định = 4 góc ảnh; sửa toạ độ ở Params để nắn."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    h, w = img.shape[:2]
+    def g(k, d):
+        try:
+            return float(params.get(k, d))
+        except Exception:
+            return float(d)
+    src = np.float32([[g("x1", 0), g("y1", 0)], [g("x2", w), g("y2", 0)],
+                      [g("x3", w), g("y3", h)], [g("x4", 0), g("y4", h)]])
+    ow = int(params.get("out_w", 0) or w)
+    oh = int(params.get("out_h", 0) or h)
+    dst = np.float32([[0, 0], [ow, 0], [ow, oh], [0, oh]])
+    try:
+        M = cv2.getPerspectiveTransform(src, dst)
+        out = cv2.warpPerspective(img, M, (ow, oh))
+    except Exception:
+        out = img
+    return {"image": out}
+
+
+def proc_enhance_contrast(inputs, params):
+    """Tăng tương phản / cân bằng sáng: CLAHE, Equalize, Gamma, Brightness-Contrast.
+    Tốt cho OCR/khuyết tật khi ảnh sáng không đều."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    mode = str(params.get("mode", "clahe"))
+    out = img
+    if mode == "clahe":
+        clip = max(0.1, float(params.get("clip_limit", 2.0)))
+        tile = max(1, int(params.get("tile", 8)))
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tile, tile))
+        if img.ndim == 3:
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            out = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
+        else:
+            out = clahe.apply(img)
+    elif mode == "equalize":
+        if img.ndim == 3:
+            ycc = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+            ycc[:, :, 0] = cv2.equalizeHist(ycc[:, :, 0])
+            out = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR)
+        else:
+            out = cv2.equalizeHist(img)
+    elif mode == "gamma":
+        gm = max(0.01, float(params.get("gamma", 1.0)))
+        lut = np.array([((i / 255.0) ** (1.0 / gm)) * 255
+                        for i in range(256)], dtype=np.uint8)
+        out = cv2.LUT(img, lut)
+    elif mode == "brightness_contrast":
+        out = cv2.convertScaleAbs(img, alpha=float(params.get("contrast", 1.0)),
+                                  beta=float(params.get("brightness", 0.0)))
+    return {"image": out}
+
+
+def proc_smooth(inputs, params):
+    """Lọc nhiễu giữ cạnh: Median (muối tiêu) hoặc Bilateral (mịn nhưng giữ biên)."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    method = str(params.get("method", "median"))
+    if method == "median":
+        k = int(params.get("ksize", 3))
+        if k % 2 == 0:
+            k += 1
+        out = cv2.medianBlur(img, max(1, k))
+    elif method == "bilateral":
+        out = cv2.bilateralFilter(img, int(params.get("d", 9)),
+                                  float(params.get("sigma_color", 75)),
+                                  float(params.get("sigma_space", 75)))
+    else:
+        out = img
+    return {"image": out}
+
+
+def proc_edge_filter(inputs, params):
+    """Trích cạnh: Canny / Sobel / Laplacian → ảnh cạnh (port `edges` + `image`)."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None}
+    gray = _gray(img)
+    method = str(params.get("method", "canny"))
+    if method == "canny":
+        edges = cv2.Canny(gray, int(params.get("threshold1", 50)),
+                          int(params.get("threshold2", 150)))
+    elif method == "sobel":
+        k = int(params.get("ksize", 3)) | 1
+        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=k)
+        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=k)
+        edges = cv2.convertScaleAbs(cv2.magnitude(gx, gy))
+    elif method == "laplacian":
+        edges = cv2.convertScaleAbs(
+            cv2.Laplacian(gray, cv2.CV_64F, ksize=int(params.get("ksize", 3)) | 1))
+    else:
+        edges = gray
+    out = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR) if params.get("as_color", False) else edges
+    return {"image": out, "edges": edges}
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  GOLDEN COMPARE / PRESENCE / GEOMETRY MỞ RỘNG / INTENSITY (ưu tiên vừa)
+# ═══════════════════════════════════════════════════════════════════
+def proc_image_math(inputs, params):
+    """Phép toán 2 ảnh: absdiff/subtract/add/blend/multiply/and/or/xor.
+    Tự resize + khớp số kênh ảnh B theo A. Thiếu B → trả ảnh A."""
+    a = inputs.get("image")
+    if a is None:
+        return {"image": None}
+    b = inputs.get("image_b")
+    if b is None:
+        return {"image": a}
+    if a.shape[:2] != b.shape[:2]:
+        b = cv2.resize(b, (a.shape[1], a.shape[0]))
+    if a.ndim == 3 and b.ndim == 2:
+        b = cv2.cvtColor(b, cv2.COLOR_GRAY2BGR)
+    elif a.ndim == 2 and b.ndim == 3:
+        b = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
+    op = str(params.get("op", "absdiff"))
+    alpha = float(params.get("alpha", 0.5))
+    fmap = {
+        "absdiff":  lambda: cv2.absdiff(a, b),
+        "subtract": lambda: cv2.subtract(a, b),
+        "add":      lambda: cv2.add(a, b),
+        "blend":    lambda: cv2.addWeighted(a, alpha, b, 1.0 - alpha, 0.0),
+        "multiply": lambda: cv2.multiply(a, b, scale=1.0 / 255.0),
+        "and":      lambda: cv2.bitwise_and(a, b),
+        "or":       lambda: cv2.bitwise_or(a, b),
+        "xor":      lambda: cv2.bitwise_xor(a, b),
+    }
+    return {"image": fmap.get(op, fmap["absdiff"])()}
+
+
+def proc_golden_compare(inputs, params):
+    """So ảnh với MẪU CHUẨN (golden): absdiff → threshold → đếm vùng khác biệt.
+    reference lấy từ port 'reference' (ưu tiên) hoặc file 'reference_path'.
+    PASS khi tổng diện tích lỗi ≤ max_defect_area."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "pass": False, "defect_area": 0, "defect_count": 0}
+    vis = _bgr(img.copy()); s = _draw_scale(vis)
+    ref = inputs.get("reference")
+    if ref is None:
+        path = str(params.get("reference_path", "") or "")
+        if path:
+            ref = cv2.imread(path)
+    if ref is None:
+        return {"image": vis, "pass": False, "defect_area": 0, "defect_count": 0,
+                "status": "Chưa có ảnh chuẩn (nối 'reference' hoặc đặt reference_path)"}
+    g1, g2 = _gray(img), _gray(ref)
+    if g1.shape != g2.shape:
+        g2 = cv2.resize(g2, (g1.shape[1], g1.shape[0]))
+    bl = int(params.get("blur", 3))
+    if bl > 0:
+        bl |= 1
+        g1 = cv2.GaussianBlur(g1, (bl, bl), 0)
+        g2 = cv2.GaussianBlur(g2, (bl, bl), 0)
+    diff = cv2.absdiff(g1, g2)
+    _, mask = cv2.threshold(diff, int(params.get("threshold", 30)), 255, cv2.THRESH_BINARY)
+    k = int(params.get("morph", 2))
+    if k > 0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_a = float(params.get("min_blob_area", 10))
+    defects = [c for c in cnts if cv2.contourArea(c) >= min_a]
+    area = int(sum(cv2.contourArea(c) for c in defects))
+    for c in defects:
+        x, y, w, h = cv2.boundingRect(c)
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 0, 255), _t(2, s))
+    passed = area <= float(params.get("max_defect_area", 50))
+    return {"image": vis, "diff": diff, "pass": passed,
+            "defect_area": area, "defect_count": len(defects)}
+
+
+def proc_presence(inputs, params):
+    """Kiểm CÓ/THIẾU vật trong ROI theo intensity / edge_density / fill_ratio.
+    PASS (present) khi score nằm trong [min_score, max_score]."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "pass": False, "present": False, "score": 0.0}
+    vis = _bgr(img.copy()); s = _draw_scale(vis)
+    H, W = img.shape[:2]
+    x = max(0, min(int(params.get("x", 0)), W - 1))
+    y = max(0, min(int(params.get("y", 0)), H - 1))
+    w = int(params.get("w", 0)) or (W - x)   # 0 = full width
+    h = int(params.get("h", 0)) or (H - y)
+    w = max(1, min(w, W - x)); h = max(1, min(h, H - y))
+    roi = _gray(img)[y:y + h, x:x + w]
+    method = str(params.get("method", "intensity"))
+    if method == "edge_density":
+        e = cv2.Canny(roi, 50, 150)
+        score = float(np.count_nonzero(e)) / max(1, roi.size) * 100.0
+    elif method == "fill_ratio":
+        ttype = cv2.THRESH_BINARY_INV if params.get("dark_object", False) else cv2.THRESH_BINARY
+        _, m = cv2.threshold(roi, int(params.get("fill_threshold", 127)), 255, ttype)
+        score = float(np.count_nonzero(m)) / max(1, m.size) * 100.0
+    else:
+        score = float(np.mean(roi))
+    present = float(params.get("min_score", 0)) <= score <= float(params.get("max_score", 1e12))
+    cv2.rectangle(vis, (x, y), (x + w, y + h),
+                  (0, 200, 0) if present else (0, 0, 255), _t(2, s))
+    return {"image": vis, "pass": present, "present": present, "score": round(score, 3)}
+
+
+def _geo_in(inputs, params, key):
+    v = inputs.get(key)
+    return float(v) if v is not None else float(params.get(key, 0))
+
+
+def proc_line_intersect(inputs, params):
+    """Giao điểm 2 đường (mỗi đường = x1,y1,x2,y2). Song song → pass=False."""
+    import math as _m
+    ax1, ay1, ax2, ay2 = (_geo_in(inputs, params, k) for k in ("l1x1", "l1y1", "l1x2", "l1y2"))
+    bx1, by1, bx2, by2 = (_geo_in(inputs, params, k) for k in ("l2x1", "l2y1", "l2x2", "l2y2"))
+    img = inputs.get("image")
+    vis = _bgr(img.copy()) if img is not None else None
+    d = (ax1 - ax2) * (by1 - by2) - (ay1 - ay2) * (bx1 - bx2)
+    if abs(d) < 1e-9:
+        return {"image": vis, "pass": False, "x": 0.0, "y": 0.0,
+                "angle": 0.0, "parallel": True}
+    px = ((ax1 * ay2 - ay1 * ax2) * (bx1 - bx2) - (ax1 - ax2) * (bx1 * by2 - by1 * bx2)) / d
+    py = ((ax1 * ay2 - ay1 * ax2) * (by1 - by2) - (ay1 - ay2) * (bx1 * by2 - by1 * bx2)) / d
+    a1 = _m.degrees(_m.atan2(ay2 - ay1, ax2 - ax1))
+    a2 = _m.degrees(_m.atan2(by2 - by1, bx2 - bx1))
+    ang = abs(a1 - a2) % 180.0
+    ang = min(ang, 180.0 - ang)
+    if vis is not None:
+        s = _draw_scale(vis)
+        cv2.circle(vis, (int(px), int(py)), max(3, _t(4, s)), (0, 255, 255), -1)
+    return {"image": vis, "pass": True, "x": round(px, 3), "y": round(py, 3),
+            "angle": round(ang, 3), "parallel": False}
+
+
+def proc_dist_line_line(inputs, params):
+    """Khoảng cách (khe hở) giữa 2 đường — pdist từ điểm của line2 tới line1.
+    Trả distance (mid), dist_start, dist_end. PASS khi distance trong [min,max]."""
+    import math as _m
+    ax1, ay1, ax2, ay2 = (_geo_in(inputs, params, k) for k in ("l1x1", "l1y1", "l1x2", "l1y2"))
+    bx1, by1, bx2, by2 = (_geo_in(inputs, params, k) for k in ("l2x1", "l2y1", "l2x2", "l2y2"))
+    dx, dy = ax2 - ax1, ay2 - ay1
+    L = _m.hypot(dx, dy)
+    def pdist(px, py):
+        if L < 1e-9:
+            return _m.hypot(px - ax1, py - ay1)
+        return abs(dy * (px - ax1) - dx * (py - ay1)) / L
+    d1, d2 = pdist(bx1, by1), pdist(bx2, by2)
+    dm = pdist((bx1 + bx2) / 2.0, (by1 + by2) / 2.0)
+    img = inputs.get("image")
+    vis = _bgr(img.copy()) if img is not None else None
+    passed = float(params.get("min_distance", -1e12)) <= dm <= float(params.get("max_distance", 1e12))
+    return {"image": vis, "pass": passed, "distance": round(dm, 3),
+            "dist_start": round(d1, 3), "dist_end": round(d2, 3)}
+
+
+def proc_line_relation(inputs, params):
+    """GD&T góc: parallel (target 0°), perpendicular (90°), hoặc angle (target tuỳ).
+    deviation = |góc_giữa − target|; PASS khi deviation ≤ tolerance."""
+    a1 = _geo_in(inputs, params, "angle1")
+    a2 = _geo_in(inputs, params, "angle2")
+    mode = str(params.get("mode", "parallel"))
+    target = {"parallel": 0.0, "perpendicular": 90.0,
+              "angle": float(params.get("target", 0))}.get(mode, 0.0)
+    diff = abs(a1 - a2) % 180.0
+    diff = min(diff, 180.0 - diff)
+    dev = abs(diff - target)
+    passed = dev <= float(params.get("tolerance", 1.0))
+    return {"pass": passed, "deviation": round(dev, 4), "angle_between": round(diff, 4)}
+
+
+def proc_intensity_stats(inputs, params):
+    """Thống kê cường độ trong ROI: mean/std/min/max (kiểm sáng/exposure).
+    PASS khi mean trong [min_mean, max_mean]."""
+    img = inputs.get("image")
+    if img is None:
+        return {"image": None, "pass": False, "mean": 0, "std": 0, "min": 0, "max": 0}
+    vis = _bgr(img.copy()); s = _draw_scale(vis)
+    H, W = img.shape[:2]
+    x = max(0, min(int(params.get("x", 0)), W - 1))
+    y = max(0, min(int(params.get("y", 0)), H - 1))
+    w = int(params.get("w", 0)) or (W - x)   # 0 = full width
+    h = int(params.get("h", 0)) or (H - y)
+    w = max(1, min(w, W - x)); h = max(1, min(h, H - y))
+    g = _gray(img)[y:y + h, x:x + w]
+    mn, sd = float(np.mean(g)), float(np.std(g))
+    mi, ma = int(np.min(g)), int(np.max(g))
+    cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 200, 255), _t(2, s))
+    passed = float(params.get("min_mean", 0)) <= mn <= float(params.get("max_mean", 255))
+    return {"image": vis, "pass": passed, "mean": round(mn, 2), "std": round(sd, 2),
+            "min": mi, "max": ma}
+
+
 TOOL_REGISTRY: List[ToolDef] = [
 
   # ── ACQUIRE IMAGE ───────────────────────────────────────────────
@@ -4185,6 +4767,19 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_create_polygon, ""),
 
   # ── COLOR ───────────────────────────────────────────────────────
+  ToolDef("intensity_stats","Intensity Stats","Color Analysis",
+    "Thống kê cường độ trong ROI: mean / std / min / max (kiểm sáng, exposure, "
+    "hỗ trợ presence). ROI W/H = 0 → full ảnh. PASS khi mean ∈ [min_mean, max_mean].",
+    "#6b2737","📊",
+    [PortDef("image","image")],
+    [PortDef("image","image"),PortDef("mean","number"),PortDef("std","number"),
+     PortDef("min","number"),PortDef("max","number"),PortDef("pass","bool")],
+    [P("x","ROI X","int",0,0,99999),P("y","ROI Y","int",0,0,99999),
+     P("w","ROI W (0=full)","int",0,0,99999),P("h","ROI H (0=full)","int",0,0,99999),
+     P("min_mean","Min Mean (PASS)","float",0,0,255),
+     P("max_mean","Max Mean (PASS)","float",255,0,255)],
+    proc_intensity_stats,""),
+
   ToolDef("color_picker","Color Picker","Color Analysis",
     "Click chuột lấy màu → xuất HSV range","#6b2737","🎨",
     [PortDef("image","image"),
@@ -4345,6 +4940,11 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("psm","PSM Mode","int",6,0,13,
         tooltip="Tesseract Page Segmentation Mode — 6=block, 7=single line, 8=single word, "
                 "11=sparse text (chữ thưa, không layout cố định)."),
+     P("tesseract_path","Tesseract .exe (nếu ngoài PATH)","str","",
+        file_filter="Tesseract (tesseract.exe);;All Files (*)",
+        tooltip="Để TRỐNG = tự dò vị trí cài mặc định. Trỏ tới tesseract.exe nếu "
+                "đã cài Tesseract nhưng chưa thêm vào PATH "
+                "(vd C:\\Program Files\\Tesseract-OCR\\tesseract.exe)."),
      P("preprocess","Preprocess","enum","none",
         choices=["none","otsu","adaptive","binary"],
         tooltip="Binarize trước OCR — giúp tách chữ khỏi nền phức tạp / sáng không đều. "
@@ -4356,6 +4956,46 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_ocr_max, "TOCRMaxTool"),
 
   # ── MEASUREMENT ─────────────────────────────────────────────────
+  ToolDef("line_intersect","Line Intersection","Measurement",
+    "Giao điểm 2 đường (mỗi đường nối x1/y1/x2/y2 từ Line / Find Line). "
+    "Xuất điểm giao (x,y) + góc giữa 2 đường. Song song → pass=False.",
+    "#134074","✛",
+    [PortDef("image","image",required=False),
+     PortDef("l1x1","number"),PortDef("l1y1","number"),
+     PortDef("l1x2","number"),PortDef("l1y2","number"),
+     PortDef("l2x1","number"),PortDef("l2y1","number"),
+     PortDef("l2x2","number"),PortDef("l2y2","number")],
+    [PortDef("image","image"),PortDef("x","number"),PortDef("y","number"),
+     PortDef("angle","number"),PortDef("parallel","bool"),PortDef("pass","bool")],
+    [],proc_line_intersect,""),
+
+  ToolDef("dist_line_line","Distance Line-Line","Measurement",
+    "Khe hở giữa 2 đường — khoảng cách vuông góc từ line2 tới line1 (distance = "
+    "điểm giữa; dist_start/dist_end = 2 đầu). PASS khi distance trong [min,max].",
+    "#134074","‖",
+    [PortDef("image","image",required=False),
+     PortDef("l1x1","number"),PortDef("l1y1","number"),
+     PortDef("l1x2","number"),PortDef("l1y2","number"),
+     PortDef("l2x1","number"),PortDef("l2y1","number"),
+     PortDef("l2x2","number"),PortDef("l2y2","number")],
+    [PortDef("image","image"),PortDef("distance","number"),
+     PortDef("dist_start","number"),PortDef("dist_end","number"),PortDef("pass","bool")],
+    [P("min_distance","Min Distance","float",-1e9,-1e12,1e12),
+     P("max_distance","Max Distance","float",1e9,-1e12,1e12)],
+    proc_dist_line_line,""),
+
+  ToolDef("line_relation","Line Relation (GD&T)","Measurement",
+    "Quan hệ góc 2 đường: parallel (0°) / perpendicular (90°) / angle (target tuỳ). "
+    "Nối angle1, angle2 từ Find Line / Line. deviation = |góc giữa − target|; "
+    "PASS khi deviation ≤ tolerance.",
+    "#134074","∡",
+    [PortDef("angle1","number"),PortDef("angle2","number")],
+    [PortDef("pass","bool"),PortDef("deviation","number"),PortDef("angle_between","number")],
+    [P("mode","Mode","enum","parallel",choices=["parallel","perpendicular","angle"]),
+     P("target","Target angle (°)","float",0,0,180,visible_if={"mode":"angle"}),
+     P("tolerance","Tolerance (°)","float",1.0,0,90,step=0.1)],
+    proc_line_relation,""),
+
   ToolDef("dist_point","Distance Point-Point","Measurement",
     "Đo khoảng cách 2 điểm — TDistancePointPointTool. "
     "Calib 'Two Points' = nội suy tuyến tính từ 2 cặp (px, mm) đã đo.",
@@ -4461,6 +5101,42 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_area, "TMeasureRectangleTool"),
 
   # ── SURFACE INSPECTION ──────────────────────────────────────────
+  ToolDef("golden_compare","Golden Compare","Surface Inspection",
+    "So ảnh với MẪU CHUẨN (golden): absdiff → threshold → đếm vùng khác biệt. "
+    "Nối ảnh chuẩn vào port 'reference', hoặc đặt 'reference_path' tới 1 file ảnh. "
+    "PASS khi tổng diện tích lỗi ≤ max_defect_area.",
+    "#4a0404","🆚",
+    [PortDef("image","image"),PortDef("reference","image",required=False)],
+    [PortDef("image","image"),PortDef("diff","image"),PortDef("pass","bool"),
+     PortDef("defect_area","number"),PortDef("defect_count","number")],
+    [P("reference_path","Reference image (nếu không nối port)","str","",
+       tooltip="Để trống nếu đã nối port 'reference'; hoặc trỏ tới 1 file ảnh chuẩn."),
+     P("blur","Blur tolerance","int",3,0,31,
+       tooltip="Làm mờ trước khi so để bớt lệch nhiễu nhỏ. 0 = tắt."),
+     P("threshold","Diff Threshold","int",30,0,255,use_slider=True),
+     P("morph","Morph clean","int",2,0,15,tooltip="Open bỏ đốm nhiễu nhỏ. 0 = tắt."),
+     P("min_blob_area","Min defect blob (px)","float",10,0,1e7),
+     P("max_defect_area","Max total defect (px) để PASS","float",50,0,1e9)],
+    proc_golden_compare,""),
+
+  ToolDef("presence","Presence / Absence","Surface Inspection",
+    "Kiểm CÓ/THIẾU vật trong ROI theo intensity / edge_density / fill_ratio. "
+    "present=True khi score ∈ [min_score, max_score]. ROI W/H = 0 → full ảnh.",
+    "#4a0404","✅",
+    [PortDef("image","image")],
+    [PortDef("image","image"),PortDef("pass","bool"),
+     PortDef("present","bool"),PortDef("score","number")],
+    [P("x","ROI X","int",0,0,99999),P("y","ROI Y","int",0,0,99999),
+     P("w","ROI W (0=full)","int",0,0,99999),P("h","ROI H (0=full)","int",0,0,99999),
+     P("method","Method","enum","intensity",
+       choices=["intensity","edge_density","fill_ratio"],
+       tooltip="intensity: độ sáng TB. edge_density: %điểm cạnh. fill_ratio: %điểm foreground."),
+     P("fill_threshold","Fill threshold","int",127,0,255,visible_if={"method":"fill_ratio"}),
+     P("dark_object","Vật tối trên nền sáng","bool",False,visible_if={"method":"fill_ratio"}),
+     P("min_score","Min score (present)","float",0,-1e9,1e9),
+     P("max_score","Max score (present)","float",1e9,-1e9,1e12)],
+    proc_presence,""),
+
   ToolDef("surface_defect","Surface Defect","Surface Inspection",
     "Phát hiện khuyết tật bề mặt","#4a0404","🔴",
     [PortDef("image","image"),PortDef("reference","image",required=False)],
@@ -4492,6 +5168,85 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_scratch_detect, ""),
 
   # ── IMAGE PROCESSING ────────────────────────────────────────────
+  ToolDef("image_math","Image Math (2 ảnh)","Image Processing",
+    "Phép toán 2 ảnh: absdiff/subtract/add/blend/multiply/and/or/xor. "
+    "Tự resize + khớp kênh ảnh B theo A. Dùng cho golden-compare thủ công, "
+    "ghép mask, trộn ảnh…",
+    "#2c3e50","➕",
+    [PortDef("image","image"),PortDef("image_b","image")],
+    [PortDef("image","image")],
+    [P("op","Operation","enum","absdiff",
+       choices=["absdiff","subtract","add","blend","multiply","and","or","xor"]),
+     P("alpha","Blend alpha (A)","float",0.5,0,1,step=0.05,visible_if={"op":"blend"})],
+    proc_image_math,""),
+
+  ToolDef("rotate_flip","Rotate / Flip","Image Processing",
+    "Xoay ảnh góc bất kỳ + lật. expand=True mở rộng canvas để không cắt góc. "
+    "Nối port 'angle' (vd từ PatMax) để xoay theo góc đo được.",
+    "#2c3e50","🔄",
+    [PortDef("image","image"),PortDef("angle","number",required=False)],
+    [PortDef("image","image")],
+    [P("angle","Angle (°)","float",0,-360,360,step=1,use_slider=True,
+       tooltip="Góc xoay (CCW). Port 'angle' nếu nối sẽ ưu tiên hơn giá trị này."),
+     P("expand","Expand canvas","bool",True,
+       tooltip="Mở rộng khung để không cắt mất góc khi xoay."),
+     P("flip","Flip","enum","none",choices=["none","horizontal","vertical","both"])],
+    proc_rotate_flip,""),
+
+  ToolDef("perspective","Perspective Warp","Image Processing",
+    "Nắn phối cảnh 4 điểm → hình chữ nhật out_w×out_h (deskew ảnh chụp nghiêng). "
+    "4 điểm nguồn mặc định = 4 góc ảnh; sửa toạ độ để nắn.",
+    "#2c3e50","🪞",
+    [PortDef("image","image")],[PortDef("image","image")],
+    [P("x1","Top-Left X","int",0,0,99999),P("y1","Top-Left Y","int",0,0,99999),
+     P("x2","Top-Right X","int",0,0,99999),P("y2","Top-Right Y","int",0,0,99999),
+     P("x3","Bot-Right X","int",0,0,99999),P("y3","Bot-Right Y","int",0,0,99999),
+     P("x4","Bot-Left X","int",0,0,99999),P("y4","Bot-Left Y","int",0,0,99999),
+     P("out_w","Output Width","int",0,0,99999,tooltip="0 = giữ chiều rộng ảnh gốc"),
+     P("out_h","Output Height","int",0,0,99999,tooltip="0 = giữ chiều cao ảnh gốc")],
+    proc_perspective,""),
+
+  ToolDef("enhance_contrast","Enhance Contrast","Image Processing",
+    "Tăng tương phản / cân bằng sáng — CLAHE, Equalize, Gamma, Brightness-Contrast. "
+    "Giúp OCR/khuyết tật khi ảnh sáng không đều hoặc nhạt.",
+    "#2c3e50","🌗",
+    [PortDef("image","image")],[PortDef("image","image")],
+    [P("mode","Mode","enum","clahe",
+       choices=["clahe","equalize","gamma","brightness_contrast"]),
+     P("clip_limit","CLAHE Clip","float",2.0,0.1,40,step=0.1,
+       visible_if={"mode":"clahe"}),
+     P("tile","CLAHE Tile","int",8,1,64,visible_if={"mode":"clahe"}),
+     P("gamma","Gamma","float",1.0,0.05,5.0,step=0.05,visible_if={"mode":"gamma"}),
+     P("contrast","Contrast (α)","float",1.0,0,4,step=0.05,
+       visible_if={"mode":"brightness_contrast"}),
+     P("brightness","Brightness (β)","float",0,-128,128,step=1,
+       visible_if={"mode":"brightness_contrast"})],
+    proc_enhance_contrast,""),
+
+  ToolDef("smooth","Smooth (Median/Bilateral)","Image Processing",
+    "Lọc nhiễu giữ cạnh — Median (muối-tiêu) hoặc Bilateral (mịn nhưng giữ biên).",
+    "#2c3e50","💧",
+    [PortDef("image","image")],[PortDef("image","image")],
+    [P("method","Method","enum","median",choices=["median","bilateral"]),
+     P("ksize","Median ksize (lẻ)","int",3,1,99,visible_if={"method":"median"}),
+     P("d","Bilateral d","int",9,1,50,visible_if={"method":"bilateral"}),
+     P("sigma_color","Sigma Color","float",75,1,300,visible_if={"method":"bilateral"}),
+     P("sigma_space","Sigma Space","float",75,1,300,visible_if={"method":"bilateral"})],
+    proc_smooth,""),
+
+  ToolDef("edge_filter","Edge Filter","Image Processing",
+    "Trích cạnh — Canny / Sobel / Laplacian → ảnh cạnh (port 'edges' + 'image').",
+    "#2c3e50","📈",
+    [PortDef("image","image")],
+    [PortDef("image","image"),PortDef("edges","image")],
+    [P("method","Method","enum","canny",choices=["canny","sobel","laplacian"]),
+     P("threshold1","Canny Thresh1","int",50,0,500,visible_if={"method":"canny"}),
+     P("threshold2","Canny Thresh2","int",150,0,500,visible_if={"method":"canny"}),
+     P("ksize","Kernel size (lẻ)","int",3,1,31,visible_if={"method":"sobel"}),
+     P("as_color","Xuất ảnh màu (BGR)","bool",False,
+       tooltip="Bật để chồng/hiển thị cùng ảnh màu; tắt = ảnh xám 1 kênh.")],
+    proc_edge_filter,""),
+
   ToolDef("image_convert","Image Convert","Image Processing",
     "Chuyển đổi format ảnh + resize tuỳ chọn — TImageConvertTool","#2c3e50","🔄",
     [PortDef("image","image")],[PortDef("image","image")],
@@ -4626,6 +5381,24 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_calibrate_grid, "TCalibCheckerboardTool"),
 
   # ── LOGIC & FLOW ────────────────────────────────────────────────
+  ToolDef("math","Math / Formula","Logic & Flow",
+    "Tính công thức số học từ các input A, B, C… (chuột phải → Add Input để thêm). "
+    "Hàm cho phép: sqrt sin cos tan atan2 log log10 exp floor ceil abs min max "
+    "round hypot, hằng pi/e. Vd: (A+B)/2, hypot(A,B), abs(A-B). Tuỳ chọn so sánh "
+    "ngưỡng → port 'pass' để nối Judge.",
+    "#1c1c2e","🧮",
+    [PortDef("A","number",required=False),PortDef("B","number",required=False)],
+    [PortDef("result","number"),PortDef("pass","bool")],
+    [P("expression","Formula","str","A+B",
+       tooltip="Biểu thức theo tên port (A,B,C…). Vd (A+B)/2, hypot(A,B), abs(A-B)."),
+     P("operator","Compare (→ pass)","enum","none",
+       choices=["none",">",">=","<","<=","==","!="],
+       tooltip="none = pass luôn True (chỉ tính result). Khác → pass = result OP threshold."),
+     P("threshold","Threshold","float",0,-1e12,1e12,step=0.1,
+       tooltip="Ngưỡng so sánh khi operator ≠ none.")],
+    proc_math,"",
+    extra_input_type="number"),
+
   ToolDef("logic_and","AND Gate","Logic & Flow","Logic AND","#1c1c2e","∧",
     [PortDef("A","bool"),PortDef("B","bool")],[PortDef("result","bool")],
     [],proc_logic_and,""),
@@ -4753,6 +5526,95 @@ TOOL_REGISTRY: List[ToolDef] = [
        tooltip="Tick + Run pipeline → reset counter về 0 ngay lần chạy đó.")],
     proc_yield_stats,""),
 
+  # ── COMMUNICATION ───────────────────────────────────────────────
+  ToolDef("plc_write","PLC Write","Communication",
+    "Ghi kết quả ra PLC mỗi chu kỳ — DÙNG CHUNG kết nối đã cấu hình ở "
+    "Tools → PLC Connection. Mode 'pass_fail' ghi mã PASS/FAIL vào vùng result; "
+    "mode 'value' ghi 1 số vào DM/CIO/W/H. Hỗ trợ Omron FINS & Inovance Modbus-TCP.",
+    "#0b3d2e","🔌",
+    [PortDef("pass","bool",required=False),
+     PortDef("value","number",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("ok","bool"),PortDef("status","any")],
+    [P("mode","Mode","enum","pass_fail",choices=["pass_fail","value"],
+       tooltip="pass_fail: ghi mã PASS/FAIL vào vùng result đã cấu hình. "
+               "value: ghi số ở port 'value' vào địa chỉ bên dưới."),
+     P("area","Memory Area","enum","DM_WORD",
+       choices=["DM_WORD","CIO_WORD","W_WORD","H_WORD"],
+       visible_if={"mode":"value"}),
+     P("address","Address","int",0,0,65535,visible_if={"mode":"value"}),
+     P("value","Value (nếu không nối port 'value')","float",0,-1e12,1e12,step=1,
+       visible_if={"mode":"value"},
+       tooltip="Hằng số để ghi khi KHÔNG nối port 'value'. Nếu nối port 'value' "
+               "(tab Ports, vd từ kết quả đo) thì giá trị từ dây được ưu tiên."),
+     P("data_type","Data Type","enum","int16",
+       choices=["int16","int32","float32","scaled_int16","scaled_int32"],
+       visible_if={"mode":"value"}),
+     P("scale","Scale (cho scaled_*)","float",1.0,-1e9,1e9,step=0.1,
+       visible_if={"mode":"value"}),
+     P("auto_connect","Auto-connect","bool",True,
+       tooltip="Tự kết nối nếu PLC chưa connect (dùng config ở PLC dialog).")],
+    proc_plc_write,""),
+
+  ToolDef("tcp_send","TCP Send","Communication",
+    "Gửi 1 chuỗi tới host:port qua TCP socket (stdlib, không cần thư viện). "
+    "Template điền {pass}/{value}/{text}/{ts}; dùng \\r \\n cho CR/LF.",
+    "#0b3d2e","📡",
+    [PortDef("pass","bool",required=False),
+     PortDef("value","number",required=False),
+     PortDef("text","any",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("ok","bool"),
+     PortDef("sent","any"),PortDef("status","any")],
+    [P("host","Host","str","127.0.0.1"),
+     P("port","Port","int",5000,1,65535),
+     P("template","Template","str","{pass};{value}\\r\\n",
+       tooltip="Điền {pass}/{value}/{text}/{ts}. Dùng \\r \\n cho CR/LF."),
+     P("wait_reply","Đợi phản hồi","bool",False),
+     P("timeout","Timeout (s)","float",2.0,0.1,60,step=0.5)],
+    proc_tcp_send,""),
+
+  ToolDef("http_post","HTTP POST","Communication",
+    "POST kết quả tới URL qua urllib (stdlib, không cần requests). format "
+    "'json' gửi {pass,value,text,ts}; 'raw' gửi chuỗi theo template.",
+    "#0b3d2e","🌐",
+    [PortDef("pass","bool",required=False),
+     PortDef("value","number",required=False),
+     PortDef("text","any",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("ok","bool"),
+     PortDef("response","any"),PortDef("code","number"),PortDef("status","any")],
+    [P("url","URL","str","",tooltip="vd http://192.168.1.50:8080/result"),
+     P("format","Body Format","enum","json",choices=["json","raw"]),
+     P("template","Raw Template","str","{pass};{value}",
+       visible_if={"format":"raw"}),
+     P("content_type","Content-Type (raw)","str","text/plain",
+       visible_if={"format":"raw"}),
+     P("timeout","Timeout (s)","float",5.0,0.1,60,step=0.5)],
+    proc_http_post,""),
+
+  ToolDef("modbus_write","Modbus Write","Communication",
+    "Ghi holding register(s) qua Modbus-TCP bằng socket thuần (FC16) — KHÔNG "
+    "cần pymodbus. int16=1 reg; int32/float32=2 reg. 'value' trống → dùng pass (1/0).",
+    "#0b3d2e","🔧",
+    [PortDef("pass","bool",required=False),
+     PortDef("value","number",required=False),
+     PortDef("image","image",required=False)],
+    [PortDef("image","image"),PortDef("ok","bool"),PortDef("status","any")],
+    [P("host","Host","str","127.0.0.1"),
+     P("port","Port","int",502,1,65535),
+     P("unit","Unit/Slave ID","int",1,0,255),
+     P("register","Register (0-based)","int",0,0,65535),
+     P("value","Value (nếu không nối port)","float",0,-1e12,1e12,step=1,
+       tooltip="Hằng số ghi khi không nối port. Ưu tiên: port 'value' > "
+               "port 'pass' (1/0) > giá trị này."),
+     P("data_type","Data Type","enum","int16",
+       choices=["int16","int32","float32","scaled_int16","scaled_int32"]),
+     P("scale","Scale (scaled_*)","float",1.0,-1e9,1e9,step=0.1),
+     P("word_order","Word Order (32-bit)","enum","ABCD",choices=["ABCD","CDAB"]),
+     P("timeout","Timeout (s)","float",2.0,0.1,60,step=0.5)],
+    proc_modbus_write,""),
+
   # ── YOLO DETECTION ─────────────────────────────────────────────
   ToolDef("yolo_detect","YOLO Detect","YOLO",
     "YOLOv8/v11 Object Detection & Segmentation. Add file model train sẵn "
@@ -4811,5 +5673,5 @@ CATEGORIES = [
     "Acquire Image","Pattern Find","Fixture","Caliper",
     "Blob Analysis","Edge & Geometry","Color Analysis","ID & Read",
     "Measurement","Surface Inspection","Image Processing",
-    "Calibration","Logic & Flow","Output & Display","YOLO"
+    "Calibration","Logic & Flow","Output & Display","Communication","YOLO"
 ]

@@ -28,6 +28,7 @@ CAT_COLORS = {
     "Calibration":       "#1a472a",
     "Logic & Flow":      "#1c1c2e",
     "Output & Display":  "#0d1117",
+    "Communication":     "#0b3d2e",
 }
 
 CAT_ICONS = {
@@ -45,6 +46,7 @@ CAT_ICONS = {
     "Calibration":       "📋",
     "Logic & Flow":      "⚙",
     "Output & Display":  "🖥",
+    "Communication":     "🔌",
 }
 
 

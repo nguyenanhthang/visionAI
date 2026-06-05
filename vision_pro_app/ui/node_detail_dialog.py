@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                 QSplitter, QPushButton, QGroupBox, QCheckBox,
                                 QSizePolicy, QApplication, QFileDialog,
                                 QMessageBox, QComboBox)
-from PySide6.QtCore import Qt, Signal, QRect, QPoint, QSize, QTimer
+from PySide6.QtCore import Qt, Signal, QRect, QPoint, QSize, QTimer, QThread, QObject
 from PySide6.QtGui import (QPixmap, QImage, QFont, QColor, QPainter,
                             QPen, QBrush, QCursor, QMouseEvent)
 
@@ -1516,6 +1516,32 @@ class InteractiveImageLabel(QLabel):
 # ════════════════════════════════════════════════════════════════════
 #  Main Dialog
 # ════════════════════════════════════════════════════════════════════
+# Giữ tham chiếu các QThread đang chạy để không bị GC giữa chừng (kể cả khi
+# dialog đã đóng); tự gỡ khi thread finished.
+_RUN_THREADS: set = set()
+
+
+class _NodeRunWorker(QObject):
+    """Chạy node.tool.process_fn ở thread NỀN → UI không treo khi node nặng
+    (OCR/YOLO/PatMax). Không đụng widget Qt; kết quả trả về qua signal."""
+    done = Signal(dict, str, str)   # outputs, status, error
+
+    def __init__(self, node, inputs):
+        super().__init__()
+        self._node = node
+        self._inputs = inputs
+
+    def run(self):
+        try:
+            out = self._node.tool.process_fn(self._inputs, self._node.params) or {}
+            status = "pass"
+            if "pass" in out:
+                status = "pass" if out["pass"] else "fail"
+            self.done.emit(out, status, "")
+        except Exception as e:
+            self.done.emit({}, "error", str(e))
+
+
 class NodeDetailDialog(QDialog):
     run_requested = Signal(str)
 
@@ -1854,15 +1880,20 @@ class NodeDetailDialog(QDialog):
 
         elif tool.tool_id in ("create_rectangle", "create_circle",
                               "create_ellipse", "create_trapezoid",
-                              "create_polygon"):
+                              "create_polygon", "perspective"):
             # Create Shape tools — vẽ hình bằng kéo chuột (rect/circle/ellipse/
             # polygon). Trapezoid vẽ bằng bbox (shape "rect") → proc_ dựng hình
-            # thang theo top_ratio. Vẽ xong → ghi geometry vào params + rerun.
+            # thang theo top_ratio. Perspective: click 4 góc (polygon) → x1..y4.
+            # Vẽ xong → ghi geometry vào params + rerun.
             self._create_shape_key = {
                 "create_rectangle": "rect", "create_circle": "circle",
                 "create_ellipse": "ellipse", "create_trapezoid": "rect",
-                "create_polygon": "polygon"}[tool.tool_id]
-            if self._create_shape_key == "polygon":
+                "create_polygon": "polygon", "perspective": "polygon"}[tool.tool_id]
+            if tool.tool_id == "perspective":
+                hint = ("✏  Click 4 GÓC theo thứ tự: trên-trái → trên-phải → "
+                        "dưới-phải → dưới-trái, double-click để chốt. "
+                        "Hoặc nhập x1..y4 ở Params.")
+            elif self._create_shape_key == "polygon":
                 hint = ("✏  Click từng đỉnh trên ảnh, double-click để chốt "
                         "(≥3 điểm). Hoặc nhập cx/cy/r/Sides ở Params.")
             else:
@@ -2698,6 +2729,23 @@ class NodeDetailDialog(QDialog):
         """Vẽ xong shape → ghi geometry vào params + rerun (vẽ hình cố định)."""
         node = self._node
         d = dict(data or {})
+        # Perspective Warp: polygon 4 điểm → x1..y4 (theo thứ tự click).
+        if node.tool.tool_id == "perspective" and shape_type == "polygon":
+            pts = d.get("pts") or []
+            if len(pts) >= 4:
+                flat = [int(round(c)) for p in pts[:4] for c in p]
+                for k, v in zip(("x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4"), flat):
+                    node.params[k] = v
+                    pr = getattr(self, "_param_rows", {}).get(k)
+                    if pr is not None and hasattr(pr._editor, "setValue"):
+                        pr._editor.blockSignals(True)
+                        pr._editor.setValue(v)
+                        pr._editor.blockSignals(False)
+            if getattr(self, "_auto_run_cb", None) and self._auto_run_cb.isChecked():
+                self._auto_run_timer.start()
+            else:
+                self._on_run()
+            return
         updates = {}
         if shape_type in ("rect", "ellipse"):
             for k in ("x", "y", "w", "h"):
@@ -2846,6 +2894,11 @@ class NodeDetailDialog(QDialog):
     #  Run
     # ════════════════════════════════════════════════════════════════
     def _on_run(self):
+        # Đang chạy → đánh dấu chạy lại 1 lần sau khi xong (coalesce, tránh
+        # spawn nhiều thread khi kéo slider / Auto Run dồn dập).
+        if getattr(self, "_run_busy", False):
+            self._run_pending = True
+            return
         node = self._node
         # Build inputs: defaults + upstream outputs
         inputs = {p.name: p.default for p in node.tool.inputs}
@@ -2855,20 +2908,43 @@ class NodeDetailDialog(QDialog):
                 if src and conn.src_port in src.outputs:
                     inputs[conn.dst_port] = src.outputs[conn.src_port]
 
-        try:
-            out = node.tool.process_fn(inputs, node.params)
-            node.outputs  = out or {}
-            node.status   = "pass"
-            if "pass" in node.outputs:
-                node.status = "pass" if node.outputs["pass"] else "fail"
-            node.error_msg = ""
-        except Exception as e:
-            node.outputs  = {}
-            node.status   = "error"
-            node.error_msg = str(e)
+        self._run_busy = True
+        self._run_pending = False
+        node.status = "running"
+        if getattr(self, "_run_btn", None):
+            self._run_btn.setEnabled(False)
+            self._run_btn.setText("⏳  Đang chạy…")
 
+        # Chạy process_fn ở thread nền → không treo UI (OCR easyocr có thể vài giây).
+        thread = QThread()
+        worker = _NodeRunWorker(node, inputs)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_run_done)   # Qt tự ngắt nếu dialog bị huỷ
+        worker.done.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda t=thread: _RUN_THREADS.discard(t))
+        self._run_thread = thread
+        self._run_worker = worker
+        _RUN_THREADS.add(thread)
+        thread.start()
+
+    def _on_run_done(self, outputs: dict, status: str, error: str):
+        node = self._node
+        node.outputs   = outputs or {}
+        node.status    = status
+        node.error_msg = error
+        self._run_busy = False
+        if getattr(self, "_run_btn", None):
+            self._run_btn.setEnabled(True)
+            self._run_btn.setText("▶  Run Node")
         self.refresh_outputs()
         self.run_requested.emit(node.node_id)
+        # Có thay đổi trong lúc chạy → chạy lại 1 lần với params mới nhất.
+        if getattr(self, "_run_pending", False):
+            self._run_pending = False
+            self._on_run()
 
     # ════════════════════════════════════════════════════════════════
     #  Refresh
