@@ -2089,24 +2089,86 @@ def _ocr_lang_to_easyocr(lang: str) -> List[str]:
         codes.append(mapping.get(p, p))
     return codes or ["en"]
 
-_EASYOCR_FAILED: Dict[tuple, str] = {}   # langs init lỗi → fast-fail tránh lag
+_EASYOCR_FAILED: Dict[tuple, str] = {}   # init lỗi → fast-fail tránh lag mỗi Run
 
-def _get_easyocr_reader(langs: List[str]):
-    """Lazy-init + cache EasyOCR Reader (load model ~5-15s lần đầu). Nếu init
-    TỪNG lỗi (thiếu lib / tải model timeout) → fast-fail ngay, KHÔNG thử lại
-    đường chậm mỗi lần Run (đỡ lag). Restart app để thử lại sau khi đã sửa."""
-    key = tuple(sorted(set(langs)))
+
+def _ocr_base_dir() -> str:
+    """Thư mục gốc để dò model OCR offline. Khi đóng gói PyInstaller (frozen)
+    → cạnh .exe (sys._MEIPASS); chạy từ source → thư mục project (cha của core/)."""
+    import sys, os
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", "") or os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _first_existing_dir(*cands: str) -> str:
+    """Trả thư mục TỒN TẠI đầu tiên theo thứ tự ưu tiên ('' nếu không có)."""
+    import os
+    for c in cands:
+        if c and os.path.isdir(c):
+            return c
+    return ""
+
+
+def _easyocr_model_dir(custom: str = "") -> str:
+    """Thư mục chứa model EasyOCR (.pth) để chạy OFFLINE. Ưu tiên:
+    param → <app>/models/easyocr → env EASYOCR_MODULE_PATH → ~/.EasyOCR."""
+    import os
+    return _first_existing_dir(
+        custom,
+        os.path.join(_ocr_base_dir(), "models", "easyocr"),
+        os.environ.get("EASYOCR_MODULE_PATH", ""),
+        os.path.join(os.path.expanduser("~"), ".EasyOCR"),
+    )
+
+
+def _tessdata_dir(custom: str = "") -> str:
+    """Thư mục tessdata (*.traineddata) để Tesseract chạy OFFLINE không phụ thuộc
+    bản cài hệ thống. Ưu tiên: param → <app>/models/tessdata → env TESSDATA_PREFIX."""
+    import os
+    return _first_existing_dir(
+        custom,
+        os.path.join(_ocr_base_dir(), "models", "tessdata"),
+        os.environ.get("TESSDATA_PREFIX", ""),
+    )
+
+
+def _easyocr_offline_hint(err: Exception, model_dir: str,
+                          allow_download: bool) -> str:
+    """Thông báo lỗi rõ ràng khi EasyOCR thiếu model lúc chạy offline."""
+    import os
+    d = model_dir or os.path.join(_ocr_base_dir(), "models", "easyocr")
+    if allow_download:
+        return (f"EasyOCR init lỗi: {err}. Nếu máy KHÔNG có mạng → tắt 'Cho phép "
+                f"tải model' và đặt sẵn file .pth vào: {d}")
+    return ("EasyOCR thiếu model offline (đã TẮT tải mạng để chạy local). Đặt "
+            "craft_mlt_25k.pth (detection) + model nhận dạng (vd latin_g2.pth cho "
+            f"vie/eng) vào: {d}. Tải 1 lần trên máy có mạng (bật 'Cho phép tải "
+            f"model' hoặc copy từ ~/.EasyOCR/model). Lỗi gốc: {err}")
+
+
+def _get_easyocr_reader(langs: List[str], model_dir: str = "",
+                        allow_download: bool = False):
+    """Lazy-init + cache EasyOCR Reader. MẶC ĐỊNH OFFLINE (download_enabled=False)
+    → không bao giờ gọi mạng; model lấy từ `model_dir`. Init lỗi → cache fast-fail
+    (đỡ lag mỗi Run); restart app để thử lại sau khi đã đặt model / bật download."""
+    key = (tuple(sorted(set(langs))), model_dir, bool(allow_download))
     r = _EASYOCR_READERS.get(key)
     if r is not None:
         return r
     if key in _EASYOCR_FAILED:
         raise RuntimeError(_EASYOCR_FAILED[key])
+    import easyocr   # ModuleNotFoundError propagate → gợi ý `pip install easyocr`
     try:
-        import easyocr
-        r = easyocr.Reader(list(key), gpu=False, verbose=False)
+        kwargs = dict(gpu=False, verbose=False,
+                      download_enabled=bool(allow_download))
+        if model_dir:
+            kwargs["model_storage_directory"] = model_dir
+        r = easyocr.Reader(list(key[0]), **kwargs)
     except Exception as e:
-        _EASYOCR_FAILED[key] = f"easyocr init lỗi (đã cache, restart để thử lại): {e}"
-        raise
+        hint = _easyocr_offline_hint(e, model_dir, allow_download)
+        _EASYOCR_FAILED[key] = hint
+        raise RuntimeError(hint)
     _EASYOCR_READERS[key] = r
     return r
 
@@ -2169,9 +2231,13 @@ def proc_ocr_max(inputs, params):
     def _run_tesseract():
         import pytesseract
         _ensure_tesseract_cmd(str(params.get("tesseract_path", "") or ""))
+        cfg = f"--psm {psm} --oem 3"
+        # tessdata local → Tesseract chạy offline, không cần langpack hệ thống.
+        tdir = _tessdata_dir(str(params.get("tessdata_dir_path", "") or ""))
+        if tdir:
+            cfg += f' --tessdata-dir "{tdir}"'
         data = pytesseract.image_to_data(
-            proc_gray, lang=lang,
-            config=f"--psm {psm} --oem 3",
+            proc_gray, lang=lang, config=cfg,
             output_type=pytesseract.Output.DICT)
         t_acc, c_acc, words = "", 0.0, 0
         for i, t in enumerate(data["text"]):
@@ -2188,7 +2254,11 @@ def proc_ocr_max(inputs, params):
 
     def _run_easyocr():
         langs = _ocr_lang_to_easyocr(lang)
-        reader = _get_easyocr_reader(langs)
+        reader = _get_easyocr_reader(
+            langs,
+            model_dir=_easyocr_model_dir(
+                str(params.get("easyocr_dir_path", "") or "")),
+            allow_download=bool(params.get("allow_download", False)))
         results = reader.readtext(proc_gray)
         t_acc, c_acc, words = "", 0.0, 0
         for box, t, c in results:
@@ -4922,10 +4992,11 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_id_reader, "TIDReaderTool"),
 
   ToolDef("ocr_max","OCR Max","ID & Read",
-    "Nhận dạng & xác nhận ký tự — TOCRMaxTool. "
-    "Engine 'auto' tự fallback tesseract→easyocr. "
-    "Cài: pip install pytesseract (+ tesseract-ocr binary & langpack vie) "
-    "hoặc pip install easyocr (không cần binary, tốt cho tiếng Việt + nền phức tạp).",
+    "Nhận dạng & xác nhận ký tự — TOCRMaxTool. CHẠY ĐƯỢC 100% OFFLINE (không cần "
+    "mạng): Tesseract dùng tessdata local; EasyOCR mặc định TẮT tải mạng, lấy model "
+    "từ <app>/models/easyocr. Engine 'auto' tự fallback tesseract→easyocr. "
+    "Cài: pip install pytesseract (+ tesseract-ocr binary & traineddata vie) "
+    "hoặc pip install easyocr (đặt sẵn model .pth để khỏi cần internet).",
     "#3d0c02","🔤",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("text","any"),
@@ -4945,6 +5016,18 @@ TOOL_REGISTRY: List[ToolDef] = [
         tooltip="Để TRỐNG = tự dò vị trí cài mặc định. Trỏ tới tesseract.exe nếu "
                 "đã cài Tesseract nhưng chưa thêm vào PATH "
                 "(vd C:\\Program Files\\Tesseract-OCR\\tesseract.exe)."),
+     P("tessdata_dir_path","Tessdata folder (offline)","str","",
+        tooltip="Thư mục chứa *.traineddata (vie/eng) để Tesseract chạy OFFLINE, "
+                "khỏi cần langpack hệ thống. TRỐNG = tự dò <app>/models/tessdata "
+                "rồi tới env TESSDATA_PREFIX. Tải traineddata: GitHub "
+                "tesseract-ocr/tessdata_fast (vie.traineddata, eng.traineddata)."),
+     P("easyocr_dir_path","EasyOCR models folder (offline)","str","",
+        tooltip="Thư mục chứa model EasyOCR (.pth) để chạy OFFLINE. TRỐNG = tự dò "
+                "<app>/models/easyocr → ~/.EasyOCR. Cần craft_mlt_25k.pth + model "
+                "nhận dạng (latin_g2.pth dùng chung cho vie/eng)."),
+     P("allow_download","Cho phép tải model (cần mạng)","bool",False,
+        tooltip="MẶC ĐỊNH TẮT = chạy hoàn toàn offline, EasyOCR không gọi mạng. "
+                "Bật để EasyOCR tự tải model lần đầu (chỉ khi máy CÓ internet)."),
      P("preprocess","Preprocess","enum","none",
         choices=["none","otsu","adaptive","binary"],
         tooltip="Binarize trước OCR — giúp tách chữ khỏi nền phức tạp / sáng không đều. "

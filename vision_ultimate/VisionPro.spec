@@ -42,6 +42,8 @@ datas = [
     ('model.json', '.'),
     ('model.npz', '.'),
     ('nutfixed.aoi', '.'),
+    # Model OCR offline (tessdata + easyocr .pth) → OCR Max chạy không cần mạng
+    ('models', 'models'),
     # Vendor MVS Python wrapper — KHÔNG kèm DLL (xem lưu ý ở header)
     ('vendor/mvs/*.py', 'vendor/mvs'),
 ]
