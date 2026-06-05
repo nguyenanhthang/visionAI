@@ -2112,13 +2112,16 @@ def _first_existing_dir(*cands: str) -> str:
 
 def _easyocr_model_dir(custom: str = "") -> str:
     """Thư mục chứa model EasyOCR (.pth) để chạy OFFLINE. Ưu tiên:
-    param → <app>/models/easyocr → env EASYOCR_MODULE_PATH → ~/.EasyOCR."""
+    param → <app>/models/easyocr → $EASYOCR_MODULE_PATH/model → ~/.EasyOCR/model.
+    Lưu ý: EasyOCR lưu model ở <base>/model (có subfolder 'model'), nên 2 fallback
+    cuối phải trỏ vào /model mới thấy file .pth đã tải sẵn."""
     import os
+    env = os.environ.get("EASYOCR_MODULE_PATH", "")
     return _first_existing_dir(
         custom,
         os.path.join(_ocr_base_dir(), "models", "easyocr"),
-        os.environ.get("EASYOCR_MODULE_PATH", ""),
-        os.path.join(os.path.expanduser("~"), ".EasyOCR"),
+        os.path.join(env, "model") if env else "",
+        os.path.join(os.path.expanduser("~"), ".EasyOCR", "model"),
     )
 
 
