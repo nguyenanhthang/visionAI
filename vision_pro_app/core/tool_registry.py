@@ -3839,7 +3839,7 @@ def proc_plc_write(inputs, params):
         else:
             val = inputs.get("value")
             if val is None:
-                val = params.get("value_default", 0)
+                val = params.get("value", 0)
             area = MemoryArea[str(params.get("area", "DM_WORD"))]
             addr = int(params.get("address", 0))
             dt = str(params.get("data_type", "int16"))
@@ -3949,7 +3949,7 @@ def proc_modbus_write(inputs, params):
         val = inputs.get("value")
         if val is None:
             p = inputs.get("pass")
-            val = (1 if p else 0) if p is not None else params.get("value_default", 0)
+            val = (1 if p else 0) if p is not None else params.get("value", 0)
         regs = _value_to_modbus_regs(val, str(params.get("data_type", "int16")),
                                      float(params.get("scale", 1.0)),
                                      str(params.get("word_order", "ABCD")))
@@ -5543,6 +5543,10 @@ TOOL_REGISTRY: List[ToolDef] = [
        choices=["DM_WORD","CIO_WORD","W_WORD","H_WORD"],
        visible_if={"mode":"value"}),
      P("address","Address","int",0,0,65535,visible_if={"mode":"value"}),
+     P("value","Value (nếu không nối port 'value')","float",0,-1e12,1e12,step=1,
+       visible_if={"mode":"value"},
+       tooltip="Hằng số để ghi khi KHÔNG nối port 'value'. Nếu nối port 'value' "
+               "(tab Ports, vd từ kết quả đo) thì giá trị từ dây được ưu tiên."),
      P("data_type","Data Type","enum","int16",
        choices=["int16","int32","float32","scaled_int16","scaled_int32"],
        visible_if={"mode":"value"}),
@@ -5601,6 +5605,9 @@ TOOL_REGISTRY: List[ToolDef] = [
      P("port","Port","int",502,1,65535),
      P("unit","Unit/Slave ID","int",1,0,255),
      P("register","Register (0-based)","int",0,0,65535),
+     P("value","Value (nếu không nối port)","float",0,-1e12,1e12,step=1,
+       tooltip="Hằng số ghi khi không nối port. Ưu tiên: port 'value' > "
+               "port 'pass' (1/0) > giá trị này."),
      P("data_type","Data Type","enum","int16",
        choices=["int16","int32","float32","scaled_int16","scaled_int32"]),
      P("scale","Scale (scaled_*)","float",1.0,-1e9,1e9,step=0.1),
