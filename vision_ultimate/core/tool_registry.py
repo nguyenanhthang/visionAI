@@ -2205,6 +2205,122 @@ def _ensure_tesseract_cmd(custom_path: str = "") -> None:
             pytesseract.pytesseract.tesseract_cmd = c
             return
 
+def _ocr_num_substr(s: str) -> str:
+    """Cắt đúng phần số trong chuỗi (giữ nguyên định dạng gốc). '' nếu không có."""
+    import re
+    m = re.search(r"[-+]?\d[\d.,]*\d|\d", str(s))
+    return m.group(0) if m else ""
+
+
+def _ocr_parse_number(s):
+    """Parse số thực từ chuỗi, xử lý dấu , và . ngăn cách. None nếu không có."""
+    tok = _ocr_num_substr(s)
+    if not tok:
+        return None
+    if "," in tok and "." in tok:
+        if tok.rfind(",") > tok.rfind("."):      # 1.234,56 → phẩy là thập phân
+            tok = tok.replace(".", "").replace(",", ".")
+        else:                                     # 1,234.56 → chấm là thập phân
+            tok = tok.replace(",", "")
+    elif "," in tok:
+        parts = tok.split(",")
+        if len(parts) == 2 and len(parts[1]) in (1, 2):
+            tok = tok.replace(",", ".")           # 9,00 → 9.00
+        else:
+            tok = tok.replace(",", "")            # 1,234 → 1234
+    try:
+        return float(tok)
+    except ValueError:
+        return None
+
+
+def _ocr_extract_value(boxes, full_text, mode, query, direction, number_only):
+    """Trích giá trị mong muốn từ kết quả OCR.
+
+    • mode='regex'   : search `query` (regex) trên full_text → lấy nhóm () đầu tiên.
+    • mode='keyword' : tìm box chứa `query` (vd 'Total') rồi lấy box giá trị theo
+      `direction` (right/left/below/same_line). Hợp cho hóa đơn/nhãn.
+
+    Trả (value_str, matched_box | None)."""
+    import re
+    mode = (mode or "off").lower()
+    if mode == "off" or not query:
+        return "", None
+
+    if mode == "regex":
+        try:
+            m = re.search(query, full_text, re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            return "", None
+        if not m:
+            return "", None
+        val = m.group(1) if m.groups() else m.group(0)
+        return (_ocr_num_substr(val) if number_only else val.strip()), None
+
+    # mode == 'keyword' — chọn box neo: ưu tiên khớp CHÍNH XÁC → nguyên từ →
+    # chuỗi con (tránh 'Cash' khớp nhầm 'CASH BILL').
+    def _norm(t):
+        return re.sub(r"^\W+|\W+$", "", str(t).lower()).strip()
+    qn = _norm(query)
+    anchor = None
+    for b in boxes:                                  # 1) khớp chính xác
+        if _norm(b["text"]) == qn:
+            anchor = b
+            break
+    if anchor is None and qn:                        # 2) khớp nguyên từ/cụm từ
+        for b in boxes:
+            if re.search(r"\b" + re.escape(qn) + r"\b", b["text"].lower()):
+                anchor = b
+                break
+    if anchor is None:                               # 3) chứa chuỗi con
+        for b in boxes:
+            bt = b["text"].lower().strip()
+            if bt and (qn in bt or bt in qn):
+                anchor = b
+                break
+    if anchor is None:
+        return "", None
+    ax, aw, acx, acy, ah = (anchor["x"], anchor["w"], anchor["cx"],
+                            anchor["cy"], anchor["h"])
+    direction = (direction or "right").lower()
+
+    def same_row(b):
+        return abs(b["cy"] - acy) <= max(ah, b["h"]) * 0.6
+
+    def col_overlap(b):
+        return not (b["x"] > ax + aw or b["x"] + b["w"] < ax)
+
+    if direction == "same_line":
+        row = sorted((b for b in boxes if same_row(b)), key=lambda b: b["cx"])
+        txt = " ".join(b["text"] for b in row)
+        txt = re.sub(re.escape(query), "", txt, flags=re.IGNORECASE).strip(" :=-\t")
+        return (_ocr_num_substr(txt) if number_only else txt.strip()), anchor
+
+    if direction == "left":
+        cands = sorted((b for b in boxes if b is not anchor and same_row(b)
+                        and b["cx"] < acx), key=lambda b: -b["cx"])
+    elif direction == "below":
+        cands = sorted((b for b in boxes if b is not anchor and col_overlap(b)
+                        and b["cy"] > acy), key=lambda b: b["cy"])
+    else:  # right (mặc định)
+        cands = sorted((b for b in boxes if b is not anchor and same_row(b)
+                        and b["cx"] > acx), key=lambda b: b["cx"])
+    if not cands:
+        # value có thể nằm ngay trong box keyword (vd box dính 'Total : 9.00')
+        if number_only:
+            rest = re.sub(re.escape(query), "", anchor["text"], flags=re.IGNORECASE)
+            sub = _ocr_num_substr(rest)
+            if sub:
+                return sub, anchor
+        return "", anchor
+    if number_only:
+        pick = next((b for b in cands if any(c.isdigit() for c in b["text"])),
+                    cands[0])
+        return _ocr_num_substr(pick["text"]), pick
+    pick = cands[0]
+    return pick["text"].strip(), pick
+
+
 def proc_ocr_max(inputs, params):
     """TOCRMaxTool — Đọc & xác nhận ký tự (OCR).
 
@@ -2236,6 +2352,7 @@ def proc_ocr_max(inputs, params):
 
     text = ""
     conf = 0.0
+    boxes = []
     used = ""
     err = ""
 
@@ -2250,7 +2367,7 @@ def proc_ocr_max(inputs, params):
         data = pytesseract.image_to_data(
             proc_gray, lang=lang, config=cfg,
             output_type=pytesseract.Output.DICT)
-        t_acc, c_acc, words = "", 0.0, 0
+        t_acc, c_acc, words, bxs = "", 0.0, 0, []
         for i, t in enumerate(data["text"]):
             c = int(data["conf"][i])
             if c > 0 and t.strip():
@@ -2261,7 +2378,10 @@ def proc_ocr_max(inputs, params):
                                    data["width"][i], data["height"][i])
                 cv2.rectangle(vis, (x2, y2), (x2 + w2, y2 + h2),
                               (0, 200, 255), _t(1, s))
-        return t_acc.strip(), c_acc / max(words, 1)
+                bxs.append({"text": t.strip(), "x": x2, "y": y2, "w": w2, "h": h2,
+                            "cx": x2 + w2 / 2.0, "cy": y2 + h2 / 2.0,
+                            "conf": float(c)})
+        return t_acc.strip(), c_acc / max(words, 1), bxs
 
     def _run_easyocr():
         langs = _ocr_lang_to_easyocr(lang)
@@ -2271,7 +2391,7 @@ def proc_ocr_max(inputs, params):
                 str(params.get("easyocr_dir_path", "") or "")),
             allow_download=bool(params.get("allow_download", False)))
         results = reader.readtext(proc_gray)
-        t_acc, c_acc, words = "", 0.0, 0
+        t_acc, c_acc, words, bxs = "", 0.0, 0, []
         for box, t, c in results:
             if not str(t).strip():
                 continue
@@ -2280,7 +2400,13 @@ def proc_ocr_max(inputs, params):
             words += 1
             pts = np.array(box, dtype=np.int32)
             cv2.polylines(vis, [pts], True, (0, 200, 255), _t(1, s))
-        return t_acc.strip(), c_acc / max(words, 1)
+            x2, y2 = int(pts[:, 0].min()), int(pts[:, 1].min())
+            w2 = int(pts[:, 0].max()) - x2
+            h2 = int(pts[:, 1].max()) - y2
+            bxs.append({"text": str(t).strip(), "x": x2, "y": y2, "w": w2, "h": h2,
+                        "cx": x2 + w2 / 2.0, "cy": y2 + h2 / 2.0,
+                        "conf": float(c) * 100.0})
+        return t_acc.strip(), c_acc / max(words, 1), bxs
 
     def _explain(e):
         # Map exception → (is_setup_issue, short human message).
@@ -2296,18 +2422,18 @@ def proc_ocr_max(inputs, params):
 
     try:
         if engine == "tesseract":
-            text, conf = _run_tesseract()
+            text, conf, boxes = _run_tesseract()
             used = "tesseract"
         elif engine == "easyocr":
-            text, conf = _run_easyocr()
+            text, conf, boxes = _run_easyocr()
             used = "easyocr"
         else:
             try:
-                text, conf = _run_tesseract()
+                text, conf, boxes = _run_tesseract()
                 used = "tesseract"
             except Exception as e1:
                 try:
-                    text, conf = _run_easyocr()
+                    text, conf, boxes = _run_easyocr()
                     used = "easyocr"
                 except Exception as e2:
                     t_setup, t_msg = _explain(e1)
@@ -2334,14 +2460,43 @@ def proc_ocr_max(inputs, params):
         text = f"[OCR error] {msg}"
         conf = 0.0
 
+    has_text = bool(text) and not text.startswith("[")
+
+    # ── Trích giá trị mong muốn (vd: tìm 'Total' → lấy 9.00) ──
+    ex_mode = str(params.get("extract_mode", "off")).lower()
+    value, number = "", 0.0
+    if ex_mode != "off" and has_text:
+        value, vbox = _ocr_extract_value(
+            boxes, text, ex_mode,
+            str(params.get("extract_query", "") or ""),
+            str(params.get("extract_dir", "right")),
+            bool(params.get("extract_number_only", False)))
+        if value:
+            n = _ocr_parse_number(value)
+            number = n if n is not None else 0.0
+            if vbox is not None:
+                conf = float(vbox.get("conf", conf))   # conf của đúng box giá trị
+                bx, by, bw, bh = vbox["x"], vbox["y"], vbox["w"], vbox["h"]
+                y_lab = by - _t(6, s)
+                if y_lab < _t(14, s):
+                    y_lab = by + bh + _t(16, s)
+                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh),
+                              (0, 255, 0), _t(2, s))
+                cv2.putText(vis, value, (bx, y_lab), cv2.FONT_HERSHEY_SIMPLEX,
+                            _fs(0.6, s), (0, 255, 0), _t(2, s))
+
     expected = params.get("expected_text", "")
     min_conf = params.get("min_confidence", 60.0)
-    has_text = bool(text) and not text.startswith("[")
-    is_pass = ((expected in text if expected else has_text)
-               and conf >= min_conf)
-    print(f"[OCR/{used or 'fail'}] text={text!r} conf={conf:.1f}% "
-          f"{'PASS' if is_pass else 'FAIL'}")
-    return {"image": vis, "text": text, "pass": is_pass, "confidence": conf}
+    if ex_mode != "off":
+        ok_exp = (str(expected).lower() in value.lower()) if expected else True
+        is_pass = bool(value) and conf >= min_conf and ok_exp
+    else:
+        is_pass = ((expected in text if expected else has_text)
+                   and conf >= min_conf)
+    print(f"[OCR/{used or 'fail'}] text={text!r} value={value!r} "
+          f"conf={conf:.1f}% {'PASS' if is_pass else 'FAIL'}")
+    return {"image": vis, "text": text, "value": value, "number": number,
+            "pass": is_pass, "confidence": conf}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -5007,10 +5162,12 @@ TOOL_REGISTRY: List[ToolDef] = [
     "mạng): Tesseract dùng tessdata local; EasyOCR mặc định TẮT tải mạng, lấy model "
     "từ <app>/models/easyocr. Engine 'auto' tự fallback tesseract→easyocr. "
     "Cài: pip install pytesseract (+ tesseract-ocr binary & traineddata vie) "
-    "hoặc pip install easyocr (đặt sẵn model .pth để khỏi cần internet).",
+    "hoặc pip install easyocr (đặt sẵn model .pth để khỏi cần internet). "
+    "TRÍCH GIÁ TRỊ: tìm từ khóa (vd 'Total') hoặc regex → cổng value/number.",
     "#3d0c02","🔤",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("text","any"),
+     PortDef("value","any"),PortDef("number","number"),
      PortDef("pass","bool"),PortDef("confidence","number")],
     [P("engine","OCR Engine","enum","auto",
         choices=["auto","tesseract","easyocr"],
@@ -5045,7 +5202,23 @@ TOOL_REGISTRY: List[ToolDef] = [
                 "Otsu: ngưỡng tự động; adaptive: sáng cục bộ; binary: ngưỡng 127."),
      P("invert","Invert","bool",False,
         tooltip="Đảo trắng-đen (cho text sáng trên nền tối)."),
-     P("expected_text","Expected Text","str",""),
+     P("extract_mode","Trích giá trị","enum","off",
+        choices=["off","keyword","regex"],
+        tooltip="off: chỉ đọc text. keyword: tìm 1 từ khóa (vd 'Total') rồi lấy giá "
+                "trị nằm cạnh nó. regex: dùng biểu thức chính quy, lấy nhóm bắt () đầu."),
+     P("extract_query","Từ khóa / Regex","str","",
+        tooltip="keyword: nhập từ neo, vd 'Total'. regex: nhập pattern, vd "
+                "Total\\s*:?\\s*([\\d.,]+) — sẽ lấy nhóm (...) đầu tiên."),
+     P("extract_dir","Vị trí giá trị","enum","right",
+        choices=["right","left","below","same_line"],
+        tooltip="(chế độ keyword) Giá trị nằm đâu so với từ khóa: phải/trái/dưới/"
+                "cùng dòng. Hóa đơn thường để 'right'."),
+     P("extract_number_only","Chỉ lấy số","bool",False,
+        tooltip="Lọc lấy đúng phần số trong giá trị (vd '9.00' từ 'RM 9.00'). Cổng "
+                "'number' luôn cố parse ra số thực."),
+     P("expected_text","Expected Text","str","",
+        tooltip="Khi TRÍCH giá trị: PASS nếu value chứa chuỗi này (trống = chỉ cần lấy "
+                "được value). Khi KHÔNG trích: kiểm tra chuỗi này có trong text."),
      P("min_confidence","Min Confidence (%)","float",60.0,0,100)],
     proc_ocr_max, "TOCRMaxTool"),
 
