@@ -43,9 +43,15 @@ models/tessdata/
 
 ```
 models/easyocr/
-├── craft_mlt_25k.pth      # detection (dùng chung mọi ngôn ngữ)
-└── latin_g2.pth           # recognition cho vie + eng (chữ Latin)
+├── craft_mlt_25k.pth      # detection — LUÔN cần (dùng chung mọi ngôn ngữ)
+├── latin_g2.pth           # recognition khi Language = "vie" hoặc "vie+eng"
+└── english_g2.pth         # recognition khi Language = "eng" (chỉ tiếng Anh)
 ```
+
+> ⚠️ Tên file recognition **phụ thuộc Language đã chọn** trên node: `vie`→`latin_g2.pth`,
+> `eng`→`english_g2.pth`, `jpn`→`japanese_g2.pth`… Nếu báo thiếu file, thông báo
+> lỗi sẽ nói đúng tên cần. Tiếng Việt nên để **Language = `vie`** (latin_g2 đọc
+> được cả ký tự Latin/tiếng Anh).
 
 Lấy file `.pth` bằng 1 trong 2 cách:
 - **Trên máy có mạng:** bật param **Cho phép tải model** rồi Run 1 lần → EasyOCR

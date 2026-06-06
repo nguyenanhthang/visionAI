@@ -2138,16 +2138,24 @@ def _tessdata_dir(custom: str = "") -> str:
 
 def _easyocr_offline_hint(err: Exception, model_dir: str,
                           allow_download: bool) -> str:
-    """Thông báo lỗi rõ ràng khi EasyOCR thiếu model lúc chạy offline."""
-    import os
+    """Thông báo lỗi rõ ràng khi EasyOCR thiếu model lúc chạy offline — nêu ĐÚNG
+    tên file .pth EasyOCR đang cần (tên model nhận dạng phụ thuộc Language:
+    'vie'→latin_g2.pth, 'eng'→english_g2.pth; craft_mlt_25k.pth luôn cần)."""
+    import os, re
     d = model_dir or os.path.join(_ocr_base_dir(), "models", "easyocr")
+    m = re.search(r"([\w\-]+\.pth)", str(err))
+    missing = m.group(1) if m else ""
     if allow_download:
-        return (f"EasyOCR init lỗi: {err}. Nếu máy KHÔNG có mạng → tắt 'Cho phép "
-                f"tải model' và đặt sẵn file .pth vào: {d}")
-    return ("EasyOCR thiếu model offline (đã TẮT tải mạng để chạy local). Đặt "
-            "craft_mlt_25k.pth (detection) + model nhận dạng (vd latin_g2.pth cho "
-            f"vie/eng) vào: {d}. Tải 1 lần trên máy có mạng (bật 'Cho phép tải "
-            f"model' hoặc copy từ ~/.EasyOCR/model). Lỗi gốc: {err}")
+        return (f"EasyOCR init lỗi: {err}. Máy KHÔNG có mạng → tắt 'Cho phép tải "
+                f"model' và đặt sẵn file .pth vào: {d}")
+    head = "EasyOCR thiếu model offline (đã TẮT tải mạng để chạy local). "
+    if missing:
+        head += f"Cần ĐÚNG file: {missing} — đặt vào: {d}. "
+    else:
+        head += f"Đặt craft_mlt_25k.pth + model nhận dạng vào: {d}. "
+    return (head + "Lưu ý: Language='vie' dùng latin_g2.pth, ='eng' dùng "
+            "english_g2.pth. Lấy model: chạy tools/fetch_ocr_models.py trên máy "
+            f"có mạng, hoặc copy từ ~/.EasyOCR/model. Lỗi gốc: {err}")
 
 
 def _get_easyocr_reader(langs: List[str], model_dir: str = "",
