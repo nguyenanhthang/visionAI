@@ -2359,7 +2359,9 @@ def _ocr_extract_value(boxes, full_text, mode, query, direction, number_only):
     if mode == "off" or not query:
         return "", None
 
-    if mode == "regex":
+    # 'regex' THẬT khi query có ký tự đặc biệt regex; nếu gõ chữ thuần (vd
+    # 'Total') thì coi như 'keyword' cho thân thiện (tránh trả về chính từ khóa).
+    if mode == "regex" and re.search(r"[\\^$.|?*+()\[\]{}]", query):
         try:
             m = re.search(query, full_text, re.IGNORECASE | re.MULTILINE)
         except re.error:
@@ -2369,7 +2371,7 @@ def _ocr_extract_value(boxes, full_text, mode, query, direction, number_only):
         val = m.group(1) if m.groups() else m.group(0)
         return (_ocr_num_substr(val) if number_only else val.strip()), None
 
-    # mode == 'keyword' — chọn box neo: ưu tiên khớp CHÍNH XÁC → nguyên từ →
+    # mode == 'keyword' (hoặc 'regex' với query là chữ thuần) — chọn box neo: ưu tiên khớp CHÍNH XÁC → nguyên từ →
     # chuỗi con (tránh 'Cash' khớp nhầm 'CASH BILL').
     def _norm(t):
         return re.sub(r"^\W+|\W+$", "", str(t).lower()).strip()
