@@ -2183,6 +2183,118 @@ def _get_easyocr_reader(langs: List[str], model_dir: str = "",
     _EASYOCR_READERS[key] = r
     return r
 
+_PADDLE_READERS: Dict[tuple, Any] = {}
+_PADDLE_FAILED: Dict[tuple, str] = {}
+
+_PADDLE_LANG = {"eng": "en", "vie": "vi", "jpn": "japan", "kor": "korean",
+                "chi_sim": "ch", "chi_tra": "chinese_cht", "fra": "fr",
+                "deu": "german", "spa": "es", "rus": "ru", "ita": "it",
+                "por": "pt", "tha": "th"}
+
+
+def _ocr_lang_to_paddle(lang: str) -> str:
+    """Map mã Tesseract → mã PaddleOCR (lấy ngôn ngữ đầu nếu 'vie+eng')."""
+    p = str(lang or "en").replace("+", ",").split(",")[0].strip().lower()
+    return _PADDLE_LANG.get(p, p)
+
+
+def _paddle_model_dirs(custom_base: str = ""):
+    """Trả (det_dir, rec_dir, cls_dir) model PaddleOCR để chạy OFFLINE: tìm trong
+    custom_base hoặc <app>/models/paddle, mỗi loại ở subfolder det/rec/cls. Rỗng =
+    chưa có → PaddleOCR sẽ tự tải (cần mạng)."""
+    import os
+    base = _first_existing_dir(custom_base,
+                               os.path.join(_ocr_base_dir(), "models", "paddle"))
+    if not base:
+        return "", "", ""
+
+    def _sub(name):
+        d = os.path.join(base, name)
+        return d if os.path.isdir(d) else ""
+    return _sub("det"), _sub("rec"), _sub("cls")
+
+
+def _paddle_offline_hint(err: Exception, base_dir: str) -> str:
+    import os
+    d = base_dir or os.path.join(_ocr_base_dir(), "models", "paddle")
+    if isinstance(err, (ModuleNotFoundError, ImportError)):
+        return ("Chưa cài PaddleOCR. Chạy: pip install paddlepaddle paddleocr. "
+                f"Lỗi gốc: {err}")
+    s = str(err).lower()
+    if any(k in s for k in ("connection", "max retries", "timed out", "urlerror",
+                            "getaddrinfo", "failed to establish")):
+        return ("PaddleOCR cần tải model nhưng máy không có mạng. Đặt sẵn model vào "
+                f"{d}\\det, {d}\\rec, {d}\\cls (xem models/README.md), hoặc chạy "
+                f"tools/fetch_ocr_models.py --paddle trên máy có mạng. Lỗi gốc: {err}")
+    return f"PaddleOCR init lỗi: {err}"
+
+
+def _get_paddle_reader(plang: str, base_dir: str = "", allow_download: bool = False):
+    """Lazy-init + cache PaddleOCR. Có model local (models/paddle/{det,rec,cls}) →
+    chạy offline; không có → Paddle tự tải (cần mạng). Init lỗi → cache fast-fail."""
+    det, rec, cls = _paddle_model_dirs(base_dir)
+    key = (plang, det, rec, cls)
+    r = _PADDLE_READERS.get(key)
+    if r is not None:
+        return r
+    if key in _PADDLE_FAILED:
+        raise RuntimeError(_PADDLE_FAILED[key])
+    try:
+        from paddleocr import PaddleOCR
+        kw = dict(lang=plang, use_angle_cls=True, show_log=False)
+        if det:
+            kw["det_model_dir"] = det
+        if rec:
+            kw["rec_model_dir"] = rec
+        if cls:
+            kw["cls_model_dir"] = cls
+        try:
+            r = PaddleOCR(**kw)
+        except TypeError:
+            # PaddleOCR 3.x đổi/bỏ vài tham số → thử lại bản tối giản.
+            for bad in ("show_log", "use_angle_cls"):
+                kw.pop(bad, None)
+            r = PaddleOCR(**kw)
+    except Exception as e:
+        hint = _paddle_offline_hint(e, base_dir)
+        _PADDLE_FAILED[key] = hint
+        raise RuntimeError(hint)
+    _PADDLE_READERS[key] = r
+    return r
+
+
+def _paddle_lines(result):
+    """Chuẩn hoá kết quả PaddleOCR (2.x .ocr() và 3.x) → list[(pts, text, score)]."""
+    out = []
+    if not result:
+        return out
+    first = result[0] if isinstance(result, (list, tuple)) and result else None
+    if isinstance(first, dict):                      # 3.x: dict có rec_texts
+        texts = first.get("rec_texts") or []
+        scores = first.get("rec_scores") or []
+        polys = (first.get("rec_polys") or first.get("dt_polys")
+                 or first.get("boxes") or [])
+        for i, t in enumerate(texts):
+            out.append((polys[i] if i < len(polys) else None,
+                        t, scores[i] if i < len(scores) else 0.0))
+        return out
+    # 2.x: [ [ [box,(text,score)], ... ] ]  (1 phần tử / ảnh)
+    lines = (result[0] if (isinstance(result, (list, tuple)) and len(result) == 1
+                           and isinstance(result[0], (list, tuple))) else result)
+    if not lines:
+        return out
+    for ln in lines:
+        try:
+            tv = ln[1]
+            text = tv[0] if isinstance(tv, (list, tuple)) else str(tv)
+            score = (float(tv[1]) if isinstance(tv, (list, tuple)) and len(tv) > 1
+                     else 0.0)
+            out.append((ln[0], text, score))
+        except Exception:
+            continue
+    return out
+
+
 def _ensure_tesseract_cmd(custom_path: str = "") -> None:
     """Trỏ pytesseract tới binary Tesseract khi KHÔNG có trên PATH. Ưu tiên
     custom_path (param 'tesseract_path'); trống thì auto-dò vị trí cài mặc định
@@ -2408,6 +2520,37 @@ def proc_ocr_max(inputs, params):
                         "conf": float(c) * 100.0})
         return t_acc.strip(), c_acc / max(words, 1), bxs
 
+    def _run_paddle():
+        plang = _ocr_lang_to_paddle(lang)
+        reader = _get_paddle_reader(
+            plang,
+            base_dir=str(params.get("paddle_dir_path", "") or ""),
+            allow_download=bool(params.get("allow_download", False)))
+        img_in = (proc_gray if getattr(proc_gray, "ndim", 2) == 3
+                  else cv2.cvtColor(proc_gray, cv2.COLOR_GRAY2BGR))
+        try:
+            result = reader.ocr(img_in, cls=True)
+        except TypeError:
+            result = reader.ocr(img_in)              # PaddleOCR 3.x bỏ tham số cls
+        t_acc, c_acc, words, bxs = "", 0.0, 0, []
+        for pts, t, sc in _paddle_lines(result):
+            if not str(t).strip():
+                continue
+            t_acc += str(t) + " "
+            c_acc += float(sc) * 100.0
+            words += 1
+            if pts is not None:
+                arr = np.array(pts, dtype=np.int32).reshape(-1, 2)
+                cv2.polylines(vis, [arr], True, (0, 200, 255), _t(1, s))
+                x2, y2 = int(arr[:, 0].min()), int(arr[:, 1].min())
+                w2, h2 = int(arr[:, 0].max()) - x2, int(arr[:, 1].max()) - y2
+            else:
+                x2 = y2 = w2 = h2 = 0
+            bxs.append({"text": str(t).strip(), "x": x2, "y": y2, "w": w2, "h": h2,
+                        "cx": x2 + w2 / 2.0, "cy": y2 + h2 / 2.0,
+                        "conf": float(sc) * 100.0})
+        return t_acc.strip(), c_acc / max(words, 1), bxs
+
     def _explain(e):
         # Map exception → (is_setup_issue, short human message).
         # Setup issues = missing module / missing binary → có lệnh cài cụ thể.
@@ -2421,35 +2564,31 @@ def proc_ocr_max(inputs, params):
         return False, f"{name}: {msg}"
 
     try:
-        if engine == "tesseract":
+        if engine == "paddle":
+            text, conf, boxes = _run_paddle()
+            used = "paddle"
+        elif engine == "tesseract":
             text, conf, boxes = _run_tesseract()
             used = "tesseract"
         elif engine == "easyocr":
             text, conf, boxes = _run_easyocr()
             used = "easyocr"
         else:
-            try:
-                text, conf, boxes = _run_tesseract()
-                used = "tesseract"
-            except Exception as e1:
+            # auto: paddle → easyocr → tesseract; gom lỗi nếu tất cả fail.
+            errors = {}
+            for _name, _fn in (("paddle", _run_paddle), ("easyocr", _run_easyocr),
+                               ("tesseract", _run_tesseract)):
                 try:
-                    text, conf, boxes = _run_easyocr()
-                    used = "easyocr"
-                except Exception as e2:
-                    t_setup, t_msg = _explain(e1)
-                    e_setup, e_msg = _explain(e2)
-                    if t_setup and e_setup:
-                        # Cả 2 đều chưa cài → hướng dẫn cài nhanh nhất.
-                        text = ("[OCR chưa cài engine nào] Chạy: "
-                                "pip install easyocr  "
-                                "(khuyên dùng — không cần binary, hỗ trợ tiếng Việt tốt). "
-                                "Hoặc: pip install pytesseract + cài Tesseract binary "
-                                "(Windows: UB-Mannheim installer; Ubuntu: apt install "
-                                "tesseract-ocr tesseract-ocr-vie; macOS: brew install "
-                                "tesseract tesseract-lang).")
-                    else:
-                        text = f"[OCR fail] tesseract: {t_msg} | easyocr: {e_msg}"
-                    conf = 0.0
+                    text, conf, boxes = _fn()
+                    used = _name
+                    break
+                except Exception as _ex:
+                    errors[_name] = _explain(_ex)[1]
+            if not used:
+                text = ("[OCR chưa engine nào chạy được] Khuyên: pip install "
+                        "paddlepaddle paddleocr. Chi tiết — "
+                        + " | ".join(f"{k}: {v}" for k, v in errors.items()))
+                conf = 0.0
     except ModuleNotFoundError as e:
         mod = (str(e).split("'")[1] if "'" in str(e) else str(e))
         text = (f"[{mod} chưa cài] pip install {mod}"
@@ -5158,19 +5297,19 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_id_reader, "TIDReaderTool"),
 
   ToolDef("ocr_max","OCR Max","ID & Read",
-    "Nhận dạng & xác nhận ký tự — TOCRMaxTool. CHẠY ĐƯỢC 100% OFFLINE (không cần "
-    "mạng): Tesseract dùng tessdata local; EasyOCR mặc định TẮT tải mạng, lấy model "
-    "từ <app>/models/easyocr. Engine 'auto' tự fallback tesseract→easyocr. "
-    "Cài: pip install pytesseract (+ tesseract-ocr binary & traineddata vie) "
-    "hoặc pip install easyocr (đặt sẵn model .pth để khỏi cần internet). "
+    "Nhận dạng & xác nhận ký tự — TOCRMaxTool. Engine khuyên dùng: PADDLE "
+    "(PaddleOCR — chính xác cao, tiếng Việt tốt; cài: pip install paddlepaddle "
+    "paddleocr). CHẠY 100% OFFLINE bằng model local: paddle→models/paddle/"
+    "{det,rec,cls}; easyocr→models/easyocr/*.pth; tesseract→models/tessdata/"
+    "*.traineddata (xem models/README.md). "
     "TRÍCH GIÁ TRỊ: tìm từ khóa (vd 'Total') hoặc regex → cổng value/number.",
     "#3d0c02","🔤",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("text","any"),
      PortDef("value","any"),PortDef("number","number"),
      PortDef("pass","bool"),PortDef("confidence","number")],
-    [P("engine","OCR Engine","enum","auto",
-        choices=["auto","tesseract","easyocr"],
+    [P("engine","OCR Engine","enum","paddle",
+        choices=["paddle","easyocr","tesseract","auto"],
         tooltip="auto: thử tesseract → easyocr. easyocr không cần Tesseract binary; "
                 "tốt cho tiếng Việt + nền phức tạp nhưng nặng (PyTorch, ~5-15s load lần đầu)."),
      P("lang","Language","str","eng",
@@ -5193,6 +5332,11 @@ TOOL_REGISTRY: List[ToolDef] = [
         tooltip="Thư mục chứa model EasyOCR (.pth) để chạy OFFLINE. TRỐNG = tự dò "
                 "<app>/models/easyocr → ~/.EasyOCR. Cần craft_mlt_25k.pth + model "
                 "nhận dạng (latin_g2.pth dùng chung cho vie/eng)."),
+     P("paddle_dir_path","PaddleOCR models folder (offline)","str","",
+        tooltip="Thư mục model PaddleOCR (chứa subfolder det/ rec/ cls/) để chạy "
+                "OFFLINE. TRỐNG = tự dò <app>/models/paddle; chưa có thì Paddle sẽ "
+                "tự tải (cần mạng). Lấy model offline: chạy tools/fetch_ocr_models.py "
+                "--paddle trên máy có mạng. Xem models/README.md."),
      P("allow_download","Cho phép tải model (cần mạng)","bool",False,
         tooltip="MẶC ĐỊNH TẮT = chạy hoàn toàn offline, EasyOCR không gọi mạng. "
                 "Bật để EasyOCR tự tải model lần đầu (chỉ khi máy CÓ internet)."),

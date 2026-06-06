@@ -5,15 +5,47 @@ Tool **OCR Max** mặc định chạy **100% offline**. Chỉ cần đặt sẵn
 
 ```
 models/
+├── paddle/     # PaddleOCR (KHUYÊN DÙNG) — subfolder det/ rec/ cls/
+│   ├── det/
+│   ├── rec/
+│   └── cls/
 ├── tessdata/   # *.traineddata cho Tesseract
 └── easyocr/    # *.pth cho EasyOCR
 ```
 
 App tự dò model theo thứ tự ưu tiên:
-1. Đường dẫn nhập trong tool (param *Tessdata folder* / *EasyOCR models folder*)
-2. `<app>/models/tessdata` và `<app>/models/easyocr` (thư mục này)
+1. Đường dẫn nhập trong tool (*PaddleOCR / Tessdata / EasyOCR models folder*)
+2. `<app>/models/{paddle,tessdata,easyocr}` (thư mục này)
 3. Biến môi trường `TESSDATA_PREFIX` / `EASYOCR_MODULE_PATH`
-4. `~/.EasyOCR` (vị trí EasyOCR tự lưu sau lần tải đầu)
+4. `~/.EasyOCR/model`, `~/.paddleocr` (nơi engine tự lưu sau lần tải đầu)
+
+> **Nhanh nhất:** trên máy CÓ mạng chạy `python tools/fetch_ocr_models.py --paddle-only`
+> (hoặc bỏ cờ để tải cả EasyOCR+Tesseract), rồi copy nguyên thư mục `models/` sang máy offline.
+
+---
+
+## 0. PaddleOCR — engine KHUYÊN DÙNG (chính xác cao, tiếng Việt tốt)
+
+**Cài thư viện:**
+```bash
+pip install paddlepaddle      # bản CPU (GPU: paddlepaddle-gpu)
+pip install paddleocr
+```
+
+**Lấy model offline (làm 1 lần trên máy có mạng):**
+```bash
+python tools/fetch_ocr_models.py --paddle-only             # chỉ Paddle, lang vi
+python tools/fetch_ocr_models.py --paddle-only --paddle-lang en
+```
+Lệnh gọi PaddleOCR tự tải model rồi copy vào `models/paddle/{det,rec,cls}`.
+Sau đó copy thư mục `models/` sang máy offline.
+
+> Thủ công: chạy app 1 lần khi CÓ mạng (Engine = paddle) → model về
+> `~/.paddleocr/whl/`. Copy 3 folder con (det / rec / cls — folder chứa
+> `inference.pdmodel`) vào `models/paddle/det`, `/rec`, `/cls`.
+
+**Dùng:** node OCR Max → **Engine = `paddle`**, **Language = `vie`**. Đã đặt model
+local → chạy offline. Thiếu model + không mạng → báo lỗi chỉ rõ thư mục cần đặt.
 
 ---
 
