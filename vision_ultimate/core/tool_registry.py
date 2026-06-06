@@ -2051,7 +2051,6 @@ def proc_id_reader(inputs, params):
     print(f"[IDReader] {symbology or 'NONE'}: {data or 'NOT FOUND'} {'PASS' if is_pass else 'FAIL'}")
     return {"image":vis,"data":data,"symbology":symbology,"pass":is_pass}
 
-_EASYOCR_READERS: Dict[tuple, Any] = {}
 
 def _ocr_preprocess(gray, mode: str, invert: bool):
     """Binarize/invert grayscale để OCR engine bám tốt hơn trên nền
@@ -2074,193 +2073,366 @@ def _ocr_preprocess(gray, mode: str, invert: bool):
         out = 255 - out
     return out
 
-def _ocr_lang_to_easyocr(lang: str) -> List[str]:
-    """Map Tesseract 3-char codes (eng, vie, jpn, …) → EasyOCR
-    2-char codes (en, vi, ja, …). Hỗ trợ 'vie+eng' style multi-lang."""
-    mapping = {"eng":"en", "vie":"vi", "jpn":"ja", "kor":"ko",
-               "chi_sim":"ch_sim", "chi_tra":"ch_tra",
-               "fra":"fr", "deu":"de", "spa":"es", "rus":"ru",
-               "ita":"it", "por":"pt", "tha":"th"}
-    codes = []
-    for part in str(lang or "eng").replace("+", ",").split(","):
-        p = part.strip().lower()
-        if not p:
-            continue
-        codes.append(mapping.get(p, p))
-    return codes or ["en"]
 
-_EASYOCR_FAILED: Dict[tuple, str] = {}   # langs init lỗi → fast-fail tránh lag
+def _ocr_base_dir() -> str:
+    """Thư mục gốc để dò model OCR offline. Khi đóng gói PyInstaller (frozen)
+    → cạnh .exe (sys._MEIPASS); chạy từ source → thư mục project (cha của core/)."""
+    import sys, os
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", "") or os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-def _get_easyocr_reader(langs: List[str]):
-    """Lazy-init + cache EasyOCR Reader (load model ~5-15s lần đầu). Nếu init
-    TỪNG lỗi (thiếu lib / tải model timeout) → fast-fail ngay, KHÔNG thử lại
-    đường chậm mỗi lần Run (đỡ lag). Restart app để thử lại sau khi đã sửa."""
-    key = tuple(sorted(set(langs)))
-    r = _EASYOCR_READERS.get(key)
+
+def _first_existing_dir(*cands: str) -> str:
+    """Trả thư mục TỒN TẠI đầu tiên theo thứ tự ưu tiên ('' nếu không có)."""
+    import os
+    for c in cands:
+        if c and os.path.isdir(c):
+            return c
+    return ""
+
+
+_PADDLE_READERS: Dict[tuple, Any] = {}
+_PADDLE_FAILED: Dict[tuple, str] = {}
+
+_PADDLE_LANG = {"eng": "en", "vie": "vi", "jpn": "japan", "kor": "korean",
+                "chi_sim": "ch", "chi_tra": "chinese_cht", "fra": "fr",
+                "deu": "german", "spa": "es", "rus": "ru", "ita": "it",
+                "por": "pt", "tha": "th"}
+
+
+def _ocr_lang_to_paddle(lang: str) -> str:
+    """Map mã Tesseract → mã PaddleOCR (lấy ngôn ngữ đầu nếu 'vie+eng')."""
+    p = str(lang or "en").replace("+", ",").split(",")[0].strip().lower()
+    return _PADDLE_LANG.get(p, p)
+
+
+def _paddle_model_dirs(custom_base: str = ""):
+    """Trả (det_dir, rec_dir, cls_dir) model PaddleOCR để chạy OFFLINE: tìm trong
+    custom_base hoặc <app>/models/paddle, mỗi loại ở subfolder det/rec/cls. Rỗng =
+    chưa có → PaddleOCR sẽ tự tải (cần mạng)."""
+    import os
+    base = _first_existing_dir(custom_base,
+                               os.path.join(_ocr_base_dir(), "models", "paddle"))
+    if not base:
+        return "", "", ""
+
+    def _sub(name):
+        d = os.path.join(base, name)
+        return d if os.path.isdir(d) else ""
+    return _sub("det"), _sub("rec"), _sub("cls")
+
+
+def _paddle_offline_hint(err: Exception, base_dir: str) -> str:
+    import os
+    d = base_dir or os.path.join(_ocr_base_dir(), "models", "paddle")
+    if isinstance(err, (ModuleNotFoundError, ImportError)):
+        return ("Chưa cài PaddleOCR. Chạy: pip install paddlepaddle paddleocr. "
+                f"Lỗi gốc: {err}")
+    s = str(err).lower()
+    if any(k in s for k in ("connection", "max retries", "timed out", "urlerror",
+                            "getaddrinfo", "failed to establish")):
+        return ("PaddleOCR cần tải model nhưng máy không có mạng. Đặt sẵn model vào "
+                f"{d}\\det, {d}\\rec, {d}\\cls (xem models/README.md), hoặc chạy "
+                f"tools/fetch_ocr_models.py --paddle trên máy có mạng. Lỗi gốc: {err}")
+    return f"PaddleOCR init lỗi: {err}"
+
+
+def _get_paddle_reader(plang: str, base_dir: str = "", allow_download: bool = False):
+    """Lazy-init + cache PaddleOCR. Có model local (models/paddle/{det,rec,cls}) →
+    chạy offline; không có → Paddle tự tải (cần mạng). Init lỗi → cache fast-fail."""
+    det, rec, cls = _paddle_model_dirs(base_dir)
+    key = (plang, det, rec, cls)
+    r = _PADDLE_READERS.get(key)
     if r is not None:
         return r
-    if key in _EASYOCR_FAILED:
-        raise RuntimeError(_EASYOCR_FAILED[key])
+    if key in _PADDLE_FAILED:
+        raise RuntimeError(_PADDLE_FAILED[key])
     try:
-        import easyocr
-        r = easyocr.Reader(list(key), gpu=False, verbose=False)
+        from paddleocr import PaddleOCR
+        kw = dict(lang=plang, use_angle_cls=True, show_log=False)
+        if det:
+            kw["det_model_dir"] = det
+        if rec:
+            kw["rec_model_dir"] = rec
+        if cls:
+            kw["cls_model_dir"] = cls
+        try:
+            r = PaddleOCR(**kw)
+        except TypeError:
+            # PaddleOCR 3.x đổi/bỏ vài tham số → thử lại bản tối giản.
+            for bad in ("show_log", "use_angle_cls"):
+                kw.pop(bad, None)
+            r = PaddleOCR(**kw)
     except Exception as e:
-        _EASYOCR_FAILED[key] = f"easyocr init lỗi (đã cache, restart để thử lại): {e}"
-        raise
-    _EASYOCR_READERS[key] = r
+        hint = _paddle_offline_hint(e, base_dir)
+        _PADDLE_FAILED[key] = hint
+        raise RuntimeError(hint)
+    _PADDLE_READERS[key] = r
     return r
 
-def _ensure_tesseract_cmd(custom_path: str = "") -> None:
-    """Trỏ pytesseract tới binary Tesseract khi KHÔNG có trên PATH. Ưu tiên
-    custom_path (param 'tesseract_path'); trống thì auto-dò vị trí cài mặc định
-    — Windows hay cài UB-Mannheim rồi quên thêm PATH nên pytesseract không thấy."""
-    import os, shutil
-    import pytesseract
-    if custom_path and os.path.isfile(custom_path):
-        pytesseract.pytesseract.tesseract_cmd = custom_path
-        return
-    cur = getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract")
-    # Đã trỏ tới file hợp lệ, hoặc có trên PATH → khỏi dò.
-    if (cur and os.path.isfile(cur)) or shutil.which(cur) or shutil.which("tesseract"):
-        return
-    for c in (r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-              r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-              os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
-              "/usr/bin/tesseract", "/usr/local/bin/tesseract",
-              "/opt/homebrew/bin/tesseract"):
-        if c and os.path.isfile(c):
-            pytesseract.pytesseract.tesseract_cmd = c
-            return
+
+def _paddle_lines(result):
+    """Chuẩn hoá kết quả PaddleOCR (2.x .ocr() và 3.x) → list[(pts, text, score)]."""
+    out = []
+    if not result:
+        return out
+    first = result[0] if isinstance(result, (list, tuple)) and result else None
+    if isinstance(first, dict):                      # 3.x: dict có rec_texts
+        texts = first.get("rec_texts") or []
+        scores = first.get("rec_scores") or []
+        polys = (first.get("rec_polys") or first.get("dt_polys")
+                 or first.get("boxes") or [])
+        for i, t in enumerate(texts):
+            out.append((polys[i] if i < len(polys) else None,
+                        t, scores[i] if i < len(scores) else 0.0))
+        return out
+    # 2.x: [ [ [box,(text,score)], ... ] ]  (1 phần tử / ảnh)
+    lines = (result[0] if (isinstance(result, (list, tuple)) and len(result) == 1
+                           and isinstance(result[0], (list, tuple))) else result)
+    if not lines:
+        return out
+    for ln in lines:
+        try:
+            tv = ln[1]
+            text = tv[0] if isinstance(tv, (list, tuple)) else str(tv)
+            score = (float(tv[1]) if isinstance(tv, (list, tuple)) and len(tv) > 1
+                     else 0.0)
+            out.append((ln[0], text, score))
+        except Exception:
+            continue
+    return out
+
+
+def _ocr_num_substr(s: str) -> str:
+    """Cắt đúng phần số trong chuỗi (giữ nguyên định dạng gốc). '' nếu không có."""
+    import re
+    m = re.search(r"[-+]?\d[\d.,]*\d|\d", str(s))
+    return m.group(0) if m else ""
+
+
+def _ocr_parse_number(s):
+    """Parse số thực từ chuỗi, xử lý dấu , và . ngăn cách. None nếu không có."""
+    tok = _ocr_num_substr(s)
+    if not tok:
+        return None
+    if "," in tok and "." in tok:
+        if tok.rfind(",") > tok.rfind("."):      # 1.234,56 → phẩy là thập phân
+            tok = tok.replace(".", "").replace(",", ".")
+        else:                                     # 1,234.56 → chấm là thập phân
+            tok = tok.replace(",", "")
+    elif "," in tok:
+        parts = tok.split(",")
+        if len(parts) == 2 and len(parts[1]) in (1, 2):
+            tok = tok.replace(",", ".")           # 9,00 → 9.00
+        else:
+            tok = tok.replace(",", "")            # 1,234 → 1234
+    try:
+        return float(tok)
+    except ValueError:
+        return None
+
+
+def _ocr_extract_value(boxes, full_text, mode, query, direction, number_only):
+    """Trích giá trị mong muốn từ kết quả OCR.
+
+    • mode='regex'   : search `query` (regex) trên full_text → lấy nhóm () đầu tiên.
+    • mode='keyword' : tìm box chứa `query` (vd 'Total') rồi lấy box giá trị theo
+      `direction` (right/left/below/same_line). Hợp cho hóa đơn/nhãn.
+
+    Trả (value_str, matched_box | None)."""
+    import re
+    mode = (mode or "off").lower()
+    if mode == "off" or not query:
+        return "", None
+
+    # 'regex' THẬT khi query có ký tự đặc biệt regex; nếu gõ chữ thuần (vd
+    # 'Total') thì coi như 'keyword' cho thân thiện (tránh trả về chính từ khóa).
+    if mode == "regex" and re.search(r"[\\^$.|?*+()\[\]{}]", query):
+        try:
+            m = re.search(query, full_text, re.IGNORECASE | re.MULTILINE)
+        except re.error:
+            return "", None
+        if not m:
+            return "", None
+        val = m.group(1) if m.groups() else m.group(0)
+        return (_ocr_num_substr(val) if number_only else val.strip()), None
+
+    # mode == 'keyword' (hoặc 'regex' với query là chữ thuần) — chọn box neo: ưu tiên khớp CHÍNH XÁC → nguyên từ →
+    # chuỗi con (tránh 'Cash' khớp nhầm 'CASH BILL').
+    def _norm(t):
+        return re.sub(r"^\W+|\W+$", "", str(t).lower()).strip()
+    qn = _norm(query)
+    anchor = None
+    for b in boxes:                                  # 1) khớp chính xác
+        if _norm(b["text"]) == qn:
+            anchor = b
+            break
+    if anchor is None and qn:                        # 2) khớp nguyên từ/cụm từ
+        for b in boxes:
+            if re.search(r"\b" + re.escape(qn) + r"\b", b["text"].lower()):
+                anchor = b
+                break
+    if anchor is None:                               # 3) chứa chuỗi con
+        for b in boxes:
+            bt = b["text"].lower().strip()
+            if bt and (qn in bt or bt in qn):
+                anchor = b
+                break
+    if anchor is None:
+        return "", None
+    ax, aw, acx, acy, ah = (anchor["x"], anchor["w"], anchor["cx"],
+                            anchor["cy"], anchor["h"])
+    direction = (direction or "right").lower()
+
+    def same_row(b):
+        return abs(b["cy"] - acy) <= max(ah, b["h"]) * 0.6
+
+    def col_overlap(b):
+        return not (b["x"] > ax + aw or b["x"] + b["w"] < ax)
+
+    if direction == "same_line":
+        row = sorted((b for b in boxes if same_row(b)), key=lambda b: b["cx"])
+        txt = " ".join(b["text"] for b in row)
+        txt = re.sub(re.escape(query), "", txt, flags=re.IGNORECASE).strip(" :=-\t")
+        return (_ocr_num_substr(txt) if number_only else txt.strip()), anchor
+
+    if direction == "left":
+        cands = sorted((b for b in boxes if b is not anchor and same_row(b)
+                        and b["cx"] < acx), key=lambda b: -b["cx"])
+    elif direction == "below":
+        cands = sorted((b for b in boxes if b is not anchor and col_overlap(b)
+                        and b["cy"] > acy), key=lambda b: b["cy"])
+    else:  # right (mặc định)
+        cands = sorted((b for b in boxes if b is not anchor and same_row(b)
+                        and b["cx"] > acx), key=lambda b: b["cx"])
+    if not cands:
+        # value có thể nằm ngay trong box keyword (vd box dính 'Total : 9.00')
+        if number_only:
+            rest = re.sub(re.escape(query), "", anchor["text"], flags=re.IGNORECASE)
+            sub = _ocr_num_substr(rest)
+            if sub:
+                return sub, anchor
+        return "", anchor
+    if number_only:
+        pick = next((b for b in cands if any(c.isdigit() for c in b["text"])),
+                    cands[0])
+        return _ocr_num_substr(pick["text"]), pick
+    pick = cands[0]
+    return pick["text"].strip(), pick
+
 
 def proc_ocr_max(inputs, params):
-    """TOCRMaxTool — Đọc & xác nhận ký tự (OCR).
+    """TOCRMaxTool — Đọc ký tự bằng PaddleOCR + trích giá trị.
 
-    Engines:
-      • tesseract — pytesseract + Tesseract binary + langpack hệ thống
-        (Ubuntu: `sudo apt install tesseract-ocr tesseract-ocr-vie`,
-         pip:    `pip install pytesseract`).
-      • easyocr   — `pip install easyocr` (không cần binary, tốt với
-        diacritics + nền phức tạp; load model lần đầu ~5-15s).
-      • auto      — thử tesseract trước, fallback easyocr nếu fail.
-
-    Preprocess: 'otsu' / 'adaptive' / 'binary' giúp tách chữ khỏi nền
-    phức tạp trước khi đẩy vào engine.
+    Engine: PaddleOCR (chính xác cao, tiếng Việt tốt). Chạy OFFLINE khi có model
+    ở models/paddle/{det,rec,cls}. Trích giá trị: keyword (tìm từ neo → lấy giá
+    trị bên cạnh) hoặc regex; NHIỀU từ khóa cách nhau ',' → mỗi từ 1 object trong
+    cổng 'items' (thêm Output Terminal để lấy number_obj1/value_obj2…).
     """
     img = inputs.get("image")
     if img is None:
-        return {"image": None, "text": "", "pass": False, "confidence": 0.0}
+        return {"image": None, "text": "", "value": "", "number": 0.0,
+                "items": [], "pass": False, "confidence": 0.0}
     gray = _gray(img)
     vis = _bgr(img.copy())
     s = _draw_scale(vis)
 
-    engine = str(params.get("engine", "auto")).lower()
     preprocess = str(params.get("preprocess", "none")).lower()
     invert = bool(params.get("invert", False))
-    lang = params.get("lang", "eng")
-    psm = int(params.get("psm", 6))
+    lang = params.get("lang", "vie")
 
     proc_gray = _ocr_preprocess(gray, preprocess, invert)
 
     text = ""
     conf = 0.0
-    used = ""
-    err = ""
+    boxes = []
 
-    def _run_tesseract():
-        import pytesseract
-        _ensure_tesseract_cmd(str(params.get("tesseract_path", "") or ""))
-        data = pytesseract.image_to_data(
-            proc_gray, lang=lang,
-            config=f"--psm {psm} --oem 3",
-            output_type=pytesseract.Output.DICT)
-        t_acc, c_acc, words = "", 0.0, 0
-        for i, t in enumerate(data["text"]):
-            c = int(data["conf"][i])
-            if c > 0 and t.strip():
-                t_acc += t + " "
-                c_acc += c
-                words += 1
-                x2, y2, w2, h2 = (data["left"][i], data["top"][i],
-                                   data["width"][i], data["height"][i])
-                cv2.rectangle(vis, (x2, y2), (x2 + w2, y2 + h2),
-                              (0, 200, 255), _t(1, s))
-        return t_acc.strip(), c_acc / max(words, 1)
-
-    def _run_easyocr():
-        langs = _ocr_lang_to_easyocr(lang)
-        reader = _get_easyocr_reader(langs)
-        results = reader.readtext(proc_gray)
-        t_acc, c_acc, words = "", 0.0, 0
-        for box, t, c in results:
+    def _run_paddle():
+        plang = _ocr_lang_to_paddle(lang)
+        reader = _get_paddle_reader(
+            plang,
+            base_dir=str(params.get("paddle_dir_path", "") or ""),
+            allow_download=bool(params.get("allow_download", False)))
+        img_in = (proc_gray if getattr(proc_gray, "ndim", 2) == 3
+                  else cv2.cvtColor(proc_gray, cv2.COLOR_GRAY2BGR))
+        try:
+            result = reader.ocr(img_in, cls=True)
+        except TypeError:
+            result = reader.ocr(img_in)              # PaddleOCR 3.x bỏ tham số cls
+        t_acc, c_acc, words, bxs = "", 0.0, 0, []
+        for pts, t, sc in _paddle_lines(result):
             if not str(t).strip():
                 continue
             t_acc += str(t) + " "
-            c_acc += float(c) * 100.0
+            c_acc += float(sc) * 100.0
             words += 1
-            pts = np.array(box, dtype=np.int32)
-            cv2.polylines(vis, [pts], True, (0, 200, 255), _t(1, s))
-        return t_acc.strip(), c_acc / max(words, 1)
-
-    def _explain(e):
-        # Map exception → (is_setup_issue, short human message).
-        # Setup issues = missing module / missing binary → có lệnh cài cụ thể.
-        if isinstance(e, ModuleNotFoundError):
-            mod = str(e).split("'")[1] if "'" in str(e) else "module"
-            return True, f"thiếu '{mod}' (pip install {mod})"
-        name = type(e).__name__
-        msg = str(e)
-        if "TesseractNotFound" in name or "tesseract is not installed" in msg.lower():
-            return True, "thiếu Tesseract binary trên PATH"
-        return False, f"{name}: {msg}"
+            if pts is not None:
+                arr = np.array(pts, dtype=np.int32).reshape(-1, 2)
+                cv2.polylines(vis, [arr], True, (0, 200, 255), _t(1, s))
+                x2, y2 = int(arr[:, 0].min()), int(arr[:, 1].min())
+                w2, h2 = int(arr[:, 0].max()) - x2, int(arr[:, 1].max()) - y2
+            else:
+                x2 = y2 = w2 = h2 = 0
+            bxs.append({"text": str(t).strip(), "x": x2, "y": y2, "w": w2, "h": h2,
+                        "cx": x2 + w2 / 2.0, "cy": y2 + h2 / 2.0,
+                        "conf": float(sc) * 100.0})
+        return t_acc.strip(), c_acc / max(words, 1), bxs
 
     try:
-        if engine == "tesseract":
-            text, conf = _run_tesseract()
-            used = "tesseract"
-        elif engine == "easyocr":
-            text, conf = _run_easyocr()
-            used = "easyocr"
-        else:
-            try:
-                text, conf = _run_tesseract()
-                used = "tesseract"
-            except Exception as e1:
-                try:
-                    text, conf = _run_easyocr()
-                    used = "easyocr"
-                except Exception as e2:
-                    t_setup, t_msg = _explain(e1)
-                    e_setup, e_msg = _explain(e2)
-                    if t_setup and e_setup:
-                        # Cả 2 đều chưa cài → hướng dẫn cài nhanh nhất.
-                        text = ("[OCR chưa cài engine nào] Chạy: "
-                                "pip install easyocr  "
-                                "(khuyên dùng — không cần binary, hỗ trợ tiếng Việt tốt). "
-                                "Hoặc: pip install pytesseract + cài Tesseract binary "
-                                "(Windows: UB-Mannheim installer; Ubuntu: apt install "
-                                "tesseract-ocr tesseract-ocr-vie; macOS: brew install "
-                                "tesseract tesseract-lang).")
-                    else:
-                        text = f"[OCR fail] tesseract: {t_msg} | easyocr: {e_msg}"
-                    conf = 0.0
-    except ModuleNotFoundError as e:
-        mod = (str(e).split("'")[1] if "'" in str(e) else str(e))
-        text = (f"[{mod} chưa cài] pip install {mod}"
-                + ("  (+ Tesseract binary & langpack)" if mod == "pytesseract" else ""))
-        conf = 0.0
+        text, conf, boxes = _run_paddle()
     except Exception as e:
-        _, msg = _explain(e)
-        text = f"[OCR error] {msg}"
+        text = f"[OCR error] {e}"
         conf = 0.0
 
-    expected = params.get("expected_text", "")
-    min_conf = params.get("min_confidence", 60.0)
     has_text = bool(text) and not text.startswith("[")
-    is_pass = ((expected in text if expected else has_text)
-               and conf >= min_conf)
-    print(f"[OCR/{used or 'fail'}] text={text!r} conf={conf:.1f}% "
-          f"{'PASS' if is_pass else 'FAIL'}")
-    return {"image": vis, "text": text, "pass": is_pass, "confidence": conf}
+
+    # ── Trích giá trị; hỗ trợ NHIỀU từ khóa cách nhau ',' (keyword) ──
+    import re as _re
+    ex_mode = str(params.get("extract_mode", "off")).lower()
+    ex_query = str(params.get("extract_query", "") or "")
+    ex_dir = str(params.get("extract_dir", "right"))
+    ex_num = bool(params.get("extract_number_only", False))
+    value, number, items = "", 0.0, []
+    if ex_mode != "off" and ex_query and has_text:
+        # regex có thể chứa dấu ',' → chỉ tách theo ';'/xuống dòng; keyword tách cả ','
+        sep = r"[;\n]" if ex_mode == "regex" else r"[,;\n]"
+        for q in [w.strip() for w in _re.split(sep, ex_query) if w.strip()]:
+            v, vbox = _ocr_extract_value(boxes, text, ex_mode, q, ex_dir, ex_num)
+            n = _ocr_parse_number(v)
+            it = {"keyword": q, "value": v, "found": bool(v),
+                  "number": (n if n is not None else 0.0),
+                  "conf": (float(vbox.get("conf", conf)) if vbox else 0.0)}
+            if vbox is not None:
+                bx, by, bw, bh = vbox["x"], vbox["y"], vbox["w"], vbox["h"]
+                it.update({"x": bx, "y": by, "w": bw, "h": bh,
+                           "cx": vbox["cx"], "cy": vbox["cy"]})
+                y_lab = by - _t(6, s)
+                if y_lab < _t(14, s):
+                    y_lab = by + bh + _t(16, s)
+                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh),
+                              (0, 255, 0), _t(2, s))
+                cv2.putText(vis, f"{q}={v}", (bx, y_lab),
+                            cv2.FONT_HERSHEY_SIMPLEX, _fs(0.55, s),
+                            (0, 255, 0), _t(2, s))
+            items.append(it)
+        if items:
+            value, number = items[0]["value"], items[0]["number"]
+            if items[0]["found"]:
+                conf = items[0]["conf"]
+
+    min_conf = params.get("min_confidence", 60.0)
+    if ex_mode != "off" and items:
+        is_pass = all(it["found"] for it in items) and conf >= min_conf
+    else:
+        is_pass = has_text and conf >= min_conf
+
+    out = {"image": vis, "text": text, "value": value, "number": number,
+           "items": items, "pass": is_pass, "confidence": conf}
+    _apply_extra_terminals(out, items, params)   # cổng động: number_obj1, value_obj2…
+    print(f"[OCR/paddle] value={value!r} items={len(items)} "
+          f"conf={conf:.1f}% {'PASS' if is_pass else 'FAIL'}")
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -4922,38 +5094,46 @@ TOOL_REGISTRY: List[ToolDef] = [
     proc_id_reader, "TIDReaderTool"),
 
   ToolDef("ocr_max","OCR Max","ID & Read",
-    "Nhận dạng & xác nhận ký tự — TOCRMaxTool. "
-    "Engine 'auto' tự fallback tesseract→easyocr. "
-    "Cài: pip install pytesseract (+ tesseract-ocr binary & langpack vie) "
-    "hoặc pip install easyocr (không cần binary, tốt cho tiếng Việt + nền phức tạp).",
+    "Đọc ký tự bằng PaddleOCR (chính xác cao, tiếng Việt tốt). Cài: pip install "
+    "paddlepaddle paddleocr. CHẠY OFFLINE: đặt model vào models/paddle/{det,rec,cls} "
+    "(xem models/README.md). TRÍCH GIÁ TRỊ theo từ khóa (vd 'Total') hoặc regex; "
+    "nhiều từ cách nhau ',' (vd 'Total, Charge') -> cổng items + Output Terminal "
+    "(number_obj1, value_obj2).",
     "#3d0c02","🔤",
     [PortDef("image","image")],
     [PortDef("image","image"),PortDef("text","any"),
+     PortDef("value","any"),PortDef("number","number"),
+     PortDef("items","list"),
      PortDef("pass","bool"),PortDef("confidence","number")],
-    [P("engine","OCR Engine","enum","auto",
-        choices=["auto","tesseract","easyocr"],
-        tooltip="auto: thử tesseract → easyocr. easyocr không cần Tesseract binary; "
-                "tốt cho tiếng Việt + nền phức tạp nhưng nặng (PyTorch, ~5-15s load lần đầu)."),
-     P("lang","Language","str","eng",
-        tooltip="Tesseract code: eng, vie, jpn, kor, chi_sim, 'vie+eng'… "
-                "EasyOCR auto-map: vie→vi, jpn→ja. Tiếng Việt = 'vie'."),
-     P("psm","PSM Mode","int",6,0,13,
-        tooltip="Tesseract Page Segmentation Mode — 6=block, 7=single line, 8=single word, "
-                "11=sparse text (chữ thưa, không layout cố định)."),
-     P("tesseract_path","Tesseract .exe (nếu ngoài PATH)","str","",
-        file_filter="Tesseract (tesseract.exe);;All Files (*)",
-        tooltip="Để TRỐNG = tự dò vị trí cài mặc định. Trỏ tới tesseract.exe nếu "
-                "đã cài Tesseract nhưng chưa thêm vào PATH "
-                "(vd C:\\Program Files\\Tesseract-OCR\\tesseract.exe)."),
+    [P("lang","Language","str","vie",
+        tooltip="Mã ngôn ngữ: vie (tiếng Việt), en, japan, korean, ch… "
+                "Tự map sang mã PaddleOCR."),
+     P("paddle_dir_path","PaddleOCR models folder (offline)","str","",
+        tooltip="Thư mục model PaddleOCR (chứa subfolder det/ rec/ cls/) để chạy "
+                "OFFLINE. TRỐNG = tự dò <app>/models/paddle; chưa có thì Paddle tự "
+                "tải (cần mạng). Lấy model: tools/fetch_ocr_models.py --paddle-only."),
      P("preprocess","Preprocess","enum","none",
         choices=["none","otsu","adaptive","binary"],
-        tooltip="Binarize trước OCR — giúp tách chữ khỏi nền phức tạp / sáng không đều. "
-                "Otsu: ngưỡng tự động; adaptive: sáng cục bộ; binary: ngưỡng 127."),
+        tooltip="Binarize trước OCR — tách chữ khỏi nền phức tạp / sáng không đều."),
      P("invert","Invert","bool",False,
         tooltip="Đảo trắng-đen (cho text sáng trên nền tối)."),
-     P("expected_text","Expected Text","str",""),
+     P("extract_mode","Trích giá trị","enum","off",
+        choices=["off","keyword","regex"],
+        tooltip="off: chỉ đọc text. keyword: tìm từ khóa rồi lấy giá trị bên cạnh — "
+                "NHIỀU từ cách nhau ','. regex: lấy nhóm bắt () đầu tiên."),
+     P("extract_query","Từ khóa / Regex","str","",
+        tooltip="keyword: 'Total' hoặc nhiều 'Total, Charge'. regex: pattern có nhóm "
+                "vd Total\\s*:?\\s*([\\d.,]+). Gõ chữ thuần ở mode regex = keyword."),
+     P("extract_dir","Vị trí giá trị","enum","right",
+        choices=["right","left","below","same_line"],
+        tooltip="(keyword) Giá trị nằm đâu so với từ khóa. Hóa đơn thường để 'right'."),
+     P("extract_number_only","Chỉ lấy số","bool",False,
+        tooltip="Lọc đúng phần số (vd '9.00' từ 'RM 9.00'). Cổng number / number_objN "
+                "luôn cố parse ra số thực."),
      P("min_confidence","Min Confidence (%)","float",60.0,0,100)],
-    proc_ocr_max, "TOCRMaxTool"),
+    proc_ocr_max, "TOCRMaxTool",
+    terminal_fields=["value","number","found","keyword"],
+    terminal_source_key="items"),
 
   # ── MEASUREMENT ─────────────────────────────────────────────────
   ToolDef("line_intersect","Line Intersection","Measurement",
