@@ -322,8 +322,8 @@ class ProductScanner(QObject):
         if not self.plc_ip:
             return
         try:
-            import h3u_h5u
-            if not h3u_h5u.write_data_h3u(self.plc_ip, self.plc_scan_result_addr, value):
+            import cp2e
+            if not cp2e.write_data_cp2e(self.plc_ip, self.plc_scan_result_addr, value):
                 self.error.emit(f"Ghi PLC reg {self.plc_scan_result_addr} thất bại")
         except Exception as exc:
             self.error.emit(f"Lỗi ghi PLC reg {self.plc_scan_result_addr}: {exc}")

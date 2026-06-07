@@ -86,51 +86,52 @@ class SimulatedPLCWorker(PLCWorker):
         })
 
 
-class H3U_PLCWorker(PLCWorker):
-    """Đọc Inovance H3U/H5U qua Modbus TCP (h3u_h5u.py).
+class CP2E_PLCWorker(PLCWorker):
+    """Đọc Omron CP2E qua FINS/TCP (cp2e.py).
 
-    Poll register ``result_addr`` (mặc định 300) — AOI ghi verdict vào đây:
+    Poll DM word ``result_addr`` (mặc định D300) — AOI ghi verdict vào đây:
         1 → OK   → emit {"ok": True,  "result": "PASS"}
         2 → NG   → emit {"ok": False, "result": "FAIL"}
         khác → idle, không emit.
 
-    Chỉ emit khi giá trị thay đổi để tránh push trùng; PLC nên reset
-    register về 0 sau khi app ghi nhận verdict.
+    Chỉ emit khi giá trị thay đổi để tránh push trùng; sau khi app ghi
+    nhận verdict thì ghi lại 0 vào register để PLC bắn lần sau.
     """
 
     def __init__(self, ip: str, poll_interval: float = 0.2,
-                 result_addr: int = 300,
+                 result_addr: int = 300, scan_addr: int = 250,
                  parent: QObject | None = None):
         super().__init__(poll_interval=poll_interval, parent=parent)
         self.ip = ip
         self.result_addr = result_addr
+        self.scan_addr = scan_addr
         self._prev_val = None
 
     def _connect(self):
-        import h3u_h5u
-        h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
-        h3u_h5u.write_data_h3u(self.ip, 250, 2)
-        v = h3u_h5u.read_data_h3u(self.ip, self.result_addr)
+        import cp2e
+        cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
+        cp2e.write_data_cp2e(self.ip, self.scan_addr, 2)
+        v = cp2e.read_data_cp2e(self.ip, self.result_addr)
         if v is None:
-            raise RuntimeError(f"PLC {self.ip} không phản hồi (Modbus TCP)")
+            raise RuntimeError(f"PLC {self.ip} không phản hồi (FINS/TCP)")
         self._prev_val = v
 
     def _disconnect(self):
         try:
-            import h3u_h5u
-            h3u_h5u.close_all()
+            import cp2e
+            cp2e.close_all()
         except Exception:
             pass
 
     def _poll(self):
-        import h3u_h5u
-        val = h3u_h5u.read_data_h3u(self.ip, self.result_addr)
+        import cp2e
+        val = cp2e.read_data_cp2e(self.ip, self.result_addr)
         if val is None or val == self._prev_val:
             return
         self._prev_val = val
         if val == 1:
             self.result.emit({"ok": True, "result": "PASS"})
-            h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
+            cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
         elif val == 2:
             self.result.emit({"ok": False, "result": "FAIL"})
-            h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
+            cp2e.write_data_cp2e(self.ip, self.result_addr, 0)

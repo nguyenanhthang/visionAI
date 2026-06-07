@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 import config
 from login_window import StatusDot, make_brand_pixmap
-from plc_worker import SimulatedPLCWorker, H3U_PLCWorker
+from plc_worker import SimulatedPLCWorker, CP2E_PLCWorker
 from scanner import ProductScanner
 from settings_window import SettingsDialog, gear_icon
 
@@ -187,10 +187,10 @@ class SfcPushWorker(QObject):
 class DataExportWorker(QObject):
     """Append 1 dòng đo sang file .xls log theo ngày khi có verdict PLC.
 
-    - Nguồn: ``<src_dir>/<ngày>.xls`` — lấy cột B→I (8 giá trị) của
-      DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ liệu).
+    - Nguồn: ``<src_dir>/<ngày>.xls`` (hoặc ``.csv``) — lấy cột B→F
+      (5 giá trị) của DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ liệu).
     - Đích:  ``<dst_dir>/<ngày>.xls`` — append dòng
-      ``[times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2, result]``;
+      ``[times, SN, Yellow, Orange, Black, Red, OK NG, result]``;
       header ghi 1 lần ở đầu file.
     - ``times`` = giờ nhận verdict, ``SN`` = mã sản phẩm đang quét,
       ``result`` = "OK" / "NG".
@@ -203,9 +203,9 @@ class DataExportWorker(QObject):
     done     = Signal(bool, str)   # ok, message
     finished = Signal()
 
-    HEADER = ["times", "SN", "L1-1", "L1-2", "L2-1", "L2-2",
-              "L3-1", "L3-2", "L4-1", "L4-2", "result"]
-    _SRC_COLS = range(1, 9)          # cột B..I (0-based: 1..8)
+    HEADER = ["times", "SN", "Yellow", "Orange", "Black", "Red",
+              "OK NG", "result"]
+    _SRC_COLS = range(1, 6)          # cột B..F (0-based: 1..5)
     _file_lock = threading.Lock()    # serialize ghi file đích
     WRITE_RETRIES = 5                # số lần thử ghi lại khi file bị khóa
     RETRY_DELAY   = 0.4              # giây giữa các lần thử
@@ -232,9 +232,9 @@ class DataExportWorker(QObject):
         try:
             now = datetime.now()
             day = now.strftime(self.date_fmt)
-            src = Path(self.src_dir) / f"{day}.xls"
-            if not src.exists():
-                self.done.emit(False, f"File .xls nguồn không tồn tại: {src.name}")
+            src = self._find_source(day)
+            if src is None:
+                self.done.emit(False, f"File nguồn {day}.(xls/csv) không tồn tại")
                 return
 
             measures = self._read_latest_measures(xlrd, src)
@@ -287,14 +287,23 @@ class DataExportWorker(QObject):
             self.finished.emit()
 
     # ── helpers ──────────────────────────────────────────────
+    def _find_source(self, day: str):
+        """Tìm file nguồn theo ngày: ưu tiên .xls, sau đó .csv. None nếu không có."""
+        for ext in (".xls", ".csv"):
+            p = Path(self.src_dir) / f"{day}{ext}"
+            if p.exists():
+                return p
+        return None
+
     @classmethod
     def _read_rows_any(cls, xlrd, path: Path) -> list[list]:
         """Đọc toàn bộ file thành list dòng (mỗi dòng là list cột).
 
-        Máy AOI ghi file đuôi .xls nhưng nội dung thực ra là text
-        tab-separated → xlrd báo 'Expected BOF record'. Vì vậy thử
-        đọc .xls (BIFF) thật trước; nếu không phải, fallback đọc như
-        text tab-separated. Giá trị được chuẩn hoá qua _norm().
+        Máy AOI có thể ghi: (1) .xls (BIFF) thật, (2) đuôi .xls nhưng
+        nội dung text tab-separated → xlrd báo 'Expected BOF record',
+        (3) .csv comma-separated (vd Date Time,Yellow,Orange,...). Vì vậy
+        thử đọc .xls (BIFF) trước; nếu không phải thì fallback đọc như
+        text, tách theo tab HOẶC comma. Giá trị chuẩn hoá qua _norm().
         """
         # 1) Thử đọc .xls (BIFF) thật bằng xlrd
         try:
@@ -306,15 +315,17 @@ class DataExportWorker(QObject):
         except Exception:
             pass  # không phải .xls thật → thử đọc text bên dưới
 
-        # 2) Fallback: đọc như text tab-separated
+        # 2) Fallback: đọc như text, tách theo tab (ưu tiên) hoặc comma.
+        #    utf-8-sig để tự bỏ BOM của file CSV do Windows/Excel xuất.
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
                 rows = []
                 for line in f:
                     line = line.rstrip("\r\n")
                     if line == "":
                         continue
-                    rows.append([cls._norm_text(c) for c in line.split("\t")])
+                    parts = line.split("\t") if "\t" in line else line.split(",")
+                    rows.append([cls._norm_text(c) for c in parts])
                 return rows
         except Exception:
             return []
@@ -706,9 +717,10 @@ class MainWindow(QMainWindow):
             self._set_chip(self.scanner_chip, "Scanner offline", "#7d8590")
             self.sb_scanner.dot.set_color("#7d8590")
         else:
-            self.plc = H3U_PLCWorker(
+            self.plc = CP2E_PLCWorker(
                 ip=config.PLC_IP,
                 result_addr=config.PLC_RESULT_ADDR,
+                scan_addr=config.PLC_SCAN_RESULT_ADDR,
                 poll_interval=1.0 / max(config.PLC_POLL_HZ, 1),
             )
         self.plc.moveToThread(self._plc_thread)
@@ -724,7 +736,7 @@ class MainWindow(QMainWindow):
 
     def _on_plc_connected(self):
         self._set_chip(self.plc_chip, "PLC online", "#2ea043")
-        self.sb_plc.lbl.setText(f"PLC · {config.PLC_IP}:502")
+        self.sb_plc.lbl.setText(f"PLC · {config.PLC_IP}:{getattr(config, 'PLC_PORT', 9600)}")
         self.sb_plc.dot.set_color("#2ea043")
         self._log("PLC connected", "PLC", level="ok")
 

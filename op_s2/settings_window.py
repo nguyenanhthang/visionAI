@@ -203,8 +203,9 @@ class SettingsDialog(QDialog):
         ],
         "PLC": [
             ("PLC_IP",                "PLC IP",                 "str"),
-            ("PLC_RESULT_ADDR",       "Reg đọc verdict (300)",  "int"),
-            ("PLC_SCAN_RESULT_ADDR",  "Reg ghi scan (250)",     "int"),
+            ("PLC_PORT",              "PLC port (FINS 9600)",   "int"),
+            ("PLC_RESULT_ADDR",       "DM đọc verdict (300)",   "int"),
+            ("PLC_SCAN_RESULT_ADDR",  "DM ghi scan (250)",      "int"),
             ("PLC_POLL_HZ",           "Poll Hz",                "int"),
             ("PLC_SIMULATED",         "Chạy giả lập",           "bool"),
         ],
