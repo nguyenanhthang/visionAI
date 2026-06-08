@@ -516,7 +516,8 @@ class MainWindow(QMainWindow):
         self.employee_name = employee_name or "—"
         self._started_at = time.time()
         self._current_sn = ""
-        self._data_jobs = []   # giữ ref (thread, worker) export đang chạy
+        self._jobs = []          # giữ ref (thread, worker) các job đang chạy
+        self._opl_busy = False   # đang upload ảnh OPL?
 
         self.setWindowTitle("Riser cable — Giao diện chính")
         self.setWindowIcon(QIcon(make_brand_pixmap(64)))
@@ -749,6 +750,8 @@ class MainWindow(QMainWindow):
         wl = QVBoxLayout(wrap); wl.setContentsMargins(14, 4, 14, 14); wl.setSpacing(0)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
+        # giữ tối đa 2000 dòng — tránh document phình vô hạn theo thời gian
+        self.log_view.document().setMaximumBlockCount(2000)
         self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.log_view.setStyleSheet(
             "QTextEdit{background:#0a0f14;border:1px solid #2a3540;border-radius:8px;"
@@ -916,29 +919,52 @@ class MainWindow(QMainWindow):
         )
 
     # ── OPL upload (auto trigger sau mỗi PLC verdict) ────────
+    # ── chạy worker 1-lần, tự dọn sạch (tránh rò thread/handle) ──
+    def _run_worker(self, worker, busy_attr: str | None = None):
+        """Chạy worker QObject trên 1 QThread dùng-một-lần rồi DỌN SẠCH.
+
+        Quan trọng: gọi thread.deleteLater() khi xong để giải phóng handle +
+        cửa sổ nội bộ Win32 của QThread. Nếu không, MỖI sản phẩm rò 1 thread
+        → sau ~10 phút cạn USER handle của Windows → app đơ dù CPU/RAM thấp.
+        """
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        job = (thread, worker)
+        self._jobs.append(job)
+
+        def _cleanup():
+            thread.deleteLater()
+            try:
+                self._jobs.remove(job)   # buông ref → worker được GC
+            except ValueError:
+                pass
+            if busy_attr:
+                setattr(self, busy_attr, False)
+
+        thread.finished.connect(_cleanup)
+        thread.start()
+
     def _trigger_opl_upload(self, sn: str, verdict_label: str, root_dir: str):
         if not getattr(config, "SAVE_IMAGE", True):
             self._log("Save image tắt — bỏ qua đẩy ảnh", "SYS")
             return
-        if getattr(self, "_opl_thread", None) is not None:
-            return  # đang chạy, bỏ qua trigger trùng
+        if self._opl_busy:
+            return  # đang upload ảnh, bỏ qua trigger trùng
         self._log(f"Tìm ảnh {verdict_label} mới nhất cho {sn} trong {root_dir}…", "SYS")
 
-        self._opl_thread = QThread(self)
-        self._opl_worker = OplImageWorker(
+        worker = OplImageWorker(
             root_dir=root_dir,
             upload_dir=config.link_post_img,
             sn=sn,
             verdict_label=verdict_label,
         )
-        self._opl_worker.moveToThread(self._opl_thread)
-        self._opl_thread.started.connect(self._opl_worker.run)
-        self._opl_worker.image_ready.connect(self._on_opl_image_ready)
-        self._opl_worker.upload_done.connect(self._on_opl_upload_done)
-        self._opl_worker.error.connect(lambda e: self._log(e, "SYS", level="err"))
-        self._opl_worker.finished.connect(self._on_opl_finished)
-        self._opl_worker.finished.connect(self._opl_thread.quit)
-        self._opl_thread.start()
+        worker.image_ready.connect(self._on_opl_image_ready)
+        worker.upload_done.connect(self._on_opl_upload_done)
+        worker.error.connect(lambda e: self._log(e, "SYS", level="err"))
+        self._opl_busy = True
+        self._run_worker(worker, busy_attr="_opl_busy")
 
     def _on_opl_image_ready(self, name: str, _qimg: QImage):
         self._log(f"Đã load ảnh: {name}", "SYS", level="ok")
@@ -946,10 +972,6 @@ class MainWindow(QMainWindow):
     def _on_opl_upload_done(self, ok: bool, msg: str):
         level = "ok" if ok else "err"
         self._log(f"Upload: {msg}", "SYS", level=level)
-
-    def _on_opl_finished(self):
-        self._opl_thread = None
-        self._opl_worker = None
 
     # ── Data export .xls (auto trigger sau mỗi PLC verdict) ───
     def _trigger_data_export(self, sn: str, result: str = ""):
@@ -960,7 +982,6 @@ class MainWindow(QMainWindow):
         dst = getattr(config, "DATA_EXPORT_DIR", "")
         if not src or not dst:
             return  # chưa cấu hình folder → bỏ qua
-        thread = QThread(self)
         worker = DataExportWorker(
             src_dir=src,
             dst_dir=dst,
@@ -968,21 +989,8 @@ class MainWindow(QMainWindow):
             result=result,
             date_fmt=getattr(config, "DATA_FILE_DATEFMT", "%Y%m%d"),
         )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
         worker.done.connect(self._on_data_export_done)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        # Dọn job khỏi danh sách KHI nó kết thúc — chỉ so sánh identity,
-        # không gọi .isRunning() lên thread đã bị deleteLater (sẽ RuntimeError
-        # và làm chết các lần export sau).
-        thread.finished.connect(lambda t=thread: self._cleanup_data_job(t))
-        self._data_jobs.append((thread, worker))
-        thread.start()
-
-    def _cleanup_data_job(self, thread):
-        self._data_jobs = [(t, w) for (t, w) in self._data_jobs if t is not thread]
+        self._run_worker(worker)
 
     def _on_data_export_done(self, ok: bool, msg: str):
         self._log(msg, "SYS", level=("ok" if ok else "err"))
@@ -1033,22 +1041,14 @@ class MainWindow(QMainWindow):
             "empNo": self.employee_id,
             "result": result,
         }
-        thread = QThread(self)
         worker = SfcPushWorker(
             config.link_sfc, payload,
             timeout=config.API_REQUEST_TIMEOUT,
             src_dir=getattr(config, "DATA_SRC_DIR", ""),
             date_fmt=getattr(config, "DATA_FILE_DATEFMT", "%Y%m%d"),
         )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
         worker.done.connect(self._on_sfc_done)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        self._sfc_jobs = getattr(self, "_sfc_jobs", [])
-        self._sfc_jobs.append((thread, worker))
-        thread.start()
+        self._run_worker(worker)
 
     def _on_sfc_done(self, ok: bool, msg: str):
         self._log(msg, "SYS", level=("ok" if ok else "err"))
@@ -1106,6 +1106,13 @@ class MainWindow(QMainWindow):
             self._plc_thread.wait(2000)
         except Exception:
             pass
+        # dọn các job 1-lần còn chạy (SFC/OPL/export)
+        for thread, _worker in list(self._jobs):
+            try:
+                thread.quit()
+                thread.wait(1500)
+            except Exception:
+                pass
         super().closeEvent(e)
 
 
