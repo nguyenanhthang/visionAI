@@ -53,6 +53,114 @@ def safe_filename(name: str, fallback: str = "UNKNOWN") -> str:
     return cleaned or fallback
 
 
+# ── đọc số đo từ file nguồn (.xls/.csv) — dùng chung SFC + data export ──
+SRC_MEASURE_COLS = range(1, 6)   # cột B..F: Yellow, Orange, Black, Red, OK NG
+
+
+def _norm(v):
+    """xls trả số dạng float — số nguyên thì bỏ đuôi '.0'; None → ''."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
+
+def _norm_text(v):
+    """Chuẩn hoá 1 ô đọc từ text: chuỗi số → int/float, còn lại giữ str."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s == "":
+        return ""
+    try:
+        f = float(s)
+        return int(f) if f.is_integer() else f
+    except ValueError:
+        return s
+
+
+def find_source_file(src_dir: str, day: str):
+    """Tìm file nguồn theo ngày: ưu tiên .xls, sau đó .csv. None nếu không có."""
+    if not src_dir:
+        return None
+    for ext in (".xls", ".csv"):
+        p = Path(src_dir) / f"{day}{ext}"
+        if p.exists():
+            return p
+    return None
+
+
+def read_source_rows(path: Path) -> list:
+    """Đọc file nguồn thành list dòng (mỗi dòng = list cột).
+
+    Hỗ trợ: (1) .xls (BIFF) thật, (2) đuôi .xls nhưng nội dung text
+    tab-separated, (3) .csv comma-separated. Thử BIFF trước; không phải
+    thì đọc text, tách theo tab HOẶC comma (utf-8-sig để bỏ BOM).
+    """
+    try:
+        import xlrd
+        try:
+            sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
+            return [
+                [_norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
+                for r in range(sheet.nrows)
+            ]
+        except Exception:
+            pass  # không phải .xls BIFF → đọc text bên dưới
+    except ImportError:
+        pass
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
+            rows = []
+            for line in f:
+                line = line.rstrip("\r\n")
+                if line == "":
+                    continue
+                parts = line.split("\t") if "\t" in line else line.split(",")
+                rows.append([_norm_text(c) for c in parts])
+            return rows
+    except Exception:
+        return []
+
+
+def latest_measures(path: Path, cols=SRC_MEASURE_COLS):
+    """Cột `cols` của dòng dữ liệu cuối còn dữ liệu. None nếu file rỗng."""
+    for cells in reversed(read_source_rows(path)):
+        if any(v != "" for v in cells):
+            return [cells[c] if c < len(cells) else "" for c in cols]
+    return None
+
+
+def read_latest_measures(src_dir: str, date_fmt: str = "%Y%m%d",
+                         cols=SRC_MEASURE_COLS):
+    """Tìm file nguồn theo ngày hôm nay rồi lấy số đo của dòng mới nhất."""
+    src = find_source_file(src_dir, datetime.now().strftime(date_fmt or "%Y%m%d"))
+    return latest_measures(src, cols) if src else None
+
+
+def _fmt_mm(v) -> str:
+    """Định dạng 1 giá trị đo kèm đơn vị mm (3 số lẻ)."""
+    try:
+        return f"{float(v):.3f}mm"
+    except (TypeError, ValueError):
+        s = str(v).strip()
+        return f"{s}mm" if s else ""
+
+
+def format_timer(measures) -> str:
+    """Chuỗi thông số cho payload SFC từ [Yellow, Orange, Black, Red, …].
+
+    Trả ``'Black: ..mm; Orange: ..mm; Red: ..mm; Yellow: ..mm'`` (đúng thứ
+    tự yêu cầu). measures thiếu/rỗng → ''.
+    """
+    if not measures or len(measures) < 4:
+        return ""
+    yellow, orange, black, red = measures[0], measures[1], measures[2], measures[3]
+    return (f"Black: {_fmt_mm(black)}; Orange: {_fmt_mm(orange)}; "
+            f"Red: {_fmt_mm(red)}; Yellow: {_fmt_mm(yellow)}")
+
+
 # ── tiny widgets ─────────────────────────────────────────────────
 class StatusChip(QFrame):
     """Pill ngang ở topbar: ● label."""
@@ -162,24 +270,38 @@ class OplImageWorker(QObject):
 class SfcPushWorker(QObject):
     """POST kết quả verdict lên MES clipThroughStation.
 
-    Payload: {sn, stationName, empNo, result}. Response code=200 → ok,
-    khác → log lỗi (vd 406 "下一制程为 EOL-S").
+    Payload: {sn, stationName, empNo, result}. Nếu có ``src_dir`` thì đọc
+    thêm số đo (Yellow/Orange/Black/Red) của dòng mới nhất trong file
+    ``<src_dir>/<ngày>.(xls|csv)`` rồi chèn field ``timer`` dạng
+    ``"Black: 0.522mm; Orange: 0.526mm; Red: 0.529mm; Yellow: 0.624mm"``.
+    Response code=200 → ok, khác → log lỗi (vd 406 "下一制程为 EOL-S").
     """
 
     done     = Signal(bool, str)   # ok, message
     finished = Signal()
 
     def __init__(self, url: str, payload: dict, timeout: float = 5.0,
+                 src_dir: str = "", date_fmt: str = "%Y%m%d",
                  parent: QObject | None = None):
         super().__init__(parent)
         self.url = url
         self.payload = payload
         self.timeout = timeout
+        self.src_dir = src_dir
+        self.date_fmt = date_fmt or "%Y%m%d"
 
     @Slot()
     def run(self):
         sn = self.payload.get("sn", "")
         result = self.payload.get("result", "")
+        # Chèn thông số đo đọc từ CSV/xls vào payload (field "timer")
+        if self.src_dir:
+            try:
+                timer = format_timer(read_latest_measures(self.src_dir, self.date_fmt))
+                if timer:
+                    self.payload["timer"] = timer
+            except Exception:
+                pass
         try:
             import requests
             r = requests.post(self.url, json=self.payload, timeout=self.timeout)
@@ -220,7 +342,6 @@ class DataExportWorker(QObject):
 
     HEADER = ["times", "SN", "Yellow", "Orange", "Black", "Red",
               "OK NG", "result"]
-    _SRC_COLS = range(1, 6)          # cột B..F (0-based: 1..5)
     _file_lock = threading.Lock()    # serialize ghi file đích
     WRITE_RETRIES = 5                # số lần thử ghi lại khi file bị khóa
     RETRY_DELAY   = 0.4              # giây giữa các lần thử
@@ -247,12 +368,12 @@ class DataExportWorker(QObject):
         try:
             now = datetime.now()
             day = now.strftime(self.date_fmt)
-            src = self._find_source(day)
+            src = find_source_file(self.src_dir, day)
             if src is None:
                 self.done.emit(False, f"File nguồn {day}.(xls/csv) không tồn tại")
                 return
 
-            measures = self._read_latest_measures(xlrd, src)
+            measures = latest_measures(src)
             if measures is None:
                 self.done.emit(False, f"{src.name} không có dòng dữ liệu")
                 return
@@ -302,58 +423,6 @@ class DataExportWorker(QObject):
             self.finished.emit()
 
     # ── helpers ──────────────────────────────────────────────
-    def _find_source(self, day: str):
-        """Tìm file nguồn theo ngày: ưu tiên .xls, sau đó .csv. None nếu không có."""
-        for ext in (".xls", ".csv"):
-            p = Path(self.src_dir) / f"{day}{ext}"
-            if p.exists():
-                return p
-        return None
-
-    @classmethod
-    def _read_rows_any(cls, xlrd, path: Path) -> list[list]:
-        """Đọc toàn bộ file thành list dòng (mỗi dòng là list cột).
-
-        Máy AOI có thể ghi: (1) .xls (BIFF) thật, (2) đuôi .xls nhưng
-        nội dung text tab-separated → xlrd báo 'Expected BOF record',
-        (3) .csv comma-separated (vd Date Time,Yellow,Orange,...). Vì vậy
-        thử đọc .xls (BIFF) trước; nếu không phải thì fallback đọc như
-        text, tách theo tab HOẶC comma. Giá trị chuẩn hoá qua _norm().
-        """
-        # 1) Thử đọc .xls (BIFF) thật bằng xlrd
-        try:
-            sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
-            return [
-                [cls._norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
-                for r in range(sheet.nrows)
-            ]
-        except Exception:
-            pass  # không phải .xls thật → thử đọc text bên dưới
-
-        # 2) Fallback: đọc như text, tách theo tab (ưu tiên) hoặc comma.
-        #    utf-8-sig để tự bỏ BOM của file CSV do Windows/Excel xuất.
-        try:
-            with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
-                rows = []
-                for line in f:
-                    line = line.rstrip("\r\n")
-                    if line == "":
-                        continue
-                    parts = line.split("\t") if "\t" in line else line.split(",")
-                    rows.append([cls._norm_text(c) for c in parts])
-                return rows
-        except Exception:
-            return []
-
-    @classmethod
-    def _read_latest_measures(cls, xlrd, path: Path):
-        """Cột B→I của dòng cuối còn dữ liệu. None nếu file rỗng."""
-        rows = cls._read_rows_any(xlrd, path)
-        for cells in reversed(rows):
-            if any(v != "" for v in cells):
-                return [cells[c] if c < len(cells) else "" for c in cls._SRC_COLS]
-        return None
-
     @classmethod
     def _read_existing(cls, xlrd, path: Path) -> list[list]:
         """Đọc lại các dòng dữ liệu cũ của file ĐÍCH (bỏ header).
@@ -366,7 +435,7 @@ class DataExportWorker(QObject):
         sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
         out = []
         for r in range(sheet.nrows):
-            vals = [cls._norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
+            vals = [_norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
             if r == 0 and vals[:1] == [cls.HEADER[0]]:
                 continue  # bỏ header cũ — sẽ ghi lại
             if any(v != "" for v in vals):
@@ -435,29 +504,6 @@ class DataExportWorker(QObject):
                 path.unlink()
         except Exception:
             pass
-
-    @staticmethod
-    def _norm(v):
-        """xls trả số dạng float — số nguyên thì bỏ đuôi '.0'; None → ''."""
-        if v is None:
-            return ""
-        if isinstance(v, float) and v.is_integer():
-            return int(v)
-        return v
-
-    @staticmethod
-    def _norm_text(v):
-        """Chuẩn hoá 1 ô đọc từ text: chuỗi số → int/float, còn lại giữ str."""
-        if v is None:
-            return ""
-        s = str(v).strip()
-        if s == "":
-            return ""
-        try:
-            f = float(s)
-            return int(f) if f.is_integer() else f
-        except ValueError:
-            return s
 
 
 # ── main window ──────────────────────────────────────────────────
@@ -920,8 +966,12 @@ class MainWindow(QMainWindow):
             "result": result,
         }
         thread = QThread(self)
-        worker = SfcPushWorker(config.link_sfc, payload,
-                               timeout=config.API_REQUEST_TIMEOUT)
+        worker = SfcPushWorker(
+            config.link_sfc, payload,
+            timeout=config.API_REQUEST_TIMEOUT,
+            src_dir=getattr(config, "DATA_SRC_DIR", ""),
+            date_fmt=getattr(config, "DATA_FILE_DATEFMT", "%Y%m%d"),
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.done.connect(self._on_sfc_done)
