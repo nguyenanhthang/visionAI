@@ -15,6 +15,7 @@ Layout giống mockup HTML:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import time
@@ -36,6 +37,20 @@ from login_window import StatusDot, make_brand_pixmap
 from plc_worker import SimulatedPLCWorker, CP2E_PLCWorker
 from scanner import ProductScanner
 from settings_window import SettingsDialog, gear_icon
+
+
+# ── helpers ──────────────────────────────────────────────────────
+_ILLEGAL_FN = re.compile(r'[\x00-\x1f<>:"/\\|?*]')   # ký tự cấm trong tên file Windows
+
+
+def safe_filename(name: str, fallback: str = "UNKNOWN") -> str:
+    """Bỏ ký tự điều khiển (\\r, \\n…) + ký tự cấm để tên file không lỗi.
+
+    Phòng khi mã quét lọt ký tự lạ (vd \\r làm Windows báo Errno 22 lúc
+    copy ảnh). Rỗng sau khi làm sạch → trả ``fallback``.
+    """
+    cleaned = _ILLEGAL_FN.sub("", str(name)).strip(" .")
+    return cleaned or fallback
 
 
 # ── tiny widgets ─────────────────────────────────────────────────
@@ -87,8 +102,8 @@ class OplImageWorker(QObject):
         super().__init__(parent)
         self.root_dir = root_dir
         self.upload_dir = upload_dir
-        self.sn = sn or "UNKNOWN"
-        self.verdict_label = verdict_label or "Unknown"
+        self.sn = safe_filename(sn, "UNKNOWN")
+        self.verdict_label = safe_filename(verdict_label, "Unknown")
 
     @Slot()
     def run(self):
