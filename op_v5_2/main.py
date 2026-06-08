@@ -14,7 +14,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 import config
-import cp2e
+import h3u_h5u
 from login_window import LoginWindow
 from main_window import MainWindow
 from settings_window import load_settings_overrides
@@ -44,7 +44,7 @@ def load_stylesheet() -> str:
 
 def main():
     load_settings_overrides()  # patch config từ settings.json (nếu có)
-    cp2e.configure(port=getattr(config, "PLC_PORT", 9600))  # cổng FINS/TCP CP2E
+    h3u_h5u.configure(port=getattr(config, "PLC_PORT", 502))  # cổng Modbus TCP
 
     app = QApplication(sys.argv)
     app.setApplicationName("Riser cable")

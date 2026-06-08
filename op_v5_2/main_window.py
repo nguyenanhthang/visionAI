@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 
 import config
 from login_window import StatusDot, make_brand_pixmap
-from plc_worker import SimulatedPLCWorker, CP2E_PLCWorker
+from plc_worker import SimulatedPLCWorker, H3U_PLCWorker
 from scanner import ProductScanner
 from settings_window import SettingsDialog, gear_icon
 
@@ -772,7 +772,7 @@ class MainWindow(QMainWindow):
             self._set_chip(self.scanner_chip, "Scanner offline", "#7d8590")
             self.sb_scanner.dot.set_color("#7d8590")
         else:
-            self.plc = CP2E_PLCWorker(
+            self.plc = H3U_PLCWorker(
                 ip=config.PLC_IP,
                 result_addr=config.PLC_RESULT_ADDR,
                 scan_addr=config.PLC_SCAN_RESULT_ADDR,
@@ -793,7 +793,7 @@ class MainWindow(QMainWindow):
 
     def _on_plc_connected(self):
         self._set_chip(self.plc_chip, "PLC online", "#2ea043")
-        self.sb_plc.lbl.setText(f"PLC · {config.PLC_IP}:{getattr(config, 'PLC_PORT', 9600)}")
+        self.sb_plc.lbl.setText(f"PLC · {config.PLC_IP}:{getattr(config, 'PLC_PORT', 502)}")
         self.sb_plc.dot.set_color("#2ea043")
         self._log("PLC connected", "PLC", level="ok")
 
