@@ -20,6 +20,7 @@ import shutil
 import threading
 import time
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QSize, QThread, QTimer, Signal, Slot
@@ -543,11 +544,58 @@ class MainWindow(QMainWindow):
         bl.setContentsMargins(14, 14, 14, 14); bl.setSpacing(14)
         body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        bl.addWidget(self._build_controls(), 0)
         bl.addWidget(self._build_info_card(), 0)
         bl.addWidget(self._build_log_card(), 1)
 
         root.addWidget(body, 1)
         root.addWidget(self._build_statusbar())
+
+    # ── controls (toggle bật/tắt) ────────────────────────────
+    _TOGGLE_QSS = (
+        "QPushButton{background:#101820;color:#7d8590;border:1px solid #2a3540;"
+        "border-radius:8px;padding:6px 14px;font-weight:600;}"
+        "QPushButton:hover{border-color:#3fb6f0;}"
+        "QPushButton:checked{background:#13351f;color:#56d364;border-color:#2ea043;}"
+    )
+
+    def _build_controls(self) -> QWidget:
+        card = QFrame(); card.setObjectName("Card")
+        card.setStyleSheet(
+            "QFrame#Card{background:#141b22;border:1px solid #2a3540;border-radius:12px;}"
+            "QLabel{background:transparent;}"
+        )
+        lay = QHBoxLayout(card)
+        lay.setContentsMargins(14, 10, 14, 10); lay.setSpacing(10)
+        title = QLabel("ĐIỀU KHIỂN")
+        title.setStyleSheet("color:#9aa4ae;font-size:11px;font-weight:700;letter-spacing:3px;")
+        lay.addWidget(title); lay.addStretch(1)
+        self.scan_toggle  = self._make_toggle("Quét SN", "SCAN_ENABLED")
+        self.excel_toggle = self._make_toggle("Lưu Excel", "SAVE_EXCEL")
+        self.image_toggle = self._make_toggle("Lưu ảnh", "SAVE_IMAGE")
+        for b in (self.scan_toggle, self.excel_toggle, self.image_toggle):
+            lay.addWidget(b)
+        return card
+
+    def _make_toggle(self, label: str, attr: str) -> QPushButton:
+        btn = QPushButton()
+        btn.setCheckable(True)
+        on = bool(getattr(config, attr, True))
+        btn.setChecked(on)
+        btn.setText(f"{label}: {'ON' if on else 'OFF'}")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setMinimumHeight(32)
+        btn.setStyleSheet(self._TOGGLE_QSS)
+        btn.toggled.connect(
+            lambda c, b=btn, a=attr, l=label: self._on_toggle(b, a, l, c))
+        return btn
+
+    def _on_toggle(self, btn: QPushButton, attr: str, label: str, checked: bool):
+        setattr(config, attr, checked)
+        btn.setText(f"{label}: {'ON' if checked else 'OFF'}")
+        self._log(f"{label} {'BẬT' if checked else 'TẮT'}", "SYS",
+                  level=("ok" if checked else "warn"))
 
     # ── topbar ───────────────────────────────────────────────
     def _build_topbar(self) -> QWidget:
@@ -856,7 +904,8 @@ class MainWindow(QMainWindow):
 
     # ── OPL upload (auto trigger sau mỗi PLC verdict) ────────
     def _trigger_opl_upload(self, sn: str, verdict_label: str, root_dir: str):
-        if not getattr(config, "ON_OFF_SFC", True):
+        if not getattr(config, "SAVE_IMAGE", True):
+            self._log("Save image tắt — bỏ qua đẩy ảnh", "SYS")
             return
         if getattr(self, "_opl_thread", None) is not None:
             return  # đang chạy, bỏ qua trigger trùng
@@ -891,6 +940,9 @@ class MainWindow(QMainWindow):
 
     # ── Data export .xls (auto trigger sau mỗi PLC verdict) ───
     def _trigger_data_export(self, sn: str, result: str = ""):
+        if not getattr(config, "SAVE_EXCEL", True):
+            self._log("Save Excel tắt — bỏ qua ghi .xls", "SYS")
+            return
         src = getattr(config, "DATA_SRC_DIR", "")
         dst = getattr(config, "DATA_EXPORT_DIR", "")
         if not src or not dst:
@@ -951,6 +1003,9 @@ class MainWindow(QMainWindow):
             self._push_sfc_result(pid, result)
             self._trigger_opl_upload(pid, verdict_label, root_dir)
             self._trigger_data_export(pid, verdict)
+        # xử lý xong tín hiệu D300 → xoá SN, chờ lần quét kế tiếp
+        self._current_sn = ""
+        self._product_lbl.setText("—")
 
     # ── SFC clipThroughStation push ──────────────────────────
     def _push_sfc_result(self, sn: str, result: str):
@@ -1006,13 +1061,19 @@ class MainWindow(QMainWindow):
         ts = datetime.now().strftime("%H:%M:%S")
         tcol = tag_colors.get(tag, "#79c0ff")
         mcol = msg_colors.get(level, "#e6edf3")
-        det = f" <span style='color:#7d8590'>· {detail}</span>" if detail else ""
+        # escape: message/detail (vd lỗi API, repr exception) có thể chứa
+        # < > & làm vỡ HTML → khi đó log không hiển thị/không cuộn được.
+        det = (f" <span style='color:#7d8590'>· {escape(str(detail))}</span>"
+               if detail else "")
         html = (
             f"<span style='color:#5b6772;'>[{ts}]</span>&nbsp;"
-            f"<span style='color:{tcol};font-weight:700;'>{tag}</span>&nbsp;&nbsp;"
-            f"<span style='color:{mcol}'>{message}</span>{det}"
+            f"<span style='color:{tcol};font-weight:700;'>{escape(str(tag))}</span>&nbsp;&nbsp;"
+            f"<span style='color:{mcol}'>{escape(str(message))}</span>{det}"
         )
         self.log_view.append(html)
+        # luôn cuộn xuống dòng mới nhất (kể cả khi log lỗi dồn dập)
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     # ── chip helper ──────────────────────────────────────────
     def _set_chip(self, chip: StatusChip, text: str, color: str):

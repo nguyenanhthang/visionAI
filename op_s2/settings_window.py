@@ -201,11 +201,17 @@ class SettingsDialog(QDialog):
             ("PRODUCT_READ_SIZE","Read size SP",        "int"),
             ("Staff",            "Mã NV mặc định",      "str"),
         ],
+        "Tính năng": [
+            ("SCAN_ENABLED", "Bật quét SN",    "bool"),
+            ("SAVE_EXCEL",   "Lưu file Excel", "bool"),
+            ("SAVE_IMAGE",   "Lưu / đẩy ảnh",  "bool"),
+        ],
         "PLC": [
             ("PLC_IP",                "PLC IP",                 "str"),
             ("PLC_PORT",              "PLC port (FINS 9600)",   "int"),
             ("PLC_RESULT_ADDR",       "DM đọc verdict (300)",   "int"),
             ("PLC_SCAN_RESULT_ADDR",  "DM ghi scan (250)",      "int"),
+            ("PLC_SCAN_CHECK_ADDR",   "DM check đã quét (500)", "int"),
             ("PLC_POLL_HZ",           "Poll Hz",                "int"),
             ("PLC_SIMULATED",         "Chạy giả lập",           "bool"),
         ],

@@ -9,6 +9,7 @@ Scanner chạy trên QThread riêng, emit Signal → slot trên main thread.
 from __future__ import annotations
 
 from datetime import datetime
+from html import escape
 
 from PySide6.QtCore import Qt, QObject, QSize, QThread, Signal, Slot
 from PySide6.QtGui import QIcon, QPainter, QColor, QBrush, QPen, QPixmap, QFont
@@ -280,9 +281,11 @@ class LoginWindow(QDialog):
         col = colors.get(kind, "#e6edf3")
         html = (
             f"<span style='color:#5b6772;'>[{ts}]</span> "
-            f"<span style='color:{col};'>{message}</span>"
+            f"<span style='color:{col};'>{escape(str(message))}</span>"
         )
         self.log.append(html)
+        sb = self.log.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     # ── scanner slots ────────────────────────────────────────
     def _on_scanner_connected(self, port: str):

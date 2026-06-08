@@ -12,6 +12,11 @@ SCANNER_TIMEOUT    = 0.5     # giây - càng nhỏ stop càng nhanh
 PRODUCT_READ_SIZE  = 64      # số byte tối đa cho 1 lần đọc mã sản phẩm
 Staff              = ''  # mã NV mặc định
 
+# ── Bật/tắt tính năng (toggle ở giao diện chính) ───────────
+SCAN_ENABLED = True    # bật quét SN sản phẩm (bắt buộc quét trước khi qua trạm)
+SAVE_EXCEL   = True    # bật lưu dòng đo sang file .xls
+SAVE_IMAGE   = True    # bật lưu/đẩy ảnh OPL
+
 # ── API xác thực nhân viên ─────────────────────────────────
 # Để rỗng → fallback dùng employees.py local.
 API_TOKEN_URL           = ""
@@ -23,6 +28,7 @@ PLC_IP                = '192.168.250.1'  # IP PLC
 PLC_PORT              = 9600             # cổng FINS/TCP (Omron mặc định 9600)
 PLC_RESULT_ADDR       = 300              # DM word AOI ghi verdict: 1=OK, 2=NG  (D300)
 PLC_SCAN_RESULT_ADDR  = 250              # DM word Scanner ghi sau khi check SFC (D250)
+PLC_SCAN_CHECK_ADDR   = 500              # DM PLC bật =1 để yêu cầu kiểm tra "đã quét SN chưa" (D500)
 PLC_POLL_HZ           = 5                # số lần poll PLC / giây
 PLC_SIMULATED         = False            # True → chạy giả lập, False → đọc PLC thật
 # ── Station / SFC ──────────────────────────────────────────
