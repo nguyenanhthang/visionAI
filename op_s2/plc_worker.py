@@ -25,6 +25,7 @@ class PLCWorker(QObject):
     fatal        = Signal(str)
     result       = Signal(dict)   # {"product_id": ..., "ok": bool, ...}
     image        = Signal(object) # PIL.Image hoặc QImage
+    scan_check   = Signal()       # PLC yêu cầu kiểm tra "đã quét SN chưa" (D500 lên 1)
     finished     = Signal()
 
     def __init__(self, poll_interval: float = 0.2, parent: QObject | None = None):
@@ -100,12 +101,15 @@ class CP2E_PLCWorker(PLCWorker):
 
     def __init__(self, ip: str, poll_interval: float = 0.2,
                  result_addr: int = 300, scan_addr: int = 250,
+                 scan_check_addr: int = 500,
                  parent: QObject | None = None):
         super().__init__(poll_interval=poll_interval, parent=parent)
         self.ip = ip
         self.result_addr = result_addr
         self.scan_addr = scan_addr
+        self.scan_check_addr = scan_check_addr
         self._prev_val = None
+        self._prev_scan_chk = 0
 
     def _connect(self):
         import cp2e
@@ -115,6 +119,8 @@ class CP2E_PLCWorker(PLCWorker):
         if v is None:
             raise RuntimeError(f"PLC {self.ip} không phản hồi (FINS/TCP)")
         self._prev_val = v
+        # init D500 để không bắn "chưa quét" ngay lúc khởi động nếu đang =1
+        self._prev_scan_chk = cp2e.read_data_cp2e(self.ip, self.scan_check_addr) or 0
 
     def _disconnect(self):
         try:
@@ -125,13 +131,19 @@ class CP2E_PLCWorker(PLCWorker):
 
     def _poll(self):
         import cp2e
+        # 1) verdict D300
         val = cp2e.read_data_cp2e(self.ip, self.result_addr)
-        if val is None or val == self._prev_val:
-            return
-        self._prev_val = val
-        if val == 1:
-            self.result.emit({"ok": True, "result": "PASS"})
-            cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
-        elif val == 2:
-            self.result.emit({"ok": False, "result": "FAIL"})
-            cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
+        if val is not None and val != self._prev_val:
+            self._prev_val = val
+            if val == 1:
+                self.result.emit({"ok": True, "result": "PASS"})
+                cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
+            elif val == 2:
+                self.result.emit({"ok": False, "result": "FAIL"})
+                cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
+        # 2) check "đã quét SN chưa" D500 — chỉ bắn ở sườn lên 0→1
+        chk = cp2e.read_data_cp2e(self.ip, self.scan_check_addr)
+        if chk is not None:
+            if chk == 1 and self._prev_scan_chk != 1:
+                self.scan_check.emit()
+            self._prev_scan_chk = chk

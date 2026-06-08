@@ -260,23 +260,23 @@ class ProductScanner(QObject):
             self.error.emit(f"Mở cổng {self.port} thất bại: {exc}")
             self.finished.emit()
             return
-        CHECK = not getattr(config, "ON_OFF_SFC", True)
-        print(CHECK)
         self.connected.emit(self.port)
         try:
             while not self._stop:
-                # if CHECK:
-                #     self._write_plc(1)
-                #     time.sleep(0.03)
-                # else:
-                code = self._read_code()
-                if not code:
-                    continue
-                self.scanned.emit(code)
-                ok = self._check_api(code)
-                plc_value = 1 if ok else 2
-                self._write_plc(plc_value)
-                self.verdict.emit(code, ok, plc_value)
+                # Tắt quét SN (toggle "Quét SN" OFF) → tự ghi D250=1 (pass),
+                # line chạy không cần quét tay.
+                if not getattr(config, "SCAN_ENABLED", True):
+                    self._write_plc(1)
+                    time.sleep(0.03)
+                else:
+                    code = self._read_code()
+                    if not code:
+                        continue
+                    self.scanned.emit(code)
+                    ok = self._check_api(code)
+                    plc_value = 1 if ok else 2
+                    self._write_plc(plc_value)
+                    self.verdict.emit(code, ok, plc_value)
         finally:
             try:
                 if self._serial is not None:

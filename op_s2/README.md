@@ -50,8 +50,17 @@ PLC_IP               = '192.168.250.1'
 PLC_PORT             = 9600            # cổng FINS/TCP (Omron mặc định 9600)
 PLC_RESULT_ADDR      = 300             # DM word AOI ghi verdict: 1=OK, 2=NG (D300)
 PLC_SCAN_RESULT_ADDR = 250             # DM word Scanner ghi sau check SFC  (D250)
+PLC_SCAN_CHECK_ADDR  = 500             # DM PLC bật =1 để hỏi "đã quét SN chưa" (D500)
 PLC_POLL_HZ          = 5
 ```
+
+`CP2E_PLCWorker` còn poll `D<PLC_SCAN_CHECK_ADDR>`: khi PLC bật lên 1 (sườn lên)
+mà toggle **Quét SN** đang ON nhưng chưa có SN → log lỗi "CHƯA QUÉT HÀNG".
+
+Giao diện chính có hàng **ĐIỀU KHIỂN** với 3 toggle: **Quét SN** (OFF → tự ghi
+D250=1, bỏ qua quét tay), **Lưu Excel**, **Lưu ảnh**. Mặc định set trong
+`config.py` (`SCAN_ENABLED` / `SAVE_EXCEL` / `SAVE_IMAGE`) hoặc tab *Tính năng*
+trong Settings.
 
 `CP2E_PLCWorker` poll `D<PLC_RESULT_ADDR>`: đọc 1 → `result=PASS`, 2 → `result=FAIL`,
 rồi ghi lại 0. Giao thức nằm trong `cp2e.py` (vùng Data Memory, area code `0x82`).

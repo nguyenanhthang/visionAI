@@ -830,6 +830,7 @@ class MainWindow(QMainWindow):
                 ip=config.PLC_IP,
                 result_addr=config.PLC_RESULT_ADDR,
                 scan_addr=config.PLC_SCAN_RESULT_ADDR,
+                scan_check_addr=getattr(config, "PLC_SCAN_CHECK_ADDR", 500),
                 poll_interval=1.0 / max(config.PLC_POLL_HZ, 1),
             )
         self.plc.moveToThread(self._plc_thread)
@@ -839,6 +840,7 @@ class MainWindow(QMainWindow):
         self.plc.error.connect(lambda e: self._log(e, "PLC", level="err"))
         self.plc.fatal.connect(lambda e: self._log(e, "PLC", level="err"))
         self.plc.result.connect(self._on_plc_result)
+        self.plc.scan_check.connect(self._on_scan_check)
         self.plc.finished.connect(self._plc_thread.quit)
         self._plc_thread.start()
         self._last_result_ts = time.time()
@@ -853,6 +855,17 @@ class MainWindow(QMainWindow):
         self._set_chip(self.plc_chip, "PLC offline", "#7d8590")
         self.sb_plc.dot.set_color("#7d8590")
         self._log("PLC disconnected", "PLC")
+
+    def _on_scan_check(self):
+        """PLC bật D500=1 để hỏi 'đã quét SN chưa'.
+
+        Chỉ kiểm tra khi đang BẬT quét SN: nếu SN còn rỗng (operator quên
+        quét) → báo lỗi 'chưa quét hàng'. Tắt quét SN thì bỏ qua.
+        """
+        if not getattr(config, "SCAN_ENABLED", True):
+            return
+        if not self._current_sn:
+            self._log("CHƯA QUÉT HÀNG — quét SN trước khi qua trạm", "NG", level="err")
 
     # ── product scanner wiring ───────────────────────────────
     def _setup_product_scanner(self):
