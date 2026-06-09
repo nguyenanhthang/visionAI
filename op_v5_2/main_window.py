@@ -874,6 +874,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)   # xoá worker (mẫu chuẩn Qt)
         job = (thread, worker)
         self._jobs.append(job)
 

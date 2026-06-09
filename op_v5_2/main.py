@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 import config
 import h3u_h5u
+import crashlog
 from login_window import LoginWindow
 from main_window import MainWindow
 from settings_window import load_settings_overrides
@@ -43,6 +44,7 @@ def load_stylesheet() -> str:
 
 
 def main():
+    crashlog.install()         # ghi crash.log nếu app văng/abort
     load_settings_overrides()  # patch config từ settings.json (nếu có)
     h3u_h5u.configure(port=getattr(config, "PLC_PORT", 502))  # cổng Modbus TCP
 
