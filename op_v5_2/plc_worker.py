@@ -143,9 +143,12 @@ class H3U_PLCWorker(PLCWorker):
             elif val == 2:
                 self.result.emit({"ok": False, "result": "FAIL"})
                 h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
-        # 2) check "đã quét SN chưa" reg 500 — chỉ bắn ở sườn lên 0→1
+        # 2) check "đã quét SN chưa" reg 500 — bắn ở sườn lên rồi ack về 0
         chk = h3u_h5u.read_data_h3u(self.ip, self.scan_check_addr)
-        if chk is not None:
-            if chk == 1 and self._prev_scan_chk != 1:
+        if chk == 1:
+            if self._prev_scan_chk != 1:
                 self.scan_check.emit()
+            h3u_h5u.write_data_h3u(self.ip, self.scan_check_addr, 0)  # ack: reset D500 = 0
+            self._prev_scan_chk = 1
+        elif chk is not None:
             self._prev_scan_chk = chk
