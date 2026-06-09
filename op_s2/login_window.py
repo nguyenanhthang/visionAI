@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from html import escape
 
-from PySide6.QtCore import Qt, QObject, QSize, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QObject, QSize, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QIcon, QPainter, QColor, QBrush, QPen, QPixmap, QFont
 from PySide6.QtWidgets import (
     QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 import config
+import crashlog
 import employees
 from scanner import BadgeScanner, validate_employee_api
 from settings_window import SettingsDialog, gear_icon
@@ -142,6 +143,12 @@ class LoginWindow(QDialog):
         self._build_ui()
         self._setup_scanner_thread()
 
+        # heartbeat cho watchdog (bắt treo ở màn đăng nhập)
+        self._hb_timer = QTimer(self)
+        self._hb_timer.setInterval(1000)
+        self._hb_timer.timeout.connect(crashlog.heartbeat)
+        self._hb_timer.start()
+
     # ── UI ───────────────────────────────────────────────────
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -240,6 +247,7 @@ class LoginWindow(QDialog):
         # log
         self.log = QTextEdit()
         self.log.setReadOnly(True)
+        self.log.document().setMaximumBlockCount(1000)   # tránh phình vô hạn
         self.log.setMinimumHeight(140)
         self.log.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         card_l.addWidget(self.log, 1)

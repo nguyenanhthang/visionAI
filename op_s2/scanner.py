@@ -108,6 +108,14 @@ class BadgeScanner(QObject):
 
         self._stop = False
         self._serial = None
+        self._last_err_t = 0.0   # throttle error → tránh ngập GUI khi line nhiễu
+
+    def _emit_error(self, msg: str, every: float = 2.0):
+        """Phát error nhưng giới hạn tần suất (mặc định ≤1 lần / 2s)."""
+        now = time.time()
+        if now - self._last_err_t >= every:
+            self._last_err_t = now
+            self.error.emit(msg)
 
     # ---- main loop (chạy trên worker thread sau khi moveToThread) ----
     @Slot()
@@ -156,7 +164,7 @@ class BadgeScanner(QObject):
         try:
             raw = self._serial.readline(self.read_size)
         except Exception as exc:
-            self.error.emit(f"Lỗi đọc serial: {exc}")
+            self._emit_error(f"Lỗi đọc serial: {exc}")
             # avoid spin-loop on persistent failure
             time.sleep(1.0)
             return ""
@@ -169,7 +177,7 @@ class BadgeScanner(QObject):
         if len(text) == 8 and text[0].lower() == "v":
             return text
         if text:
-            self.error.emit(f"Mã quét không hợp lệ: {text!r}")
+            self._emit_error(f"Mã quét không hợp lệ: {text!r}")
         return ""
 
     def _validate(self, badge_id: str):
@@ -241,6 +249,14 @@ class ProductScanner(QObject):
         self._stop = False
         self._serial = None
         self._buf = ""   # đệm byte chưa tách hết thành mã hoàn chỉnh
+        self._last_err_t = 0.0   # throttle error → tránh ngập GUI
+
+    def _emit_error(self, msg: str, every: float = 2.0):
+        """Phát error nhưng giới hạn tần suất (mặc định ≤1 lần / 2s)."""
+        now = time.time()
+        if now - self._last_err_t >= every:
+            self._last_err_t = now
+            self.error.emit(msg)
 
     @Slot()
     def run(self):
@@ -306,7 +322,7 @@ class ProductScanner(QObject):
         try:
             raw = self._serial.read(self.read_size)
         except Exception as exc:
-            self.error.emit(f"Lỗi đọc serial: {exc}")
+            self._emit_error(f"Lỗi đọc serial: {exc}")
             time.sleep(1.0)
             return ""
         if raw:
@@ -353,6 +369,6 @@ class ProductScanner(QObject):
         try:
             import cp2e
             if not cp2e.write_data_cp2e(self.plc_ip, self.plc_scan_result_addr, value):
-                self.error.emit(f"Ghi PLC reg {self.plc_scan_result_addr} thất bại")
+                self._emit_error(f"Ghi PLC reg {self.plc_scan_result_addr} thất bại")
         except Exception as exc:
-            self.error.emit(f"Lỗi ghi PLC reg {self.plc_scan_result_addr}: {exc}")
+            self._emit_error(f"Lỗi ghi PLC reg {self.plc_scan_result_addr}: {exc}")

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 import config
+import crashlog
 from login_window import StatusDot, make_brand_pixmap
 from plc_worker import SimulatedPLCWorker, CP2E_PLCWorker
 from scanner import ProductScanner
@@ -815,6 +816,7 @@ class MainWindow(QMainWindow):
         self._clock_timer.start(); self._tick()
 
     def _tick(self):
+        crashlog.heartbeat()   # báo watchdog GUI còn sống
         now = datetime.now()
         self.clock_lbl.setText(now.strftime("%H:%M:%S · %d/%m/%Y"))
         up = int(time.time() - self._started_at)
