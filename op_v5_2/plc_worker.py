@@ -87,16 +87,18 @@ class SimulatedPLCWorker(PLCWorker):
         })
 
 
-class CP2E_PLCWorker(PLCWorker):
-    """Đọc Omron CP2E qua FINS/TCP (cp2e.py).
+class H3U_PLCWorker(PLCWorker):
+    """Đọc Inovance H3U/H5U qua Modbus TCP (h3u_h5u.py).
 
-    Poll DM word ``result_addr`` (mặc định D300) — AOI ghi verdict vào đây:
+    Poll holding register ``result_addr`` (mặc định 300) — AOI ghi verdict:
         1 → OK   → emit {"ok": True,  "result": "PASS"}
         2 → NG   → emit {"ok": False, "result": "FAIL"}
         khác → idle, không emit.
 
-    Chỉ emit khi giá trị thay đổi để tránh push trùng; sau khi app ghi
-    nhận verdict thì ghi lại 0 vào register để PLC bắn lần sau.
+    Đồng thời poll ``scan_check_addr`` (mặc định 500) — PLC bật =1 để hỏi
+    "đã quét SN chưa", chỉ bắn scan_check ở sườn lên 0→1.
+
+    Chỉ emit verdict khi giá trị thay đổi; sau khi nhận verdict ghi lại 0.
     """
 
     def __init__(self, ip: str, poll_interval: float = 0.2,
@@ -112,41 +114,41 @@ class CP2E_PLCWorker(PLCWorker):
         self._prev_scan_chk = 0
 
     def _connect(self):
-        import cp2e
-        cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
-        cp2e.write_data_cp2e(self.ip, self.scan_addr, 2)
-        v = cp2e.read_data_cp2e(self.ip, self.result_addr)
+        import h3u_h5u
+        h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
+        h3u_h5u.write_data_h3u(self.ip, self.scan_addr, 2)
+        v = h3u_h5u.read_data_h3u(self.ip, self.result_addr)
         if v is None:
-            raise RuntimeError(f"PLC {self.ip} không phản hồi (FINS/TCP)")
+            raise RuntimeError(f"PLC {self.ip} không phản hồi (Modbus TCP)")
         self._prev_val = v
         # init D500 để không bắn "chưa quét" ngay lúc khởi động nếu đang =1
-        self._prev_scan_chk = cp2e.read_data_cp2e(self.ip, self.scan_check_addr) or 0
+        self._prev_scan_chk = h3u_h5u.read_data_h3u(self.ip, self.scan_check_addr) or 0
 
     def _disconnect(self):
         try:
-            import cp2e
-            cp2e.close_all()
+            import h3u_h5u
+            h3u_h5u.close_all()
         except Exception:
             pass
 
     def _poll(self):
-        import cp2e
-        # 1) verdict D300
-        val = cp2e.read_data_cp2e(self.ip, self.result_addr)
+        import h3u_h5u
+        # 1) verdict reg 300
+        val = h3u_h5u.read_data_h3u(self.ip, self.result_addr)
         if val is not None and val != self._prev_val:
             self._prev_val = val
             if val == 1:
                 self.result.emit({"ok": True, "result": "PASS"})
-                cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
+                h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
             elif val == 2:
                 self.result.emit({"ok": False, "result": "FAIL"})
-                cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
-        # 2) check "đã quét SN chưa" D500 — bắn ở sườn lên rồi ack về 0
-        chk = cp2e.read_data_cp2e(self.ip, self.scan_check_addr)
+                h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
+        # 2) check "đã quét SN chưa" reg 500 — bắn ở sườn lên rồi ack về 0
+        chk = h3u_h5u.read_data_h3u(self.ip, self.scan_check_addr)
         if chk == 1:
             if self._prev_scan_chk != 1:
                 self.scan_check.emit()
-            cp2e.write_data_cp2e(self.ip, self.scan_check_addr, 0)  # ack: reset D500 = 0
+            h3u_h5u.write_data_h3u(self.ip, self.scan_check_addr, 0)  # ack: reset D500 = 0
             self._prev_scan_chk = 1
         elif chk is not None:
             self._prev_scan_chk = chk

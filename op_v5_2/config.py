@@ -23,12 +23,12 @@ API_TOKEN_URL           = ""
 API_EMPLOYEE_URL_PREFIX = ""
 API_REQUEST_TIMEOUT     = 5  # giây
 
-# ── PLC (Omron CP2E qua FINS/TCP) ─────────────────────────
+# ── PLC (Inovance H3U/H5U qua Modbus TCP) ─────────────────
 PLC_IP                = '192.168.250.1'  # IP PLC
-PLC_PORT              = 9600             # cổng FINS/TCP (Omron mặc định 9600)
-PLC_RESULT_ADDR       = 300              # DM word AOI ghi verdict: 1=OK, 2=NG  (D300)
-PLC_SCAN_RESULT_ADDR  = 250              # DM word Scanner ghi sau khi check SFC (D250)
-PLC_SCAN_CHECK_ADDR   = 500              # DM PLC bật =1 để yêu cầu kiểm tra "đã quét SN chưa" (D500)
+PLC_PORT              = 502              # cổng Modbus TCP (mặc định 502)
+PLC_RESULT_ADDR       = 300              # holding register AOI ghi verdict: 1=OK, 2=NG
+PLC_SCAN_RESULT_ADDR  = 250              # holding register Scanner ghi sau khi check SFC
+PLC_SCAN_CHECK_ADDR   = 500              # holding register PLC bật =1 để hỏi "đã quét SN chưa"
 PLC_POLL_HZ           = 5                # số lần poll PLC / giây
 PLC_SIMULATED         = False            # True → chạy giả lập, False → đọc PLC thật
 # ── Station / SFC ──────────────────────────────────────────
@@ -52,9 +52,9 @@ OPL_OK_DIR = 'D:\\anh\\OK'
 OPL_NG_DIR = 'D:\\anh\\NG'
 
 # ── Data export (.xls log) ─────────────────────────────────
-# Mỗi tín hiệu PLC OK/NG: đọc dòng dữ liệu MỚI NHẤT (cột B→F = 5 giá trị)
-# của file  <DATA_SRC_DIR>\<ngày>.xls  (hoặc .csv) rồi append 1 dòng
-#   [times, SN, Yellow, Orange, Black, Red, OK NG, result]  (result = OK/NG)
+# Mỗi tín hiệu PLC OK/NG: đọc dòng dữ liệu MỚI NHẤT (cột B→I = 8 giá trị)
+# của file  <DATA_SRC_DIR>\<ngày>.xls  rồi append 1 dòng
+#   [times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2, result]  (result = OK/NG)
 # sang  <DATA_EXPORT_DIR>\<ngày>.xls  (header tạo 1 lần).
 # Để rỗng DATA_SRC_DIR hoặc DATA_EXPORT_DIR → tắt tính năng này.
 DATA_SRC_DIR      = 'D:/data'          # folder chứa file .xls nguồn (đặt tên theo ngày)
