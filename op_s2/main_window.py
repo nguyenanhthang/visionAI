@@ -842,13 +842,24 @@ class MainWindow(QMainWindow):
         self._plc_thread.started.connect(self.plc.run)
         self.plc.connected.connect(self._on_plc_connected)
         self.plc.disconnected.connect(self._on_plc_disconnected)
-        self.plc.error.connect(lambda e: self._log(e, "PLC", level="err"))
-        self.plc.fatal.connect(lambda e: self._log(e, "PLC", level="err"))
+        self.plc.error.connect(self._on_plc_error)
+        self.plc.fatal.connect(self._on_plc_error)
         self.plc.result.connect(self._on_plc_result)
         self.plc.scan_check.connect(self._on_scan_check)
         self.plc.finished.connect(self._plc_thread.quit)
         self._plc_thread.start()
         self._last_result_ts = time.time()
+
+    # NOTE: phải connect signal worker → BOUND METHOD của self (QObject GUI),
+    # KHÔNG dùng lambda. Lambda không có QObject context → Qt dùng
+    # DirectConnection → slot chạy NGAY trên thread worker → _log đụng QTextEdit
+    # từ thread sai → hỏng heap (0xC0000374) → văng app. Bound method →
+    # AutoConnection → queued về GUI thread → an toàn.
+    def _on_plc_error(self, msg: str):
+        self._log(msg, "PLC", level="err")
+
+    def _on_worker_error(self, msg: str):
+        self._log(msg, "SYS", level="err")
 
     def _on_plc_connected(self):
         self._set_chip(self.plc_chip, "PLC online", "#2ea043")
@@ -892,7 +903,7 @@ class MainWindow(QMainWindow):
         self.product_scanner.disconnected.connect(self._on_scanner_disconnected)
         self.product_scanner.scanned.connect(self._on_product_scanned)
         self.product_scanner.verdict.connect(self._on_product_verdict)
-        self.product_scanner.error.connect(lambda e: self._log(e, "SYS", level="err"))
+        self.product_scanner.error.connect(self._on_worker_error)
         self.product_scanner.finished.connect(self._scan_thread.quit)
         self._scan_thread.start()
 
@@ -965,7 +976,7 @@ class MainWindow(QMainWindow):
         )
         worker.image_ready.connect(self._on_opl_image_ready)
         worker.upload_done.connect(self._on_opl_upload_done)
-        worker.error.connect(lambda e: self._log(e, "SYS", level="err"))
+        worker.error.connect(self._on_worker_error)
         self._opl_busy = True
         self._run_worker(worker, busy_attr="_opl_busy")
 
