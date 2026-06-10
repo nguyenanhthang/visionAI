@@ -11,8 +11,10 @@ pyside6/
 ├── login_window.py     # QDialog đăng nhập (form + scanner status + log)
 ├── main_window.py      # QMainWindow chính (topbar + image + stats + log + statusbar)
 ├── scanner.py          # BadgeScanner — QObject chạy trong QThread, phát Signal
-├── plc_worker.py       # PLCWorker (base) + SimulatedPLCWorker + PanasonicPLCWorker
-├── panasonic.py        # MEWTOCOL driver (giữ nguyên — không phụ thuộc GUI)
+├── plc_worker.py       # PLCWorker (base) + SimulatedPLCWorker + CP2E_PLCWorker
+├── cp2e.py             # Omron CP2E FINS/TCP driver (đang dùng)
+├── h3u_h5u.py          # Inovance H3U/H5U Modbus TCP driver (driver thay thế)
+├── panasonic.py        # MEWTOCOL driver Panasonic (driver thay thế)
 ├── employees.py        # Danh bạ nhân viên local
 ├── config.py           # Tham số COM port, baudrate, API URL...
 ├── INI.py              # Helper đọc/ghi .ini (giữ nguyên)
@@ -38,20 +40,23 @@ python main.py
 | Tô màu inline trong code            | Tách `styles.qss` (QSS)                |
 | `CTkImage` cho ảnh                  | Custom `ImageLabel` (QPainter, vẽ placeholder + overlay verdict) |
 
-## Tweak PLC thật
+## Tweak PLC thật (Omron CP2E — FINS/TCP)
 
 Trong `config.py`:
 
 ```python
-PLC_SIMULATED = False        # bật chế độ đọc Panasonic thật
-PLC_PORT      = "COM1"
-PLC_BAUDRATE  = 9600
-PLC_POLL_HZ   = 5
+PLC_SIMULATED        = False           # False → đọc CP2E thật qua FINS/TCP
+PLC_IP               = '192.168.250.1'
+PLC_PORT             = 9600            # cổng FINS/TCP (Omron mặc định 9600)
+PLC_RESULT_ADDR      = 300             # DM word AOI ghi verdict: 1=OK, 2=NG (D300)
+PLC_SCAN_RESULT_ADDR = 250             # DM word Scanner ghi sau check SFC  (D250)
+PLC_POLL_HZ          = 5
 ```
 
-`PanasonicPLCWorker._poll()` đang là scaffold (đọc 4 word từ `D17800`). Sửa lại
-theo logic AOI thật — gọi `self.result.emit({...})` mỗi khi có sản phẩm mới,
-`self.image.emit(pil_or_qimage)` khi có ảnh mới.
+`CP2E_PLCWorker` poll `D<PLC_RESULT_ADDR>`: đọc 1 → `result=PASS`, 2 → `result=FAIL`,
+rồi ghi lại 0. Giao thức nằm trong `cp2e.py` (vùng Data Memory, area code `0x82`).
+Đổi PLC khác chỉ cần viết driver cùng API module-level rồi đổi import trong
+`plc_worker.py` + `scanner.py` (xem `h3u_h5u.py` / `panasonic.py` làm mẫu).
 
 ## Tweak Scanner
 

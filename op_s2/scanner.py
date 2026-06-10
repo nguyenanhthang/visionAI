@@ -108,6 +108,14 @@ class BadgeScanner(QObject):
 
         self._stop = False
         self._serial = None
+        self._last_err_t = 0.0   # throttle error → tránh ngập GUI khi line nhiễu
+
+    def _emit_error(self, msg: str, every: float = 2.0):
+        """Phát error nhưng giới hạn tần suất (mặc định ≤1 lần / 2s)."""
+        now = time.time()
+        if now - self._last_err_t >= every:
+            self._last_err_t = now
+            self.error.emit(msg)
 
     # ---- main loop (chạy trên worker thread sau khi moveToThread) ----
     @Slot()
@@ -156,7 +164,7 @@ class BadgeScanner(QObject):
         try:
             raw = self._serial.readline(self.read_size)
         except Exception as exc:
-            self.error.emit(f"Lỗi đọc serial: {exc}")
+            self._emit_error(f"Lỗi đọc serial: {exc}")
             # avoid spin-loop on persistent failure
             time.sleep(1.0)
             return ""
@@ -169,7 +177,7 @@ class BadgeScanner(QObject):
         if len(text) == 8 and text[0].lower() == "v":
             return text
         if text:
-            self.error.emit(f"Mã quét không hợp lệ: {text!r}")
+            self._emit_error(f"Mã quét không hợp lệ: {text!r}")
         return ""
 
     def _validate(self, badge_id: str):
@@ -240,6 +248,15 @@ class ProductScanner(QObject):
 
         self._stop = False
         self._serial = None
+        self._buf = ""   # đệm byte chưa tách hết thành mã hoàn chỉnh
+        self._last_err_t = 0.0   # throttle error → tránh ngập GUI
+
+    def _emit_error(self, msg: str, every: float = 2.0):
+        """Phát error nhưng giới hạn tần suất (mặc định ≤1 lần / 2s)."""
+        now = time.time()
+        if now - self._last_err_t >= every:
+            self._last_err_t = now
+            self.error.emit(msg)
 
     @Slot()
     def run(self):
@@ -259,23 +276,23 @@ class ProductScanner(QObject):
             self.error.emit(f"Mở cổng {self.port} thất bại: {exc}")
             self.finished.emit()
             return
-        CHECK = not getattr(config, "ON_OFF_SFC", True)
-        print(CHECK)
         self.connected.emit(self.port)
         try:
             while not self._stop:
-                # if CHECK:
-                #     self._write_plc(1)
-                #     time.sleep(0.03)
-                # else:
-                code = self._read_code()
-                if not code:
-                    continue
-                self.scanned.emit(code)
-                ok = self._check_api(code)
-                plc_value = 1 if ok else 2
-                self._write_plc(plc_value)
-                self.verdict.emit(code, ok, plc_value)
+                # Tắt quét SN (toggle "Quét SN" OFF) → tự ghi D250=1 (pass),
+                # line chạy không cần quét tay.
+                if not getattr(config, "SCAN_ENABLED", True):
+                    self._write_plc(1)
+                    time.sleep(0.03)
+                else:
+                    code = self._read_code()
+                    if not code:
+                        continue
+                    self.scanned.emit(code)
+                    ok = self._check_api(code)
+                    plc_value = 1 if ok else 2
+                    self._write_plc(plc_value)
+                    self.verdict.emit(code, ok, plc_value)
         finally:
             try:
                 if self._serial is not None:
@@ -290,15 +307,43 @@ class ProductScanner(QObject):
         self._stop = True
 
     def _read_code(self) -> str:
+        """Trả về 1 mã hoàn chỉnh (đã tách theo CR/LF).
+
+        Scanner kết thúc mỗi lần quét bằng CR (``\\r``). Đọc thô vào buffer
+        rồi cắt theo ``\\r``/``\\n``: nếu 2 lần quét dồn vào cùng 1 lần đọc
+        (lúc app đang bận) thì mã thứ 2 vẫn nằm lại buffer cho vòng sau —
+        không gộp 2 mã, không để ``\\r`` lọt vào giữa mã (gây tên file lỗi).
+        """
+        # 1) còn mã hoàn chỉnh trong buffer → trả ngay, khỏi chờ serial
+        code = self._pop_code()
+        if code:
+            return code
+        # 2) đọc thêm từ serial rồi tách lại
         try:
-            raw = self._serial.readline(self.read_size)
+            raw = self._serial.read(self.read_size)
         except Exception as exc:
-            self.error.emit(f"Lỗi đọc serial: {exc}")
+            self._emit_error(f"Lỗi đọc serial: {exc}")
             time.sleep(1.0)
             return ""
-        if not raw:
-            return ""
-        return raw.decode("ascii", errors="ignore").strip()
+        if raw:
+            self._buf += raw.decode("ascii", errors="ignore")
+        return self._pop_code() or ""
+
+    def _pop_code(self) -> str:
+        """Lấy mã đầu tiên còn nguyên trong buffer (tới ký tự CR/LF). '' nếu chưa có."""
+        while self._buf:
+            cands = [i for i in (self._buf.find("\r"), self._buf.find("\n")) if i >= 0]
+            if not cands:
+                return ""               # chưa có terminator → chờ đọc thêm
+            pos = min(cands)
+            code = self._buf[:pos].strip()
+            j = pos
+            while j < len(self._buf) and self._buf[j] in "\r\n":
+                j += 1                  # nhảy qua mọi CR/LF liên tiếp
+            self._buf = self._buf[j:]
+            if code:
+                return code             # bỏ qua đoạn rỗng, tìm mã kế tiếp
+        return ""
 
     def _check_api(self, code: str) -> bool:
         if not getattr(config, "ON_OFF_SFC", True):
@@ -322,8 +367,8 @@ class ProductScanner(QObject):
         if not self.plc_ip:
             return
         try:
-            import h3u_h5u
-            if not h3u_h5u.write_data_h3u(self.plc_ip, self.plc_scan_result_addr, value):
-                self.error.emit(f"Ghi PLC reg {self.plc_scan_result_addr} thất bại")
+            import cp2e
+            if not cp2e.write_data_cp2e(self.plc_ip, self.plc_scan_result_addr, value):
+                self._emit_error(f"Ghi PLC reg {self.plc_scan_result_addr} thất bại")
         except Exception as exc:
-            self.error.emit(f"Lỗi ghi PLC reg {self.plc_scan_result_addr}: {exc}")
+            self._emit_error(f"Lỗi ghi PLC reg {self.plc_scan_result_addr}: {exc}")

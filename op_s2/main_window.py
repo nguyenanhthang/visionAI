@@ -15,10 +15,12 @@ Layout giống mockup HTML:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import time
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QSize, QThread, QTimer, Signal, Slot
@@ -32,10 +34,133 @@ from PySide6.QtWidgets import (
 )
 
 import config
+import crashlog
 from login_window import StatusDot, make_brand_pixmap
-from plc_worker import SimulatedPLCWorker, H3U_PLCWorker
+from plc_worker import SimulatedPLCWorker, CP2E_PLCWorker
 from scanner import ProductScanner
 from settings_window import SettingsDialog, gear_icon
+
+
+# ── helpers ──────────────────────────────────────────────────────
+_ILLEGAL_FN = re.compile(r'[\x00-\x1f<>:"/\\|?*]')   # ký tự cấm trong tên file Windows
+
+
+def safe_filename(name: str, fallback: str = "UNKNOWN") -> str:
+    """Bỏ ký tự điều khiển (\\r, \\n…) + ký tự cấm để tên file không lỗi.
+
+    Phòng khi mã quét lọt ký tự lạ (vd \\r làm Windows báo Errno 22 lúc
+    copy ảnh). Rỗng sau khi làm sạch → trả ``fallback``.
+    """
+    cleaned = _ILLEGAL_FN.sub("", str(name)).strip(" .")
+    return cleaned or fallback
+
+
+# ── đọc số đo từ file nguồn (.xls/.csv) — dùng chung SFC + data export ──
+SRC_MEASURE_COLS = range(1, 6)   # cột B..F: Yellow, Orange, Black, Red, OK NG
+
+
+def _norm(v):
+    """xls trả số dạng float — số nguyên thì bỏ đuôi '.0'; None → ''."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
+
+def _norm_text(v):
+    """Chuẩn hoá 1 ô đọc từ text: chuỗi số → int/float, còn lại giữ str."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s == "":
+        return ""
+    try:
+        f = float(s)
+        return int(f) if f.is_integer() else f
+    except ValueError:
+        return s
+
+
+def find_source_file(src_dir: str, day: str):
+    """Tìm file nguồn theo ngày: ưu tiên .xls, sau đó .csv. None nếu không có."""
+    if not src_dir:
+        return None
+    for ext in (".xls", ".csv"):
+        p = Path(src_dir) / f"{day}{ext}"
+        if p.exists():
+            return p
+    return None
+
+
+def read_source_rows(path: Path) -> list:
+    """Đọc file nguồn thành list dòng (mỗi dòng = list cột).
+
+    Hỗ trợ: (1) .xls (BIFF) thật, (2) đuôi .xls nhưng nội dung text
+    tab-separated, (3) .csv comma-separated. Thử BIFF trước; không phải
+    thì đọc text, tách theo tab HOẶC comma (utf-8-sig để bỏ BOM).
+    """
+    try:
+        import xlrd
+        try:
+            sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
+            return [
+                [_norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
+                for r in range(sheet.nrows)
+            ]
+        except Exception:
+            pass  # không phải .xls BIFF → đọc text bên dưới
+    except ImportError:
+        pass
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
+            rows = []
+            for line in f:
+                line = line.rstrip("\r\n")
+                if line == "":
+                    continue
+                parts = line.split("\t") if "\t" in line else line.split(",")
+                rows.append([_norm_text(c) for c in parts])
+            return rows
+    except Exception:
+        return []
+
+
+def latest_measures(path: Path, cols=SRC_MEASURE_COLS):
+    """Cột `cols` của dòng dữ liệu cuối còn dữ liệu. None nếu file rỗng."""
+    for cells in reversed(read_source_rows(path)):
+        if any(v != "" for v in cells):
+            return [cells[c] if c < len(cells) else "" for c in cols]
+    return None
+
+
+def read_latest_measures(src_dir: str, date_fmt: str = "%Y%m%d",
+                         cols=SRC_MEASURE_COLS):
+    """Tìm file nguồn theo ngày hôm nay rồi lấy số đo của dòng mới nhất."""
+    src = find_source_file(src_dir, datetime.now().strftime(date_fmt or "%Y%m%d"))
+    return latest_measures(src, cols) if src else None
+
+
+def _fmt_mm(v) -> str:
+    """Định dạng 1 giá trị đo kèm đơn vị mm (3 số lẻ)."""
+    try:
+        return f"{float(v):.3f}mm"
+    except (TypeError, ValueError):
+        s = str(v).strip()
+        return f"{s}mm" if s else ""
+
+
+def format_timer(measures) -> str:
+    """Chuỗi thông số cho payload SFC từ [Yellow, Orange, Black, Red, …].
+
+    Trả ``'Black: ..mm; Orange: ..mm; Red: ..mm; Yellow: ..mm'`` (đúng thứ
+    tự yêu cầu). measures thiếu/rỗng → ''.
+    """
+    if not measures or len(measures) < 4:
+        return ""
+    yellow, orange, black, red = measures[0], measures[1], measures[2], measures[3]
+    return (f"Black: {_fmt_mm(black)}; Orange: {_fmt_mm(orange)}; "
+            f"Red: {_fmt_mm(red)}; Yellow: {_fmt_mm(yellow)}")
 
 
 # ── tiny widgets ─────────────────────────────────────────────────
@@ -87,8 +212,8 @@ class OplImageWorker(QObject):
         super().__init__(parent)
         self.root_dir = root_dir
         self.upload_dir = upload_dir
-        self.sn = sn or "UNKNOWN"
-        self.verdict_label = verdict_label or "Unknown"
+        self.sn = safe_filename(sn, "UNKNOWN")
+        self.verdict_label = safe_filename(verdict_label, "Unknown")
 
     @Slot()
     def run(self):
@@ -147,24 +272,38 @@ class OplImageWorker(QObject):
 class SfcPushWorker(QObject):
     """POST kết quả verdict lên MES clipThroughStation.
 
-    Payload: {sn, stationName, empNo, result}. Response code=200 → ok,
-    khác → log lỗi (vd 406 "下一制程为 EOL-S").
+    Payload: {sn, stationName, empNo, result}. Nếu có ``src_dir`` thì đọc
+    thêm số đo (Yellow/Orange/Black/Red) của dòng mới nhất trong file
+    ``<src_dir>/<ngày>.(xls|csv)`` rồi chèn field ``timer`` dạng
+    ``"Black: 0.522mm; Orange: 0.526mm; Red: 0.529mm; Yellow: 0.624mm"``.
+    Response code=200 → ok, khác → log lỗi (vd 406 "下一制程为 EOL-S").
     """
 
     done     = Signal(bool, str)   # ok, message
     finished = Signal()
 
     def __init__(self, url: str, payload: dict, timeout: float = 5.0,
+                 src_dir: str = "", date_fmt: str = "%Y%m%d",
                  parent: QObject | None = None):
         super().__init__(parent)
         self.url = url
         self.payload = payload
         self.timeout = timeout
+        self.src_dir = src_dir
+        self.date_fmt = date_fmt or "%Y%m%d"
 
     @Slot()
     def run(self):
         sn = self.payload.get("sn", "")
         result = self.payload.get("result", "")
+        # Chèn thông số đo đọc từ CSV/xls vào payload (field "timer")
+        if self.src_dir:
+            try:
+                timer = format_timer(read_latest_measures(self.src_dir, self.date_fmt))
+                if timer:
+                    self.payload["timer"] = timer
+            except Exception:
+                pass
         try:
             import requests
             r = requests.post(self.url, json=self.payload, timeout=self.timeout)
@@ -187,10 +326,10 @@ class SfcPushWorker(QObject):
 class DataExportWorker(QObject):
     """Append 1 dòng đo sang file .xls log theo ngày khi có verdict PLC.
 
-    - Nguồn: ``<src_dir>/<ngày>.xls`` — lấy cột B→I (8 giá trị) của
-      DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ liệu).
+    - Nguồn: ``<src_dir>/<ngày>.xls`` (hoặc ``.csv``) — lấy cột B→F
+      (5 giá trị) của DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ liệu).
     - Đích:  ``<dst_dir>/<ngày>.xls`` — append dòng
-      ``[times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2, result]``;
+      ``[times, SN, Yellow, Orange, Black, Red, OK NG, result]``;
       header ghi 1 lần ở đầu file.
     - ``times`` = giờ nhận verdict, ``SN`` = mã sản phẩm đang quét,
       ``result`` = "OK" / "NG".
@@ -203,9 +342,8 @@ class DataExportWorker(QObject):
     done     = Signal(bool, str)   # ok, message
     finished = Signal()
 
-    HEADER = ["times", "SN", "L1-1", "L1-2", "L2-1", "L2-2",
-              "L3-1", "L3-2", "L4-1", "L4-2", "result"]
-    _SRC_COLS = range(1, 9)          # cột B..I (0-based: 1..8)
+    HEADER = ["times", "SN", "Yellow", "Orange", "Black", "Red",
+              "OK NG", "result"]
     _file_lock = threading.Lock()    # serialize ghi file đích
     WRITE_RETRIES = 5                # số lần thử ghi lại khi file bị khóa
     RETRY_DELAY   = 0.4              # giây giữa các lần thử
@@ -232,12 +370,12 @@ class DataExportWorker(QObject):
         try:
             now = datetime.now()
             day = now.strftime(self.date_fmt)
-            src = Path(self.src_dir) / f"{day}.xls"
-            if not src.exists():
-                self.done.emit(False, f"File .xls nguồn không tồn tại: {src.name}")
+            src = find_source_file(self.src_dir, day)
+            if src is None:
+                self.done.emit(False, f"File nguồn {day}.(xls/csv) không tồn tại")
                 return
 
-            measures = self._read_latest_measures(xlrd, src)
+            measures = latest_measures(src)
             if measures is None:
                 self.done.emit(False, f"{src.name} không có dòng dữ liệu")
                 return
@@ -288,47 +426,6 @@ class DataExportWorker(QObject):
 
     # ── helpers ──────────────────────────────────────────────
     @classmethod
-    def _read_rows_any(cls, xlrd, path: Path) -> list[list]:
-        """Đọc toàn bộ file thành list dòng (mỗi dòng là list cột).
-
-        Máy AOI ghi file đuôi .xls nhưng nội dung thực ra là text
-        tab-separated → xlrd báo 'Expected BOF record'. Vì vậy thử
-        đọc .xls (BIFF) thật trước; nếu không phải, fallback đọc như
-        text tab-separated. Giá trị được chuẩn hoá qua _norm().
-        """
-        # 1) Thử đọc .xls (BIFF) thật bằng xlrd
-        try:
-            sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
-            return [
-                [cls._norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
-                for r in range(sheet.nrows)
-            ]
-        except Exception:
-            pass  # không phải .xls thật → thử đọc text bên dưới
-
-        # 2) Fallback: đọc như text tab-separated
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                rows = []
-                for line in f:
-                    line = line.rstrip("\r\n")
-                    if line == "":
-                        continue
-                    rows.append([cls._norm_text(c) for c in line.split("\t")])
-                return rows
-        except Exception:
-            return []
-
-    @classmethod
-    def _read_latest_measures(cls, xlrd, path: Path):
-        """Cột B→I của dòng cuối còn dữ liệu. None nếu file rỗng."""
-        rows = cls._read_rows_any(xlrd, path)
-        for cells in reversed(rows):
-            if any(v != "" for v in cells):
-                return [cells[c] if c < len(cells) else "" for c in cls._SRC_COLS]
-        return None
-
-    @classmethod
     def _read_existing(cls, xlrd, path: Path) -> list[list]:
         """Đọc lại các dòng dữ liệu cũ của file ĐÍCH (bỏ header).
 
@@ -340,7 +437,7 @@ class DataExportWorker(QObject):
         sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
         out = []
         for r in range(sheet.nrows):
-            vals = [cls._norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
+            vals = [_norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
             if r == 0 and vals[:1] == [cls.HEADER[0]]:
                 continue  # bỏ header cũ — sẽ ghi lại
             if any(v != "" for v in vals):
@@ -410,29 +507,6 @@ class DataExportWorker(QObject):
         except Exception:
             pass
 
-    @staticmethod
-    def _norm(v):
-        """xls trả số dạng float — số nguyên thì bỏ đuôi '.0'; None → ''."""
-        if v is None:
-            return ""
-        if isinstance(v, float) and v.is_integer():
-            return int(v)
-        return v
-
-    @staticmethod
-    def _norm_text(v):
-        """Chuẩn hoá 1 ô đọc từ text: chuỗi số → int/float, còn lại giữ str."""
-        if v is None:
-            return ""
-        s = str(v).strip()
-        if s == "":
-            return ""
-        try:
-            f = float(s)
-            return int(f) if f.is_integer() else f
-        except ValueError:
-            return s
-
 
 # ── main window ──────────────────────────────────────────────────
 class MainWindow(QMainWindow):
@@ -443,7 +517,8 @@ class MainWindow(QMainWindow):
         self.employee_name = employee_name or "—"
         self._started_at = time.time()
         self._current_sn = ""
-        self._data_jobs = []   # giữ ref (thread, worker) export đang chạy
+        self._jobs = []          # giữ ref (thread, worker) các job đang chạy
+        self._opl_busy = False   # đang upload ảnh OPL?
 
         self.setWindowTitle("Riser cable — Giao diện chính")
         self.setWindowIcon(QIcon(make_brand_pixmap(64)))
@@ -471,11 +546,58 @@ class MainWindow(QMainWindow):
         bl.setContentsMargins(14, 14, 14, 14); bl.setSpacing(14)
         body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        bl.addWidget(self._build_controls(), 0)
         bl.addWidget(self._build_info_card(), 0)
         bl.addWidget(self._build_log_card(), 1)
 
         root.addWidget(body, 1)
         root.addWidget(self._build_statusbar())
+
+    # ── controls (toggle bật/tắt) ────────────────────────────
+    _TOGGLE_QSS = (
+        "QPushButton{background:#101820;color:#7d8590;border:1px solid #2a3540;"
+        "border-radius:8px;padding:6px 14px;font-weight:600;}"
+        "QPushButton:hover{border-color:#3fb6f0;}"
+        "QPushButton:checked{background:#13351f;color:#56d364;border-color:#2ea043;}"
+    )
+
+    def _build_controls(self) -> QWidget:
+        card = QFrame(); card.setObjectName("Card")
+        card.setStyleSheet(
+            "QFrame#Card{background:#141b22;border:1px solid #2a3540;border-radius:12px;}"
+            "QLabel{background:transparent;}"
+        )
+        lay = QHBoxLayout(card)
+        lay.setContentsMargins(14, 10, 14, 10); lay.setSpacing(10)
+        title = QLabel("ĐIỀU KHIỂN")
+        title.setStyleSheet("color:#9aa4ae;font-size:11px;font-weight:700;letter-spacing:3px;")
+        lay.addWidget(title); lay.addStretch(1)
+        self.scan_toggle  = self._make_toggle("Quét SN", "SCAN_ENABLED")
+        self.excel_toggle = self._make_toggle("Lưu Excel", "SAVE_EXCEL")
+        self.image_toggle = self._make_toggle("Lưu ảnh", "SAVE_IMAGE")
+        for b in (self.scan_toggle, self.excel_toggle, self.image_toggle):
+            lay.addWidget(b)
+        return card
+
+    def _make_toggle(self, label: str, attr: str) -> QPushButton:
+        btn = QPushButton()
+        btn.setCheckable(True)
+        on = bool(getattr(config, attr, True))
+        btn.setChecked(on)
+        btn.setText(f"{label}: {'ON' if on else 'OFF'}")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setMinimumHeight(32)
+        btn.setStyleSheet(self._TOGGLE_QSS)
+        btn.toggled.connect(
+            lambda c, b=btn, a=attr, l=label: self._on_toggle(b, a, l, c))
+        return btn
+
+    def _on_toggle(self, btn: QPushButton, attr: str, label: str, checked: bool):
+        setattr(config, attr, checked)
+        btn.setText(f"{label}: {'ON' if checked else 'OFF'}")
+        self._log(f"{label} {'BẬT' if checked else 'TẮT'}", "SYS",
+                  level=("ok" if checked else "warn"))
 
     # ── topbar ───────────────────────────────────────────────
     def _build_topbar(self) -> QWidget:
@@ -629,6 +751,8 @@ class MainWindow(QMainWindow):
         wl = QVBoxLayout(wrap); wl.setContentsMargins(14, 4, 14, 14); wl.setSpacing(0)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
+        # giữ tối đa 2000 dòng — tránh document phình vô hạn theo thời gian
+        self.log_view.document().setMaximumBlockCount(2000)
         self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.log_view.setStyleSheet(
             "QTextEdit{background:#0a0f14;border:1px solid #2a3540;border-radius:8px;"
@@ -692,6 +816,7 @@ class MainWindow(QMainWindow):
         self._clock_timer.start(); self._tick()
 
     def _tick(self):
+        crashlog.heartbeat()   # báo watchdog GUI còn sống
         now = datetime.now()
         self.clock_lbl.setText(now.strftime("%H:%M:%S · %d/%m/%Y"))
         up = int(time.time() - self._started_at)
@@ -706,25 +831,39 @@ class MainWindow(QMainWindow):
             self._set_chip(self.scanner_chip, "Scanner offline", "#7d8590")
             self.sb_scanner.dot.set_color("#7d8590")
         else:
-            self.plc = H3U_PLCWorker(
+            self.plc = CP2E_PLCWorker(
                 ip=config.PLC_IP,
                 result_addr=config.PLC_RESULT_ADDR,
+                scan_addr=config.PLC_SCAN_RESULT_ADDR,
+                scan_check_addr=getattr(config, "PLC_SCAN_CHECK_ADDR", 500),
                 poll_interval=1.0 / max(config.PLC_POLL_HZ, 1),
             )
         self.plc.moveToThread(self._plc_thread)
         self._plc_thread.started.connect(self.plc.run)
         self.plc.connected.connect(self._on_plc_connected)
         self.plc.disconnected.connect(self._on_plc_disconnected)
-        self.plc.error.connect(lambda e: self._log(e, "PLC", level="err"))
-        self.plc.fatal.connect(lambda e: self._log(e, "PLC", level="err"))
+        self.plc.error.connect(self._on_plc_error)
+        self.plc.fatal.connect(self._on_plc_error)
         self.plc.result.connect(self._on_plc_result)
+        self.plc.scan_check.connect(self._on_scan_check)
         self.plc.finished.connect(self._plc_thread.quit)
         self._plc_thread.start()
         self._last_result_ts = time.time()
 
+    # NOTE: phải connect signal worker → BOUND METHOD của self (QObject GUI),
+    # KHÔNG dùng lambda. Lambda không có QObject context → Qt dùng
+    # DirectConnection → slot chạy NGAY trên thread worker → _log đụng QTextEdit
+    # từ thread sai → hỏng heap (0xC0000374) → văng app. Bound method →
+    # AutoConnection → queued về GUI thread → an toàn.
+    def _on_plc_error(self, msg: str):
+        self._log(msg, "PLC", level="err")
+
+    def _on_worker_error(self, msg: str):
+        self._log(msg, "SYS", level="err")
+
     def _on_plc_connected(self):
         self._set_chip(self.plc_chip, "PLC online", "#2ea043")
-        self.sb_plc.lbl.setText(f"PLC · {config.PLC_IP}:502")
+        self.sb_plc.lbl.setText(f"PLC · {config.PLC_IP}:{getattr(config, 'PLC_PORT', 9600)}")
         self.sb_plc.dot.set_color("#2ea043")
         self._log("PLC connected", "PLC", level="ok")
 
@@ -732,6 +871,17 @@ class MainWindow(QMainWindow):
         self._set_chip(self.plc_chip, "PLC offline", "#7d8590")
         self.sb_plc.dot.set_color("#7d8590")
         self._log("PLC disconnected", "PLC")
+
+    def _on_scan_check(self):
+        """PLC bật D500=1 để hỏi 'đã quét SN chưa'.
+
+        Chỉ kiểm tra khi đang BẬT quét SN: nếu SN còn rỗng (operator quên
+        quét) → báo lỗi 'chưa quét hàng'. Tắt quét SN thì bỏ qua.
+        """
+        if not getattr(config, "SCAN_ENABLED", True):
+            return
+        if not self._current_sn:
+            self._log("CHƯA QUÉT HÀNG — quét SN trước khi qua trạm", "NG", level="err")
 
     # ── product scanner wiring ───────────────────────────────
     def _setup_product_scanner(self):
@@ -753,7 +903,7 @@ class MainWindow(QMainWindow):
         self.product_scanner.disconnected.connect(self._on_scanner_disconnected)
         self.product_scanner.scanned.connect(self._on_product_scanned)
         self.product_scanner.verdict.connect(self._on_product_verdict)
-        self.product_scanner.error.connect(lambda e: self._log(e, "SYS", level="err"))
+        self.product_scanner.error.connect(self._on_worker_error)
         self.product_scanner.finished.connect(self._scan_thread.quit)
         self._scan_thread.start()
 
@@ -782,28 +932,53 @@ class MainWindow(QMainWindow):
         )
 
     # ── OPL upload (auto trigger sau mỗi PLC verdict) ────────
+    # ── chạy worker 1-lần, tự dọn sạch (tránh rò thread/handle) ──
+    def _run_worker(self, worker, busy_attr: str | None = None):
+        """Chạy worker QObject trên 1 QThread dùng-một-lần rồi DỌN SẠCH.
+
+        Quan trọng: gọi thread.deleteLater() khi xong để giải phóng handle +
+        cửa sổ nội bộ Win32 của QThread. Nếu không, MỖI sản phẩm rò 1 thread
+        → sau ~10 phút cạn USER handle của Windows → app đơ dù CPU/RAM thấp.
+        """
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)   # xoá worker (mẫu chuẩn Qt)
+        job = (thread, worker)
+        self._jobs.append(job)
+
+        def _cleanup():
+            thread.deleteLater()
+            try:
+                self._jobs.remove(job)   # buông ref → worker được GC
+            except ValueError:
+                pass
+            if busy_attr:
+                setattr(self, busy_attr, False)
+
+        thread.finished.connect(_cleanup)
+        thread.start()
+
     def _trigger_opl_upload(self, sn: str, verdict_label: str, root_dir: str):
-        if not getattr(config, "ON_OFF_SFC", True):
+        if not getattr(config, "SAVE_IMAGE", True):
+            self._log("Save image tắt — bỏ qua đẩy ảnh", "SYS")
             return
-        if getattr(self, "_opl_thread", None) is not None:
-            return  # đang chạy, bỏ qua trigger trùng
+        if self._opl_busy:
+            return  # đang upload ảnh, bỏ qua trigger trùng
         self._log(f"Tìm ảnh {verdict_label} mới nhất cho {sn} trong {root_dir}…", "SYS")
 
-        self._opl_thread = QThread(self)
-        self._opl_worker = OplImageWorker(
+        worker = OplImageWorker(
             root_dir=root_dir,
             upload_dir=config.link_post_img,
             sn=sn,
             verdict_label=verdict_label,
         )
-        self._opl_worker.moveToThread(self._opl_thread)
-        self._opl_thread.started.connect(self._opl_worker.run)
-        self._opl_worker.image_ready.connect(self._on_opl_image_ready)
-        self._opl_worker.upload_done.connect(self._on_opl_upload_done)
-        self._opl_worker.error.connect(lambda e: self._log(e, "SYS", level="err"))
-        self._opl_worker.finished.connect(self._on_opl_finished)
-        self._opl_worker.finished.connect(self._opl_thread.quit)
-        self._opl_thread.start()
+        worker.image_ready.connect(self._on_opl_image_ready)
+        worker.upload_done.connect(self._on_opl_upload_done)
+        worker.error.connect(self._on_worker_error)
+        self._opl_busy = True
+        self._run_worker(worker, busy_attr="_opl_busy")
 
     def _on_opl_image_ready(self, name: str, _qimg: QImage):
         self._log(f"Đã load ảnh: {name}", "SYS", level="ok")
@@ -812,17 +987,15 @@ class MainWindow(QMainWindow):
         level = "ok" if ok else "err"
         self._log(f"Upload: {msg}", "SYS", level=level)
 
-    def _on_opl_finished(self):
-        self._opl_thread = None
-        self._opl_worker = None
-
     # ── Data export .xls (auto trigger sau mỗi PLC verdict) ───
     def _trigger_data_export(self, sn: str, result: str = ""):
+        if not getattr(config, "SAVE_EXCEL", True):
+            self._log("Save Excel tắt — bỏ qua ghi .xls", "SYS")
+            return
         src = getattr(config, "DATA_SRC_DIR", "")
         dst = getattr(config, "DATA_EXPORT_DIR", "")
         if not src or not dst:
             return  # chưa cấu hình folder → bỏ qua
-        thread = QThread(self)
         worker = DataExportWorker(
             src_dir=src,
             dst_dir=dst,
@@ -830,21 +1003,8 @@ class MainWindow(QMainWindow):
             result=result,
             date_fmt=getattr(config, "DATA_FILE_DATEFMT", "%Y%m%d"),
         )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
         worker.done.connect(self._on_data_export_done)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        # Dọn job khỏi danh sách KHI nó kết thúc — chỉ so sánh identity,
-        # không gọi .isRunning() lên thread đã bị deleteLater (sẽ RuntimeError
-        # và làm chết các lần export sau).
-        thread.finished.connect(lambda t=thread: self._cleanup_data_job(t))
-        self._data_jobs.append((thread, worker))
-        thread.start()
-
-    def _cleanup_data_job(self, thread):
-        self._data_jobs = [(t, w) for (t, w) in self._data_jobs if t is not thread]
+        self._run_worker(worker)
 
     def _on_data_export_done(self, ok: bool, msg: str):
         self._log(msg, "SYS", level=("ok" if ok else "err"))
@@ -878,6 +1038,9 @@ class MainWindow(QMainWindow):
             self._push_sfc_result(pid, result)
             self._trigger_opl_upload(pid, verdict_label, root_dir)
             self._trigger_data_export(pid, verdict)
+        # xử lý xong tín hiệu D300 → xoá SN, chờ lần quét kế tiếp
+        self._current_sn = ""
+        self._product_lbl.setText("—")
 
     # ── SFC clipThroughStation push ──────────────────────────
     def _push_sfc_result(self, sn: str, result: str):
@@ -892,18 +1055,14 @@ class MainWindow(QMainWindow):
             "empNo": self.employee_id,
             "result": result,
         }
-        thread = QThread(self)
-        worker = SfcPushWorker(config.link_sfc, payload,
-                               timeout=config.API_REQUEST_TIMEOUT)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
+        worker = SfcPushWorker(
+            config.link_sfc, payload,
+            timeout=config.API_REQUEST_TIMEOUT,
+            src_dir=getattr(config, "DATA_SRC_DIR", ""),
+            date_fmt=getattr(config, "DATA_FILE_DATEFMT", "%Y%m%d"),
+        )
         worker.done.connect(self._on_sfc_done)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        self._sfc_jobs = getattr(self, "_sfc_jobs", [])
-        self._sfc_jobs.append((thread, worker))
-        thread.start()
+        self._run_worker(worker)
 
     def _on_sfc_done(self, ok: bool, msg: str):
         self._log(msg, "SYS", level=("ok" if ok else "err"))
@@ -929,13 +1088,19 @@ class MainWindow(QMainWindow):
         ts = datetime.now().strftime("%H:%M:%S")
         tcol = tag_colors.get(tag, "#79c0ff")
         mcol = msg_colors.get(level, "#e6edf3")
-        det = f" <span style='color:#7d8590'>· {detail}</span>" if detail else ""
+        # escape: message/detail (vd lỗi API, repr exception) có thể chứa
+        # < > & làm vỡ HTML → khi đó log không hiển thị/không cuộn được.
+        det = (f" <span style='color:#7d8590'>· {escape(str(detail))}</span>"
+               if detail else "")
         html = (
             f"<span style='color:#5b6772;'>[{ts}]</span>&nbsp;"
-            f"<span style='color:{tcol};font-weight:700;'>{tag}</span>&nbsp;&nbsp;"
-            f"<span style='color:{mcol}'>{message}</span>{det}"
+            f"<span style='color:{tcol};font-weight:700;'>{escape(str(tag))}</span>&nbsp;&nbsp;"
+            f"<span style='color:{mcol}'>{escape(str(message))}</span>{det}"
         )
         self.log_view.append(html)
+        # luôn cuộn xuống dòng mới nhất (kể cả khi log lỗi dồn dập)
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     # ── chip helper ──────────────────────────────────────────
     def _set_chip(self, chip: StatusChip, text: str, color: str):
@@ -955,6 +1120,13 @@ class MainWindow(QMainWindow):
             self._plc_thread.wait(2000)
         except Exception:
             pass
+        # dọn các job 1-lần còn chạy (SFC/OPL/export)
+        for thread, _worker in list(self._jobs):
+            try:
+                thread.quit()
+                thread.wait(1500)
+            except Exception:
+                pass
         super().closeEvent(e)
 
 
