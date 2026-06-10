@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 import config
 import cp2e
+import crashlog
 from login_window import LoginWindow
 from main_window import MainWindow
 from settings_window import load_settings_overrides
@@ -43,6 +44,9 @@ def load_stylesheet() -> str:
 
 
 def main():
+    # faulthandler + watchdog treo GUI → crash.log. Bắt buộc gọi install():
+    # heartbeat() trong main/login window chỉ có tác dụng khi watchdog chạy.
+    crashlog.install()
     load_settings_overrides()  # patch config từ settings.json (nếu có)
     cp2e.configure(port=getattr(config, "PLC_PORT", 9600))  # cổng FINS/TCP CP2E
 

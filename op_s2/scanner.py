@@ -283,7 +283,10 @@ class ProductScanner(QObject):
                 # line chạy không cần quét tay.
                 if not getattr(config, "SCAN_ENABLED", True):
                     self._write_plc(1)
-                    time.sleep(0.03)
+                    # 0.5s là quá đủ cho handshake D250. sleep(0.03) cũ =
+                    # 33 lần ghi/giây → nghẽn board Ethernet PLC + tranh
+                    # _lock với thread poll verdict.
+                    time.sleep(0.5)
                 else:
                     code = self._read_code()
                     if not code:
@@ -327,6 +330,12 @@ class ProductScanner(QObject):
             return ""
         if raw:
             self._buf += raw.decode("ascii", errors="ignore")
+            # scanner cấu hình sai (không gửi CR/LF) / line nhiễu → buffer
+            # không bao giờ được cắt; chặn phình vô hạn theo giờ chạy
+            if len(self._buf) > 4096:
+                self._buf = self._buf[-256:]
+                self._emit_error("Buffer serial đầy không thấy CR/LF — "
+                                 "kiểm tra cấu hình suffix của scanner")
         return self._pop_code() or ""
 
     def _pop_code(self) -> str:

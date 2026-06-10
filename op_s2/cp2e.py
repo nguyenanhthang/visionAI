@@ -30,6 +30,7 @@ from __future__ import annotations
 import socket
 import struct
 import threading
+import time
 
 
 # ── FINS memory area codes (word access) ─────────────────────────
@@ -89,6 +90,13 @@ class _FinsTcp:
         self.close()
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(self.timeout)
+        # Frame FINS rất nhỏ → tắt Nagle cho khỏi trễ; keepalive để OS tự
+        # phát hiện kết nối chết (PLC reboot/rút cáp) thay vì chờ timeout đọc.
+        try:
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
         try:
             s.connect((self.host, self.port))
             self.sock = s
@@ -159,13 +167,25 @@ class _FinsTcp:
 # ── Connection cache (giống panasonic._ports / h3u_h5u._masters) ─
 _lock = threading.Lock()
 _conns: "dict[str, _FinsTcp]" = {}
+_fail_until: "dict[str, float]" = {}   # IP → mốc monotonic được phép reconnect lại
+_BACKOFF_S = 2.0
 
 
 def _get_conn(ip: str) -> _FinsTcp:
     c = _conns.get(ip)
     if c is None or c.sock is None:
+        # PLC đang chết: không thử connect (≈2-6s timeout) ở MỌI call —
+        # 2 thread (poll + scanner) thay nhau ôm _lock chờ timeout làm
+        # quét SN nghẽn hàng chục giây. Fail-fast trong cửa sổ backoff.
+        if time.monotonic() < _fail_until.get(ip, 0.0):
+            raise ConnectionError(f"{ip}: chờ backoff sau lỗi kết nối")
         c = _FinsTcp(ip, PORT, TIMEOUT_S)
-        c.connect()
+        try:
+            c.connect()
+        except Exception:
+            _fail_until[ip] = time.monotonic() + _BACKOFF_S
+            raise
+        _fail_until.pop(ip, None)
         _conns[ip] = c
     return c
 

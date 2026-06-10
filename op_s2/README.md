@@ -62,3 +62,30 @@ rồi ghi lại 0. Giao thức nằm trong `cp2e.py` (vùng Data Memory, area co
 
 Tương tự, `config.py` set `SCANNER_PORT`, `API_TOKEN_URL`,
 `API_EMPLOYEE_URL_PREFIX`. Bỏ trống API URL → fallback dùng `employees.py`.
+
+## Fix "app đơ sau ~2 giờ chạy" (2026-06)
+
+Nguyên nhân chính: handshake verdict D300 kiểu **so sánh với giá trị poll
+trước** + ghi ack 0 SAU khi emit. Chạy vài giờ = vài chục nghìn giao dịch
+FINS — chỉ cần MỘT lần ghi-0 thất bại (mạng chập chờn, board Ethernet PLC
+bận) là D300 kẹt ở 1; mọi verdict PASS sau đó (cũng =1) bị coi là "không
+đổi" và **bỏ qua vĩnh viễn**: không SFC, không lưu ảnh/Excel, line đứng —
+nhìn như app treo dù GUI vẫn vẽ. Các fix:
+
+1. `plc_worker.py` — handshake **ack-trước-emit-sau**: thấy ≠0 → ghi 0,
+   ghi OK mới emit; ghi lỗi → poll sau đọc lại giá trị còn nguyên, thử
+   lại. Không còn phụ thuộc "giá trị thay đổi". Verdict + scan-check
+   (D500) đọc GỘP 1 giao dịch FINS → giảm nửa tải lên PLC.
+2. `main.py` — gọi `crashlog.install()` (trước đây quên gọi → watchdog
+   treo GUI + faulthandler không chạy). Giờ nếu còn treo, `crash.log`
+   sẽ dump stack toàn bộ thread để truy đúng chỗ.
+3. `cp2e.py` — `TCP_NODELAY` + `SO_KEEPALIVE`; **backoff 2s** sau lỗi
+   connect: PLC chết không còn làm mỗi call ôm lock chờ timeout 2-6s
+   (làm quét SN nghẽn hàng chục giây).
+4. `scanner.py` — chế độ tắt "Quét SN" ghi D250 mỗi 0.5s thay vì 33
+   lần/giây (nghẽn board Ethernet PLC); chặn buffer serial phình vô hạn
+   khi scanner không gửi CR/LF.
+5. `main_window.py` — bỏ decode QImage (vài chục MB/sản phẩm, chỉ để log
+   tên rồi vứt); file đo dạng text chỉ đọc 256KB cuối (file phình cả
+   ngày, trước đây đọc nguyên file cho MỖI verdict); cảnh báo khi job
+   nền dồn ứ / upload ảnh kẹt share mạng.
