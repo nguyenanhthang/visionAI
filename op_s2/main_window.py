@@ -567,6 +567,12 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._log_queued.connect(self._append_log)   # bound method → queued
+        # log đệm theo nhịp: dồn các dòng trong 200ms rồi ghi widget 1 lần
+        self._log_buf: list[str] = []
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setSingleShot(True)
+        self._log_flush_timer.setInterval(200)
+        self._log_flush_timer.timeout.connect(self._flush_log)
         self._setup_clock()
         self._setup_plc()
         self._setup_product_scanner()
@@ -1165,6 +1171,15 @@ class MainWindow(QMainWindow):
         self._append_log(str(message), str(tag), str(level), str(detail))
 
     def _append_log(self, message: str, tag: str, level: str, detail: str):
+        """Dựng HTML 1 dòng log rồi ĐỆM lại — KHÔNG đụng widget ngay.
+
+        crash.log op_v7 (Timeout 11/06) bắt được GUI đơ cứng ≥15s NGAY
+        TRONG ``log_view.append``: mỗi lần widget đổi nội dung, Windows bắn
+        thông báo accessibility đồng bộ sang tool đang attach (remote/AV) —
+        tool treo là app treo theo. Đệm + flush 1 lần mỗi 200ms: (1) giảm
+        hàng chục lần số lần gọi widget, (2) log dồn dập (bão lỗi) không
+        còn nghẽn GUI. Kết hợp chặn WM_GETOBJECT ở main.py để miễn nhiễm hẳn.
+        """
         tag_colors = {
             "OK":  "#7ee787",
             "NG":  "#ffa198",
@@ -1185,8 +1200,18 @@ class MainWindow(QMainWindow):
             f"<span style='color:{tcol};font-weight:700;'>{escape(str(tag))}</span>&nbsp;&nbsp;"
             f"<span style='color:{mcol}'>{escape(str(message))}</span>{det}"
         )
-        self.log_view.append(html)
-        # luôn cuộn xuống dòng mới nhất (kể cả khi log lỗi dồn dập)
+        self._log_buf.append(html)
+        if len(self._log_buf) > 400:        # GUI kẹt lâu → giữ 200 dòng mới nhất
+            del self._log_buf[:-200]
+        if not self._log_flush_timer.isActive():
+            self._log_flush_timer.start()
+
+    def _flush_log(self):
+        """Đổ cả đợt log đệm vào QTextEdit bằng 1 lần append + 1 lần cuộn."""
+        if not self._log_buf:
+            return
+        lines, self._log_buf = self._log_buf, []
+        self.log_view.append("<br>".join(lines))
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 

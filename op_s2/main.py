@@ -43,6 +43,42 @@ def load_stylesheet() -> str:
     return ""
 
 
+def install_a11y_blocker(app):
+    """Chặn WM_GETOBJECT → tool UIA/MSAA (remote desktop, AV, agent giám
+    sát…) KHÔNG attach được vào cửa sổ app.
+
+    crash.log op_v7 bắt được GUI đơ cứng ≥15s NGAY TRONG QTextEdit.append:
+    mỗi lần widget đổi nội dung, Windows thông báo accessibility ĐỒNG BỘ
+    sang client đang attach — client treo là app treo theo (chuỗi
+    0x8001010d dày đặc trong log = đúng họ COM input-sync này). App kiosk
+    xưởng không cần screen-reader → chặn hẳn cho miễn nhiễm. Tắt bằng
+    DISABLE_ACCESSIBILITY = False trong config nếu cần.
+    """
+    if sys.platform != "win32" or not getattr(config, "DISABLE_ACCESSIBILITY", True):
+        return None
+    try:
+        import ctypes.wintypes as wt
+        from PySide6.QtCore import QAbstractNativeEventFilter
+
+        class _NoA11y(QAbstractNativeEventFilter):
+            _WM_GETOBJECT = 0x003D
+
+            def nativeEventFilter(self, etype, message):
+                try:
+                    msg = ctypes.cast(int(message), ctypes.POINTER(wt.MSG)).contents
+                    if msg.message == self._WM_GETOBJECT:
+                        return True, 0   # nuốt → không cấp accessibility object
+                except Exception:
+                    pass
+                return False, 0
+
+        flt = _NoA11y()
+        app.installNativeEventFilter(flt)
+        return flt   # PHẢI giữ ref — Qt không own filter
+    except Exception:
+        return None
+
+
 def main():
     # faulthandler + watchdog treo GUI → crash.log. Bắt buộc gọi install():
     # heartbeat() trong main/login window chỉ có tác dụng khi watchdog chạy.
@@ -51,6 +87,7 @@ def main():
     cp2e.configure(port=getattr(config, "PLC_PORT", 9600))  # cổng FINS/TCP CP2E
 
     app = QApplication(sys.argv)
+    app._a11y_filter = install_a11y_blocker(app)   # giữ ref suốt vòng đời app
     app.setApplicationName("Riser cable")
     app.setOrganizationName("Riser cable")
     app.setStyle("Fusion")

@@ -12,6 +12,11 @@ SCANNER_TIMEOUT    = 0.5     # giây - càng nhỏ stop càng nhanh
 PRODUCT_READ_SIZE  = 64      # số byte tối đa cho 1 lần đọc mã sản phẩm
 Staff              = ''  # mã NV mặc định
 
+# Chặn tool accessibility (UIA/MSAA — remote desktop/AV/agent giám sát…)
+# attach vào app. Client treo từng làm GUI đơ cứng ngay trong lệnh ghi log
+# (crash.log op_v7 Timeout 11/06). App kiosk không cần screen-reader → chặn.
+DISABLE_ACCESSIBILITY = True
+
 # ── API xác thực nhân viên ─────────────────────────────────
 # Để rỗng → fallback dùng employees.py local.
 API_TOKEN_URL           = ""
