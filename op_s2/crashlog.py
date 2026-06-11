@@ -2,15 +2,27 @@
 
 ``install()`` bật:
   - ``faulthandler``: dump Python traceback khi gặp tín hiệu fatal — segfault,
-    hoặc abort của Qt (vd "QThread: Destroyed while thread is still running").
+    abort của Qt, hỏng heap (0xC0000374)…
   - ``sys.excepthook`` + ``threading.excepthook``: ghi exception CHƯA BẮT
     (cả ở thread phụ) kèm thời gian.
   - **Watchdog**: GUI gọi ``heartbeat()`` mỗi giây; nếu quá ``stale`` giây
     không nhịp (app "Not Responding"/treo) → dump TẤT CẢ thread vào crash.log
-    để biết GUI đang kẹt ở đâu (faulthandler.enable KHÔNG bắt treo).
+    để biết GUI đang kẹt ở đâu (faulthandler.enable KHÔNG bắt treo). Khi GUI
+    sống lại → ghi ``RECOVERED`` kèm số giây kẹt, để phân biệt **treo thật
+    (deadlock)** với **khựng tạm thời** (vd copy ảnh lên share mạng chậm,
+    PLC timeout) — Windows hiện "Not Responding" cho cả hai.
 
-File ``crash.log`` nằm cạnh .exe (frozen) hoặc cạnh script. Khi app văng/treo,
-gửi file này để biết chính xác chỗ lỗi.
+ĐỌC LOG THẾ NÀO:
+  - ``===== HANG … =====``      → GUI treo, xem stack để biết kẹt ở đâu.
+  - ``===== HANG-STILL … =====`` → vẫn treo, dump lại để so stack (đứng hẳn?).
+  - ``===== RECOVERED … =====``  → chỉ khựng tạm thời rồi tự hồi (I/O chậm),
+    KHÔNG phải đứng máy.
+  - ``Windows fatal exception: code 0x8001010d`` → **nhiễu COM lành tính**
+    (RPC_E_CANTCALLOUT_ININPUTSYNCCALL, thường do tool accessibility / AV /
+    remote desktop), app VẪN chạy — bỏ qua. Chỉ lo các mã như
+    ``0xC0000374`` (hỏng heap) / ``access violation``.
+
+File ``crash.log`` nằm cạnh .exe (frozen) hoặc cạnh script.
 """
 
 from __future__ import annotations
@@ -50,24 +62,44 @@ def heartbeat():
     _alive = time.monotonic()
 
 
+def _dump_all_threads():
+    try:
+        if _fault_fp is not None:
+            faulthandler.dump_traceback(file=_fault_fp, all_threads=True)
+            _fault_fp.flush()
+    except Exception:
+        pass
+
+
 def _watchdog(stale: float):
+    """Bắt treo GUI. Trong lúc treo, cứ ``stale`` giây dump lại 1 lần để
+    thấy app có nhúc nhích không (cùng chỗ = deadlock thật); khi hồi thì
+    ghi rõ đã kẹt bao lâu (khựng tạm thời, không phải đứng máy)."""
     global _hang_dumped
+    redump_at = 0.0
+    hang_since = 0.0
     while True:
-        time.sleep(2.0)
+        time.sleep(1.0)
         if _alive is None:
             continue
         late = time.monotonic() - _alive
         if late > stale:
+            now = time.monotonic()
             if not _hang_dumped:
                 _hang_dumped = True
+                hang_since = now
+                redump_at = now + max(stale, 10.0)
                 _write("HANG", f"GUI không phản hồi ~{late:.0f}s — dump tất cả thread:")
-                try:
-                    if _fault_fp is not None:
-                        faulthandler.dump_traceback(file=_fault_fp, all_threads=True)
-                        _fault_fp.flush()
-                except Exception:
-                    pass
+                _dump_all_threads()
+            elif now >= redump_at:
+                redump_at = now + max(stale, 10.0)
+                _write("HANG-STILL", f"vẫn treo ~{now - hang_since:.0f}s — dump lại:")
+                _dump_all_threads()
         else:
+            if _hang_dumped:
+                _write("RECOVERED",
+                       f"GUI hồi phục sau ~{time.monotonic() - hang_since:.0f}s kẹt "
+                       f"(khựng tạm thời, không phải đứng máy)")
             _hang_dumped = False   # GUI sống lại → cho phép dump lần treo sau
 
 
@@ -90,12 +122,19 @@ def install(hang_stale: float = 15.0):
     except Exception:
         pass
 
-    # 3) crash native (segfault / abort của Qt) → dump Python stack vào file
+    # 3) crash native (segfault / abort của Qt / hỏng heap) → dump stack vào file
     try:
         _fault_fp = open(log_path(), "a", encoding="utf-8")
         faulthandler.enable(_fault_fp)
     except Exception:
         pass
+
+    # banner mở phiên: tách các lần chạy + nhắc cách đọc log
+    base = (sys.executable if getattr(sys, "frozen", False) else __file__)
+    _write("START", f"App khởi động — theo dõi treo (>{hang_stale:.0f}s) + crash.\n"
+                    f"path: {base}\n"
+                    f"(0x8001010d = nhiễu COM lành tính, bỏ qua; "
+                    f"chỉ lo HANG / 0xC0000374 / access violation)")
 
     # 4) watchdog bắt treo (no-responding)
     heartbeat()
