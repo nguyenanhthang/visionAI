@@ -111,16 +111,19 @@ class H3U_PLCWorker(PLCWorker):
     chưa". Hai thanh ghi được đọc GỘP 1 giao dịch Modbus khi đủ gần nhau
     (≤120 word — giới hạn 1 frame Modbus là 125); xa hơn thì đọc 2 lần.
 
-    Handshake kiểu ACK-TRƯỚC-EMIT-SAU:
-        thấy giá trị ≠ 0 → ghi 0 vào thanh ghi (ack); ack THÀNH CÔNG mới
-        emit. Ack thất bại (mạng chập chờn) → không emit, vòng poll sau
-        đọc lại giá trị còn nguyên và thử lại — không mất verdict.
+    Handshake "1 emit / 1 xung" + ACK-TRƯỚC-EMIT-SAU (cờ ``_verdict_armed``):
+        thấy ≠0 lần đầu → ghi 0 (ack); ack OK mới emit rồi hạ cờ. PLC còn
+        giữ =1 các vòng sau → chỉ re-ack, KHÔNG emit lại. Khi thanh ghi về
+        0 → arm lại cho xung kế. Ack lỗi (mạng chập chờn) → giữ cờ, poll sau
+        thử lại — không mất verdict.
 
-    Bản cũ so sánh với giá trị của poll trước (``_prev_val``) và ghi 0 SAU
-    khi emit, không kiểm tra ghi thành công: chỉ cần MỘT lần ghi-0 thất
-    bại là thanh ghi kẹt ở 1, mọi verdict PASS (cũng =1) về sau bị coi là
-    "không đổi" và bỏ qua vĩnh viễn → app trông như treo sau vài giờ chạy
-    dù GUI vẫn vẽ bình thường.
+    Hai lỗi của bản trước, sửa cùng lúc:
+      - ``_prev_val`` (so sánh đổi giá trị) + ghi 0 SAU emit, không kiểm tra
+        ghi: 1 lần ghi-0 trượt là thanh ghi kẹt 1, mọi PASS sau bị bỏ vĩnh
+        viễn → line đứng (giống treo).
+      - ack-trước nhưng KHÔNG nhớ đã xử lý xung: nếu PLC giữ =1 vài vòng
+        poll thì emit 5 lần/giây → bão thread SFC/ảnh/Excel → cạn tài
+        nguyên → ĐƠ CỨNG máy (phải tắt Task Manager). Cờ armed chặn cả hai.
     """
 
     _SPAN_MAX = 120   # đọc gộp khi 2 thanh ghi cách nhau ≤ 120 word (Modbus max 125)
@@ -134,6 +137,13 @@ class H3U_PLCWorker(PLCWorker):
         self.result_addr = result_addr
         self.scan_addr = scan_addr
         self.scan_check_addr = int(scan_check_addr or 0)  # 0 → tắt scan-check
+        # "armed" = sẵn sàng nhận XUNG kế tiếp. Đặt False ngay khi đã xử lý 1
+        # xung; chỉ arm lại khi thanh ghi đã về 0. Nhờ vậy verdict/scan_check
+        # chỉ bắn 1 LẦN cho mỗi xung — kể cả khi PLC GIỮ thanh ghi =1 nhiều
+        # vòng poll (5 lần/giây). KHÔNG có cờ này thì giữ-cao = bão verdict →
+        # đẻ hàng loạt thread SFC/ảnh/Excel → cạn tài nguyên → đơ cứng máy.
+        self._verdict_armed = True
+        self._scanchk_armed = True
 
     def _connect(self):
         import h3u_h5u
@@ -172,17 +182,35 @@ class H3U_PLCWorker(PLCWorker):
     def _poll(self):
         import h3u_h5u
         val, chk = self._read_regs()
-        # 1) verdict reg 300 — ack trước, emit sau
+        # 1) verdict reg 300 — 1 emit / 1 xung, ack-trước-emit-sau
         if val in (1, 2):
-            if h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0):
-                if val == 1:
-                    self.result.emit({"ok": True, "result": "PASS"})
+            if self._verdict_armed:
+                # xung mới → ghi 0 (ack). Ghi OK mới emit + nhả "armed".
+                if h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0):
+                    self._verdict_armed = False
+                    if val == 1:
+                        self.result.emit({"ok": True, "result": "PASS"})
+                    else:
+                        self.result.emit({"ok": False, "result": "FAIL"})
                 else:
-                    self.result.emit({"ok": False, "result": "FAIL"})
+                    # ack lỗi → KHÔNG emit, giữ armed, poll sau thử lại (không mất)
+                    self._emit_error(
+                        f"Ghi ack reg {self.result_addr}=0 thất bại — thử lại poll sau")
             else:
-                self._emit_error(
-                    f"Ghi ack reg {self.result_addr}=0 thất bại — thử lại poll sau")
-        # 2) check "đã quét SN chưa" reg 500 — ack rồi mới báo
+                # đã xử lý xung này rồi, PLC còn giữ =1 → chỉ re-ack, KHÔNG emit lại
+                h3u_h5u.write_data_h3u(self.ip, self.result_addr, 0)
+        elif val == 0:
+            self._verdict_armed = True   # thanh ghi đã nhả → sẵn sàng xung kế
+        # 2) check "đã quét SN chưa" reg 500 — cũng 1 emit / 1 xung
         if chk == 1:
-            if h3u_h5u.write_data_h3u(self.ip, self.scan_check_addr, 0):
-                self.scan_check.emit()
+            if self._scanchk_armed:
+                if h3u_h5u.write_data_h3u(self.ip, self.scan_check_addr, 0):
+                    self._scanchk_armed = False
+                    self.scan_check.emit()
+                else:
+                    self._emit_error(
+                        f"Ghi ack reg {self.scan_check_addr}=0 thất bại — thử lại poll sau")
+            else:
+                h3u_h5u.write_data_h3u(self.ip, self.scan_check_addr, 0)
+        elif chk == 0:
+            self._scanchk_armed = True
