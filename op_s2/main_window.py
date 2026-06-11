@@ -545,6 +545,9 @@ class DataExportWorker(QObject):
 # ── main window ──────────────────────────────────────────────────
 class MainWindow(QMainWindow):
 
+    # _log gọi từ thread phụ → re-dispatch về GUI thread qua signal này
+    _log_queued = Signal(str, str, str, str)
+
     def __init__(self, employee_id: str, employee_name: str = "", parent=None):
         super().__init__(parent)
         self.employee_id = employee_id
@@ -563,6 +566,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(460, 600)
 
         self._build_ui()
+        self._log_queued.connect(self._append_log)   # bound method → queued
         self._setup_clock()
         self._setup_plc()
         self._setup_product_scanner()
@@ -1133,6 +1137,20 @@ class MainWindow(QMainWindow):
 
     # ── log ──────────────────────────────────────────────────
     def _log(self, message: str, tag: str = "INFO", level: str = "info", detail: str = ""):
+        """Ghi 1 dòng log — AN TOÀN THREAD.
+
+        crash.log thực tế (build cũ) cho thấy app văng 0xC0000374 (hỏng
+        heap) vì signal worker nối qua lambda → slot chạy NGAY trên thread
+        worker → _log đụng QTextEdit từ thread sai. Mọi connect giờ đã là
+        bound method, nhưng để lỗi kiểu đó KHÔNG BAO GIỜ sập app nữa:
+        gọi _log từ thread khác GUI → tự re-dispatch qua signal (queued).
+        """
+        if QThread.currentThread() is not self.thread():
+            self._log_queued.emit(str(message), str(tag), str(level), str(detail))
+            return
+        self._append_log(str(message), str(tag), str(level), str(detail))
+
+    def _append_log(self, message: str, tag: str, level: str, detail: str):
         tag_colors = {
             "OK":  "#7ee787",
             "NG":  "#ffa198",
