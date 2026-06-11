@@ -283,7 +283,10 @@ class ProductScanner(QObject):
                 # line chạy không cần quét tay.
                 if not getattr(config, "SCAN_ENABLED", True):
                     self._write_plc(1)
-                    time.sleep(0.03)
+                    # 0.5s là quá đủ cho handshake D250. sleep(0.03) cũ =
+                    # 33 lần ghi/giây → nghẽn PLC + tranh _lock với thread
+                    # poll verdict.
+                    time.sleep(0.5)
                 else:
                     code = self._read_code()
                     if not code:
@@ -307,15 +310,49 @@ class ProductScanner(QObject):
         self._stop = True
 
     def _read_code(self) -> str:
+        """Trả về 1 mã hoàn chỉnh (đã tách theo CR/LF).
+
+        Scanner kết thúc mỗi lần quét bằng CR (``\\r``). Đọc thô vào buffer
+        rồi cắt theo ``\\r``/``\\n``: nếu 2 lần quét dồn vào cùng 1 lần đọc
+        (lúc app đang bận) thì mã thứ 2 vẫn nằm lại buffer cho vòng sau —
+        không gộp 2 mã, không để ``\\r`` lọt vào giữa mã (gây tên file lỗi).
+        """
+        # 1) còn mã hoàn chỉnh trong buffer → trả ngay, khỏi chờ serial
+        code = self._pop_code()
+        if code:
+            return code
+        # 2) đọc thêm từ serial rồi tách lại
         try:
-            raw = self._serial.readline(self.read_size)
+            raw = self._serial.read(self.read_size)
         except Exception as exc:
-            self.error.emit(f"Lỗi đọc serial: {exc}")
+            self._emit_error(f"Lỗi đọc serial: {exc}")
             time.sleep(1.0)
             return ""
-        if not raw:
-            return ""
-        return raw.decode("ascii", errors="ignore").strip()
+        if raw:
+            self._buf += raw.decode("ascii", errors="ignore")
+            # scanner cấu hình sai (không gửi CR/LF) / line nhiễu → buffer
+            # không bao giờ được cắt; chặn phình vô hạn theo giờ chạy
+            if len(self._buf) > 4096:
+                self._buf = self._buf[-256:]
+                self._emit_error("Buffer serial đầy không thấy CR/LF — "
+                                 "kiểm tra cấu hình suffix của scanner")
+        return self._pop_code() or ""
+
+    def _pop_code(self) -> str:
+        """Lấy mã đầu tiên còn nguyên trong buffer (tới ký tự CR/LF). '' nếu chưa có."""
+        while self._buf:
+            cands = [i for i in (self._buf.find("\r"), self._buf.find("\n")) if i >= 0]
+            if not cands:
+                return ""               # chưa có terminator → chờ đọc thêm
+            pos = min(cands)
+            code = self._buf[:pos].strip()
+            j = pos
+            while j < len(self._buf) and self._buf[j] in "\r\n":
+                j += 1                  # nhảy qua mọi CR/LF liên tiếp
+            self._buf = self._buf[j:]
+            if code:
+                return code             # bỏ qua đoạn rỗng, tìm mã kế tiếp
+        return ""
 
     def _check_api(self, code: str) -> bool:
         if not getattr(config, "ON_OFF_SFC", True):

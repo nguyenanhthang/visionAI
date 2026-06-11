@@ -67,3 +67,29 @@ trong Settings.
 
 Tương tự, `config.py` set `SCANNER_PORT`, `API_TOKEN_URL`,
 `API_EMPLOYEE_URL_PREFIX`. Bỏ trống API URL → fallback dùng `employees.py`.
+
+## Fix "app đơ sau vài giờ chạy" (2026-06)
+
+Nguyên nhân chính: handshake verdict reg 300 kiểu **so sánh với giá trị poll
+trước** + ghi ack 0 SAU khi emit, không kiểm tra ghi thành công. Chạy vài
+giờ = vài chục nghìn giao dịch Modbus — chỉ cần MỘT lần ghi-0 thất bại
+(mạng chập chờn) là reg 300 kẹt ở 1; mọi verdict PASS sau đó (cũng =1) bị
+coi là "không đổi" và **bỏ qua vĩnh viễn**: không SFC, không lưu ảnh/Excel,
+line đứng — nhìn như app treo dù GUI vẫn vẽ. Các fix:
+
+1. `plc_worker.py` — handshake **ack-trước-emit-sau**: thấy ≠0 → ghi 0,
+   ghi OK mới emit; ghi lỗi → poll sau đọc lại giá trị còn nguyên, thử
+   lại. Không còn phụ thuộc "giá trị thay đổi". Verdict + scan-check đọc
+   gộp 1 giao dịch Modbus khi 2 thanh ghi cách nhau ≤120 word. Throttle
+   error lặp lại ở vòng poll.
+2. `h3u_h5u.py` — master Modbus hỏng được **đóng + mở lại** (trước đây
+   cache vĩnh viễn: PLC reboot/đứt mạng 1 lần là mọi read/write lỗi mãi
+   tới khi restart app); retry 1 lần; **backoff 2s** sau lỗi connect để
+   PLC chết không làm mỗi call ôm lock chờ timeout 3s (nghẽn quét SN).
+3. `scanner.py` — chế độ tắt "Quét SN" ghi reg 250 mỗi 0.5s thay vì 33
+   lần/giây; đọc mã theo buffer cắt CR/LF (2 lần quét dồn không bị gộp
+   mã, không lọt `\r` vào tên file) + chặn buffer phình vô hạn.
+4. `main_window.py` — bỏ decode QImage (vài chục MB/sản phẩm, chỉ để log
+   tên rồi vứt); file đo dạng text chỉ đọc 256KB cuối (file phình cả
+   ngày, trước đây đọc nguyên file cho MỖI verdict); throttle log "CHƯA
+   QUÉT HÀNG"; cảnh báo khi job nền dồn ứ / upload ảnh kẹt share mạng.

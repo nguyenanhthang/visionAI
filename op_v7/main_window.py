@@ -25,7 +25,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QSize, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QIcon, QImage, QLinearGradient, QPainter, QPen,
+    QBrush, QColor, QFont, QIcon, QLinearGradient, QPainter, QPen,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -81,7 +81,7 @@ class StatusChip(QFrame):
 
 
 class OplImageWorker(QObject):
-    """Tìm subfolder mới nhất + ảnh mới nhất → load + upload.
+    """Tìm subfolder mới nhất + ảnh mới nhất → upload.
 
     - Subfolder + ảnh đều chọn theo mtime giảm dần để không lệ
       thuộc vào quy ước đặt tên (YYYYMMDD, test1/test2, …).
@@ -89,9 +89,11 @@ class OplImageWorker(QObject):
     - File đích đổi tên: ``{sn}_{YYYY.MM.DD HH.MM.SS}_{verdict_label}{ext}``
       ví dụ ``P1715102-98-D_SFVN26139D00055_2026.05.21 07.25.36_Passed.png``.
       Đặt vào subfolder ngày hôm nay (``YYYYMMDD``).
+    - KHÔNG decode ảnh (bản cũ load QImage vài chục MB mỗi sản phẩm chỉ
+      để log tên rồi vứt) — copy file là đủ.
     """
 
-    image_ready = Signal(str, QImage)   # filename, QImage
+    image_ready = Signal(str)           # "folder/filename" vừa tìm thấy
     upload_done = Signal(bool, str)     # ok, message
     error       = Signal(str)
     finished    = Signal()
@@ -107,6 +109,33 @@ class OplImageWorker(QObject):
         self.sn = safe_filename(sn, "UNKNOWN")
         self.verdict_label = safe_filename(verdict_label, "Unknown")
 
+    @staticmethod
+    def _latest(dir_path: Path, want_dir: bool, exts=()) -> "Path | None":
+        """Entry mtime mới nhất trong dir (scandir → stat cache, nhanh hơn
+        iterdir+stat khi folder tích cả nghìn ảnh sau nhiều giờ chạy)."""
+        import os
+        best, best_m = None, -1.0
+        try:
+            with os.scandir(dir_path) as it:
+                for e in it:
+                    try:
+                        if want_dir:
+                            if not e.is_dir():
+                                continue
+                        else:
+                            if not e.is_file():
+                                continue
+                            if exts and not e.name.lower().endswith(exts):
+                                continue
+                        m = e.stat().st_mtime
+                    except OSError:
+                        continue
+                    if m > best_m:
+                        best, best_m = e.path, m
+        except OSError:
+            return None
+        return Path(best) if best else None
+
     @Slot()
     def run(self):
         try:
@@ -115,32 +144,17 @@ class OplImageWorker(QObject):
                 self.error.emit(f"Folder gốc không tồn tại: {root}")
                 return
 
-            subfolders = sorted(
-                (p for p in root.iterdir() if p.is_dir()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if not subfolders:
+            latest_folder = self._latest(root, want_dir=True)
+            if latest_folder is None:
                 self.error.emit(f"{root.name} không có subfolder nào")
                 return
-            latest_folder = subfolders[0]
 
-            imgs = sorted(
-                (p for p in latest_folder.iterdir()
-                 if p.is_file() and p.suffix.lower() in self._IMG_EXTS),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if not imgs:
+            latest_img = self._latest(latest_folder, want_dir=False,
+                                      exts=self._IMG_EXTS)
+            if latest_img is None:
                 self.error.emit(f"Folder {latest_folder.name} không có ảnh")
                 return
-            latest_img = imgs[0]
-
-            qimg = QImage(str(latest_img))
-            if qimg.isNull():
-                self.error.emit(f"Không load được ảnh {latest_img.name}")
-                return
-            self.image_ready.emit(f"{latest_folder.name}/{latest_img.name}", qimg)
+            self.image_ready.emit(f"{latest_folder.name}/{latest_img.name}")
 
             if self.upload_dir:
                 try:
@@ -304,14 +318,21 @@ class DataExportWorker(QObject):
             self.finished.emit()
 
     # ── helpers ──────────────────────────────────────────────
+    _TAIL_BYTES = 262144   # file text chỉ đọc 256KB cuối — file nguồn phình cả ngày
+
     @classmethod
     def _read_rows_any(cls, xlrd, path: Path) -> list[list]:
-        """Đọc toàn bộ file thành list dòng (mỗi dòng là list cột).
+        """Đọc file nguồn thành list dòng (mỗi dòng là list cột).
 
         Máy AOI ghi file đuôi .xls nhưng nội dung thực ra là text
         tab-separated → xlrd báo 'Expected BOF record'. Vì vậy thử
         đọc .xls (BIFF) thật trước; nếu không phải, fallback đọc như
         text tab-separated. Giá trị được chuẩn hoá qua _norm().
+
+        Fallback text CHỈ đọc khúc đuôi file: file nguồn được máy đo
+        append liên tục cả ca, đọc nguyên file cho MỖI verdict nghĩa là
+        chi phí tăng tuyến tính theo giờ chạy (giữ GIL khi parse → GUI
+        khựng dần) — mà ta chỉ cần dòng cuối.
         """
         # 1) Thử đọc .xls (BIFF) thật bằng xlrd
         try:
@@ -323,16 +344,22 @@ class DataExportWorker(QObject):
         except Exception:
             pass  # không phải .xls thật → thử đọc text bên dưới
 
-        # 2) Fallback: đọc như text tab-separated
+        # 2) Fallback: đọc khúc đuôi file text tab-separated
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                rows = []
-                for line in f:
-                    line = line.rstrip("\r\n")
-                    if line == "":
-                        continue
-                    rows.append([cls._norm_text(c) for c in line.split("\t")])
-                return rows
+            size = path.stat().st_size
+            with open(path, "rb") as f:
+                if size > cls._TAIL_BYTES:
+                    f.seek(size - cls._TAIL_BYTES)
+                data = f.read()
+            lines = data.decode("utf-8", errors="ignore").splitlines()
+            if size > cls._TAIL_BYTES and lines:
+                lines = lines[1:]   # dòng đầu có thể bị cắt giữa chừng → bỏ
+            rows = []
+            for line in lines:
+                if line == "":
+                    continue
+                rows.append([cls._norm_text(c) for c in line.split("\t")])
+            return rows
         except Exception:
             return []
 
@@ -462,6 +489,9 @@ class MainWindow(QMainWindow):
         self._current_sn = ""
         self._jobs = []          # giữ ref (thread, worker) các job đang chạy
         self._opl_busy = False   # đang upload ảnh OPL?
+        self._opl_busy_since = 0.0   # mốc bắt đầu upload (chẩn đoán kẹt share)
+        self._opl_warn_t = 0.0       # throttle cảnh báo upload kẹt
+        self._scan_warn_t = 0.0      # throttle cảnh báo "chưa quét hàng"
 
         self.setWindowTitle("Riser cable — Giao diện chính")
         self.setWindowIcon(QIcon(make_brand_pixmap(64)))
@@ -824,7 +854,12 @@ class MainWindow(QMainWindow):
         if not getattr(config, "SCAN_ENABLED", True):
             return
         if not self._current_sn:
-            self._log("CHƯA QUÉT HÀNG — quét SN trước khi qua trạm", "NG", level="err")
+            # PLC có thể hỏi lại mỗi vòng poll → throttle để log không ngập
+            now = time.time()
+            if now - self._scan_warn_t >= 2.0:
+                self._scan_warn_t = now
+                self._log("CHƯA QUÉT HÀNG — quét SN trước khi qua trạm",
+                          "NG", level="err")
 
     # ── product scanner wiring ───────────────────────────────
     def _setup_product_scanner(self):
@@ -890,6 +925,11 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)   # xoá worker (mẫu chuẩn Qt)
         job = (thread, worker)
         self._jobs.append(job)
+        if len(self._jobs) > 32:
+            # job xong là tự rút khỏi _jobs — dồn nhiều = worker đang kẹt
+            # (share mạng/Excel khóa file…) → báo sớm trước khi cạn tài nguyên
+            self._log(f"Cảnh báo: {len(self._jobs)} job nền chưa xong — "
+                      "kiểm tra mạng/share ảnh/file Excel", "SYS", level="warn")
 
         def _cleanup():
             thread.deleteLater()
@@ -908,7 +948,15 @@ class MainWindow(QMainWindow):
             self._log("Save image tắt — bỏ qua đẩy ảnh", "SYS")
             return
         if self._opl_busy:
-            return  # đang upload ảnh, bỏ qua trigger trùng
+            # đang upload ảnh, bỏ qua trigger trùng. Kẹt quá lâu (share
+            # mạng chết → copy2 treo nhiều phút) thì báo để biết đường xử lý.
+            now = time.time()
+            stuck = now - self._opl_busy_since
+            if stuck > 300 and now - self._opl_warn_t >= 60:
+                self._opl_warn_t = now
+                self._log(f"Upload ảnh kẹt {stuck/60:.0f} phút — kiểm tra "
+                          f"share {config.link_post_img}", "SYS", level="warn")
+            return
         self._log(f"Tìm ảnh {verdict_label} mới nhất cho {sn} trong {root_dir}…", "SYS")
 
         worker = OplImageWorker(
@@ -921,10 +969,11 @@ class MainWindow(QMainWindow):
         worker.upload_done.connect(self._on_opl_upload_done)
         worker.error.connect(self._on_worker_error)
         self._opl_busy = True
+        self._opl_busy_since = time.time()
         self._run_worker(worker, busy_attr="_opl_busy")
 
-    def _on_opl_image_ready(self, name: str, _qimg: QImage):
-        self._log(f"Đã load ảnh: {name}", "SYS", level="ok")
+    def _on_opl_image_ready(self, name: str):
+        self._log(f"Đã tìm thấy ảnh: {name}", "SYS", level="ok")
 
     def _on_opl_upload_done(self, ok: bool, msg: str):
         level = "ok" if ok else "err"
