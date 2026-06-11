@@ -17,6 +17,11 @@ SCAN_ENABLED = True    # bật quét SN sản phẩm (bắt buộc quét trướ
 SAVE_EXCEL   = True    # bật lưu dòng đo sang file .xls
 SAVE_IMAGE   = True    # bật lưu/đẩy ảnh OPL
 
+# Chặn tool accessibility (UIA/MSAA — remote desktop/AV/agent giám sát…)
+# attach vào app. Client treo từng làm GUI đơ cứng ngay trong lệnh ghi log
+# (crash.log Timeout 11/06). App kiosk không cần screen-reader → mặc định chặn.
+DISABLE_ACCESSIBILITY = True
+
 # ── API xác thực nhân viên ─────────────────────────────────
 # Để rỗng → fallback dùng employees.py local.
 API_TOKEN_URL           = ""
