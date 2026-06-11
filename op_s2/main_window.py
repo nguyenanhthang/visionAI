@@ -979,13 +979,32 @@ class MainWindow(QMainWindow):
 
     # ── OPL upload (auto trigger sau mỗi PLC verdict) ────────
     # ── chạy worker 1-lần, tự dọn sạch (tránh rò thread/handle) ──
+    _MAX_JOBS = 24   # trần thread nền — quá ngưỡng thì BỎ job mới (chống cạn tài nguyên)
+
     def _run_worker(self, worker, busy_attr: str | None = None):
         """Chạy worker QObject trên 1 QThread dùng-một-lần rồi DỌN SẠCH.
 
         Quan trọng: gọi thread.deleteLater() khi xong để giải phóng handle +
         cửa sổ nội bộ Win32 của QThread. Nếu không, MỖI sản phẩm rò 1 thread
         → sau ~10 phút cạn USER handle của Windows → app đơ dù CPU/RAM thấp.
+
+        TRẦN ``_MAX_JOBS``: job nền dồn (share/mạng/Excel kẹt hoặc PLC bắn
+        verdict dồn dập) → BỎ job mới thay vì đẻ thêm thread. Đẻ thread vô
+        hạn = cạn handle/bộ nhớ → đơ cứng (phải tắt Task Manager). Thà rớt 1
+        lượt đẩy/ghi còn hơn đơ cả app.
         """
+        if len(self._jobs) >= self._MAX_JOBS:
+            now = time.time()
+            if now - getattr(self, "_jobcap_warn_t", 0.0) >= 5.0:
+                self._jobcap_warn_t = now
+                self._log(f"Quá tải: {len(self._jobs)} job nền chưa xong — bỏ bớt "
+                          "việc nền (kiểm tra mạng/share ảnh/Excel/PLC)",
+                          "SYS", level="warn")
+            worker.deleteLater()
+            if busy_attr:
+                setattr(self, busy_attr, False)
+            return
+
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -993,11 +1012,6 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)   # xoá worker (mẫu chuẩn Qt)
         job = (thread, worker)
         self._jobs.append(job)
-        if len(self._jobs) > 32:
-            # job xong là tự rút khỏi _jobs — dồn nhiều = worker đang kẹt
-            # (share mạng/Excel khóa file…) → báo sớm trước khi cạn tài nguyên
-            self._log(f"Cảnh báo: {len(self._jobs)} job nền chưa xong — "
-                      "kiểm tra mạng/share ảnh/file Excel", "SYS", level="warn")
 
         def _cleanup():
             thread.deleteLater()

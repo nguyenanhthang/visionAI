@@ -111,15 +111,18 @@ class CP2E_PLCWorker(PLCWorker):
     chưa" → emit ``scan_check``. Hai thanh ghi được đọc GỘP trong 1 giao
     dịch FINS (đỡ một nửa tải lên board Ethernet của PLC).
 
-    Handshake kiểu ACK-TRƯỚC-EMIT-SAU:
-        thấy giá trị ≠ 0 → ghi 0 vào thanh ghi (ack); ack THÀNH CÔNG mới
-        emit. Ack thất bại (mạng chập chờn) → không emit, vòng poll sau
-        đọc lại giá trị còn nguyên và thử lại — không mất verdict.
+    Handshake "1 emit / 1 xung" + ACK-TRƯỚC-EMIT-SAU (cờ ``_verdict_armed``):
+        thấy ≠0 lần đầu → ghi 0 (ack); ack OK mới emit rồi hạ cờ. PLC còn
+        giữ =1 các vòng sau → chỉ re-ack, KHÔNG emit lại. Thanh ghi về 0 →
+        arm lại. Ack lỗi (mạng chập chờn) → giữ cờ, poll sau thử lại — không
+        mất verdict.
 
-    Bản cũ so sánh với giá trị của poll trước (``_prev_val``) và ghi 0 SAU
-    khi emit: chỉ cần MỘT lần ghi-0 thất bại là thanh ghi kẹt ở 1, mọi
-    verdict PASS (cũng =1) về sau bị coi là "không đổi" và bỏ qua vĩnh
-    viễn → app trông như treo sau vài giờ chạy dù GUI vẫn vẽ bình thường.
+    Hai lỗi của bản trước, sửa cùng lúc:
+      - ``_prev_val`` + ghi 0 SAU emit: 1 lần ghi-0 trượt là thanh ghi kẹt
+        1, mọi PASS sau bị bỏ vĩnh viễn → line đứng (giống treo).
+      - ack-trước nhưng không nhớ đã xử lý xung: PLC giữ =1 vài vòng poll →
+        emit 5 lần/giây → bão thread SFC/ảnh/Excel → cạn tài nguyên → ĐƠ
+        CỨNG máy. Cờ armed chặn cả hai.
     """
 
     _SPAN_MAX = 256   # đọc gộp khi 2 thanh ghi cách nhau ≤ 256 word
@@ -133,6 +136,12 @@ class CP2E_PLCWorker(PLCWorker):
         self.result_addr = result_addr
         self.scan_addr = scan_addr
         self.scan_check_addr = int(scan_check_addr or 0)  # 0 → tắt scan-check
+        # "armed" = sẵn sàng nhận XUNG kế tiếp. Hạ ngay khi xử lý 1 xung; chỉ
+        # arm lại khi thanh ghi về 0 → verdict/scan_check chỉ bắn 1 LẦN/xung
+        # kể cả khi PLC GIỮ thanh ghi =1 nhiều vòng poll. Không có cờ này →
+        # giữ-cao = bão verdict → đẻ hàng loạt thread → cạn tài nguyên → đơ máy.
+        self._verdict_armed = True
+        self._scanchk_armed = True
 
     def _connect(self):
         import cp2e
@@ -171,16 +180,34 @@ class CP2E_PLCWorker(PLCWorker):
     def _poll(self):
         import cp2e
         val, chk = self._read_regs()
+        # 1) verdict D300 — 1 emit / 1 xung, ack-trước-emit-sau
         if val in (1, 2):
-            # ack trước — ghi 0 thất bại thì giữ nguyên, poll sau thử lại
-            if cp2e.write_data_cp2e(self.ip, self.result_addr, 0):
-                if val == 1:
-                    self.result.emit({"ok": True, "result": "PASS"})
+            if self._verdict_armed:
+                if cp2e.write_data_cp2e(self.ip, self.result_addr, 0):
+                    self._verdict_armed = False
+                    if val == 1:
+                        self.result.emit({"ok": True, "result": "PASS"})
+                    else:
+                        self.result.emit({"ok": False, "result": "FAIL"})
                 else:
-                    self.result.emit({"ok": False, "result": "FAIL"})
+                    # ack lỗi → KHÔNG emit, giữ armed, poll sau thử lại (không mất)
+                    self._emit_error(
+                        f"Ghi ack D{self.result_addr}=0 thất bại — thử lại poll sau")
             else:
-                self._emit_error(
-                    f"Ghi ack D{self.result_addr}=0 thất bại — thử lại poll sau")
+                # đã xử lý xung này, PLC còn giữ =1 → chỉ re-ack, KHÔNG emit lại
+                cp2e.write_data_cp2e(self.ip, self.result_addr, 0)
+        elif val == 0:
+            self._verdict_armed = True   # thanh ghi đã nhả → sẵn sàng xung kế
+        # 2) scan_check D500 — cũng 1 emit / 1 xung
         if chk == 1:
-            if cp2e.write_data_cp2e(self.ip, self.scan_check_addr, 0):
-                self.scan_check.emit()
+            if self._scanchk_armed:
+                if cp2e.write_data_cp2e(self.ip, self.scan_check_addr, 0):
+                    self._scanchk_armed = False
+                    self.scan_check.emit()
+                else:
+                    self._emit_error(
+                        f"Ghi ack D{self.scan_check_addr}=0 thất bại — thử lại poll sau")
+            else:
+                cp2e.write_data_cp2e(self.ip, self.scan_check_addr, 0)
+        elif chk == 0:
+            self._scanchk_armed = True

@@ -5,22 +5,26 @@
     abort của Qt, hỏng heap (0xC0000374)…
   - ``sys.excepthook`` + ``threading.excepthook``: ghi exception CHƯA BẮT
     (cả ở thread phụ) kèm thời gian.
-  - **Watchdog**: GUI gọi ``heartbeat()`` mỗi giây; nếu quá ``stale`` giây
-    không nhịp (app "Not Responding"/treo) → dump TẤT CẢ thread vào crash.log
-    để biết GUI đang kẹt ở đâu (faulthandler.enable KHÔNG bắt treo). Khi GUI
-    sống lại → ghi ``RECOVERED`` kèm số giây kẹt, để phân biệt **treo thật
-    (deadlock)** với **khựng tạm thời** (vd copy ảnh lên share mạng chậm,
-    PLC timeout) — Windows hiện "Not Responding" cho cả hai.
+  - **Watchdog (Python)**: GUI gọi ``heartbeat()`` mỗi giây; quá ``stale``
+    giây không nhịp → dump TẤT CẢ thread + ghi ``HANG``. Khi GUI sống lại →
+    ghi ``RECOVERED`` kèm số giây kẹt (phân biệt treo thật vs khựng tạm thời).
+  - **C-timer (``dump_traceback_later``)**: watchdog Python cần GIL để chạy;
+    nếu GUI thread ĐƠ CỨNG mà GIỮ GIL (deadlock C/exhaustion) thì watchdog
+    bị đói GIL, KHÔNG ghi được ``HANG``. ``dump_traceback_later`` chạy ở tầng
+    C, nổ kể cả khi Python kẹt GIL → vẫn dump được stack lúc đơ cứng. Mỗi
+    ``heartbeat()`` re-arm lại; chỉ nổ nếu nhịp tim ngừng ``stale`` giây.
 
 ĐỌC LOG THẾ NÀO:
   - ``===== HANG … =====``      → GUI treo, xem stack để biết kẹt ở đâu.
   - ``===== HANG-STILL … =====`` → vẫn treo, dump lại để so stack (đứng hẳn?).
   - ``===== RECOVERED … =====``  → chỉ khựng tạm thời rồi tự hồi (I/O chậm),
     KHÔNG phải đứng máy.
+  - ``Timeout (0:00:15)!``        → C-timer nổ: GUI ĐƠ CỨNG (giữ GIL), stack
+    ngay dưới là chỗ kẹt — đây là loại "phải tắt Task Manager".
   - ``Windows fatal exception: code 0x8001010d`` → **nhiễu COM lành tính**
     (RPC_E_CANTCALLOUT_ININPUTSYNCCALL, thường do tool accessibility / AV /
-    remote desktop), app VẪN chạy — bỏ qua. Chỉ lo các mã như
-    ``0xC0000374`` (hỏng heap) / ``access violation``.
+    remote desktop), app VẪN chạy — bỏ qua. Chỉ lo HANG / Timeout /
+    ``0xC0000374`` / access violation.
 
 File ``crash.log`` nằm cạnh .exe (frozen) hoặc cạnh script.
 """
@@ -38,6 +42,7 @@ from pathlib import Path
 _fault_fp = None          # giữ file mở cho faulthandler suốt vòng đời process
 _alive = None             # mốc heartbeat gần nhất (time.monotonic)
 _hang_dumped = False      # đã dump cho lần treo hiện tại chưa (tránh spam)
+_hang_stale = 15.0        # ngưỡng treo (giây) — dùng cho cả watchdog + C-timer
 
 
 def log_path() -> Path:
@@ -60,6 +65,15 @@ def heartbeat():
     """GUI gọi định kỳ (vd QTimer 1s) để báo 'còn sống'."""
     global _alive
     _alive = time.monotonic()
+    # Re-arm C-timer: nổ (dump tất cả thread) nếu nhịp tim ngừng _hang_stale
+    # giây. Chạy ở tầng C nên bắt được cả khi GUI giữ GIL → đơ cứng (lúc đó
+    # watchdog Python bị đói GIL, không ghi nổi HANG).
+    if _fault_fp is not None:
+        try:
+            faulthandler.dump_traceback_later(
+                _hang_stale, repeat=False, file=_fault_fp)
+        except Exception:
+            pass
 
 
 def _dump_all_threads():
@@ -72,9 +86,10 @@ def _dump_all_threads():
 
 
 def _watchdog(stale: float):
-    """Bắt treo GUI. Trong lúc treo, cứ ``stale`` giây dump lại 1 lần để
-    thấy app có nhúc nhích không (cùng chỗ = deadlock thật); khi hồi thì
-    ghi rõ đã kẹt bao lâu (khựng tạm thời, không phải đứng máy)."""
+    """Bắt treo GUI (loại Python còn chạy được). Trong lúc treo, cứ ``stale``
+    giây dump lại 1 lần để thấy app có nhúc nhích không (cùng chỗ = deadlock
+    thật); khi hồi thì ghi rõ đã kẹt bao lâu (khựng tạm thời, không đứng máy).
+    Loại đơ-cứng-giữ-GIL do C-timer ``dump_traceback_later`` lo (xem heartbeat)."""
     global _hang_dumped
     redump_at = 0.0
     hang_since = 0.0
@@ -105,7 +120,8 @@ def _watchdog(stale: float):
 
 def install(hang_stale: float = 15.0):
     """Gọi 1 lần ở đầu main()."""
-    global _fault_fp
+    global _fault_fp, _hang_stale
+    _hang_stale = float(hang_stale)
 
     # 1) exception chưa bắt ở main thread
     def _excepthook(et, e, tb):
@@ -134,9 +150,9 @@ def install(hang_stale: float = 15.0):
     _write("START", f"App khởi động — theo dõi treo (>{hang_stale:.0f}s) + crash.\n"
                     f"path: {base}\n"
                     f"(0x8001010d = nhiễu COM lành tính, bỏ qua; "
-                    f"chỉ lo HANG / 0xC0000374 / access violation)")
+                    f"chỉ lo HANG / Timeout / 0xC0000374 / access violation)")
 
-    # 4) watchdog bắt treo (no-responding)
+    # 4) watchdog bắt treo (no-responding) + arm C-timer lần đầu
     heartbeat()
     try:
         threading.Thread(target=_watchdog, args=(hang_stale,),
