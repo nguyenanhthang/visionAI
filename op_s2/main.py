@@ -43,16 +43,22 @@ def load_stylesheet() -> str:
     return ""
 
 
+# Nhãn build — in vào banner crash.log + tiêu đề cửa sổ. ĐỔI MỖI LẦN BUILD
+# để biết chắc máy trạm đang chạy bản nào (log 12/06 toàn dump của build cũ).
+APP_BUILD = "op_s2 2026-06-12.2 a11y-block+batch-log+preimport"
+
+
 def install_a11y_blocker(app):
     """Chặn WM_GETOBJECT → tool UIA/MSAA (remote desktop, AV, agent giám
     sát…) KHÔNG attach được vào cửa sổ app.
 
-    crash.log op_v7 bắt được GUI đơ cứng ≥15s NGAY TRONG QTextEdit.append:
+    crash.log bắt được GUI đơ cứng ≥15s NGAY TRONG QTextEdit.append:
     mỗi lần widget đổi nội dung, Windows thông báo accessibility ĐỒNG BỘ
     sang client đang attach — client treo là app treo theo (chuỗi
-    0x8001010d dày đặc trong log = đúng họ COM input-sync này). App kiosk
-    xưởng không cần screen-reader → chặn hẳn cho miễn nhiễm. Tắt bằng
-    DISABLE_ACCESSIBILITY = False trong config nếu cần.
+    0x8001010d dày đặc trong log = đúng họ COM input-sync này). Chặn từ
+    message ĐẦU TIÊN thì Qt không bao giờ kích hoạt accessibility → cũng
+    không bắn event nào nữa. App kiosk xưởng không cần screen-reader.
+    Tắt bằng DISABLE_ACCESSIBILITY = False trong config nếu cần.
     """
     if sys.platform != "win32" or not getattr(config, "DISABLE_ACCESSIBILITY", True):
         return None
@@ -62,11 +68,18 @@ def install_a11y_blocker(app):
 
         class _NoA11y(QAbstractNativeEventFilter):
             _WM_GETOBJECT = 0x003D
+            _logged = False
 
             def nativeEventFilter(self, etype, message):
                 try:
                     msg = ctypes.cast(int(message), ctypes.POINTER(wt.MSG)).contents
                     if msg.message == self._WM_GETOBJECT:
+                        if not self._logged:
+                            # bằng chứng hiện trường: blocker ĐANG chạy và
+                            # THẬT SỰ có tool dò accessibility vào app
+                            _NoA11y._logged = True
+                            crashlog.note("A11Y", "Đã chặn WM_GETOBJECT đầu tiên "
+                                          "— có tool UIA/MSAA đang dò app này")
                         return True, 0   # nuốt → không cấp accessibility object
                 except Exception:
                     pass
@@ -82,9 +95,20 @@ def install_a11y_blocker(app):
 def main():
     # faulthandler + watchdog treo GUI → crash.log. Bắt buộc gọi install():
     # heartbeat() trong main/login window chỉ có tác dụng khi watchdog chạy.
-    crashlog.install()
+    crashlog.install(build=APP_BUILD)
     load_settings_overrides()  # patch config từ settings.json (nếu có)
     cp2e.configure(port=getattr(config, "PLC_PORT", 9600))  # cổng FINS/TCP CP2E
+
+    # Nạp TRƯỚC các lib nặng. Import lười giữa ca (worker import xlrd lúc
+    # verdict đầu tiên) bị hook import của PySide6 chạy inspect.getsource →
+    # giữ GIL + khóa import-lock nhiều giây, worker khác đứng chờ
+    # (crash.log 06:32 12/06). Nạp ở đây thì tốn lúc khởi động, không tốn
+    # giữa ca.
+    for _m in ("xlrd", "xlwt", "requests"):
+        try:
+            __import__(_m)
+        except Exception:
+            pass
 
     app = QApplication(sys.argv)
     app._a11y_filter = install_a11y_blocker(app)   # giữ ref suốt vòng đời app
@@ -102,6 +126,7 @@ def main():
         sys.exit(0)
 
     window = MainWindow(employee_id=employee["id"], employee_name=employee["name"])
+    window.setWindowTitle(f"{window.windowTitle()}  ·  {APP_BUILD}")
     window.show()
     sys.exit(app.exec())
 

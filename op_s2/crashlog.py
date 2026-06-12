@@ -61,6 +61,11 @@ def _write(header: str, text: str):
         pass
 
 
+def note(header: str, text: str):
+    """Ghi 1 ghi chú kèm timestamp vào crash.log (public cho app dùng)."""
+    _write(header, text)
+
+
 def heartbeat():
     """GUI gọi định kỳ (vd QTimer 1s) để báo 'còn sống'."""
     global _alive
@@ -118,8 +123,9 @@ def _watchdog(stale: float):
             _hang_dumped = False   # GUI sống lại → cho phép dump lần treo sau
 
 
-def install(hang_stale: float = 15.0):
-    """Gọi 1 lần ở đầu main()."""
+def install(hang_stale: float = 15.0, build: str = ""):
+    """Gọi 1 lần ở đầu main(). ``build`` = nhãn bản build, in vào banner
+    để crash.log tự khai đang chạy bản nào (hết cảnh đoán build cũ/mới)."""
     global _fault_fp, _hang_stale
     _hang_stale = float(hang_stale)
 
@@ -147,8 +153,8 @@ def install(hang_stale: float = 15.0):
 
     # banner mở phiên: tách các lần chạy + nhắc cách đọc log
     base = (sys.executable if getattr(sys, "frozen", False) else __file__)
-    _write("START", f"App khởi động — theo dõi treo (>{hang_stale:.0f}s) + crash.\n"
-                    f"path: {base}\n"
+    _write("START", f"App khởi động — build: {build or 'không rõ'}\n"
+                    f"theo dõi treo (>{hang_stale:.0f}s) + crash. path: {base}\n"
                     f"(0x8001010d = nhiễu COM lành tính, bỏ qua; "
                     f"chỉ lo HANG / Timeout / 0xC0000374 / access violation)")
 
