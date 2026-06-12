@@ -8,8 +8,17 @@ So với bản CustomTkinter cũ: dùng QApplication duy nhất cho cả 2 cửa
 worker chạy trên QThread + emit Signal thay vì queue.Queue + after().
 """
 
+import os
 import sys
 from pathlib import Path
+
+# Tắt cầu accessibility của Qt TRƯỚC khi nạp PySide6. Phần mềm AOI chạy
+# cùng máy (và/hoặc tool remote/AV) attach vào app qua UIA/MSAA: mỗi lần
+# QTextEdit đổi nội dung, Qt phát sự kiện accessibility ĐỒNG BỘ sang client
+# đó — client treo là GUI ta treo theo (crash.log: đơ ≥15s ngay trong
+# log_view.append). QT_ACCESSIBILITY=0 → Qt KHÔNG dựng cầu, không phát sự
+# kiện nào. Đặt ở môi trường process nên có hiệu lực ngay cả bản đóng gói.
+os.environ.setdefault("QT_ACCESSIBILITY", "0")
 
 from PySide6.QtWidgets import QApplication
 
@@ -45,7 +54,7 @@ def load_stylesheet() -> str:
 
 # Nhãn build — in vào banner crash.log + tiêu đề cửa sổ. ĐỔI MỖI LẦN BUILD
 # để biết chắc máy trạm đang chạy bản nào (log 12/06 toàn dump của build cũ).
-APP_BUILD = "op_s2 2026-06-12.2 a11y-block+batch-log+preimport"
+APP_BUILD = "op_s2 2026-06-12.3 a11y-off+batch-log+preimport"
 
 
 def install_a11y_blocker(app):
