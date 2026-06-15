@@ -25,7 +25,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QSize, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QIcon, QLinearGradient, QPainter, QPen,
+    QBrush, QColor, QFont, QIcon, QImage, QLinearGradient, QPainter, QPen,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -209,30 +209,39 @@ class StatusChip(QFrame):
 
 
 class OplImageWorker(QObject):
-    """Tìm subfolder mới nhất + ảnh mới nhất → upload.
+    """Lấy ảnh mới nhất ở 2 cây inside + outside, GỘP NGANG thành 1 → upload.
 
-    - Subfolder + ảnh đều chọn theo mtime giảm dần để không lệ
-      thuộc vào quy ước đặt tên (YYYYMMDD, test1/test2, …).
-    - Upload = shutil.copy2 sang upload_dir (UNC share của hệ thống).
-    - File đích đổi tên: ``{sn}_{YYYY.MM.DD HH.MM.SS}_{verdict_label}{ext}``
-      ví dụ ``P1715102-98-D_SFVN26139D00055_2026.05.21 07.25.36_Passed.png``.
-      Đặt vào subfolder ngày hôm nay (``YYYYMMDD``).
-    - KHÔNG decode ảnh (bản cũ load QImage vài chục MB mỗi sản phẩm chỉ
-      để log tên rồi vứt) — copy file là đủ.
+    Mỗi tín hiệu D300, máy AOI lưu 2 ảnh của cùng 1 sản phẩm vào 2 cây
+    riêng:
+        <inside_dir>/<folder mới nhất>/<ảnh mới nhất>
+        <outside_dir>/<folder mới nhất>/<ảnh mới nhất>
+    Worker lấy ảnh mới nhất ở mỗi cây (folder con + ảnh đều theo mtime mới
+    nhất), ghép NGANG (inside bên trái · outside bên phải, căn giữa theo
+    chiều cao, nền đen phần thừa) rồi lưu 1 file lên upload_dir.
+
+    - File đích: ``{sn}_{YYYY.MM.DD HH.MM.SS}_{verdict_label}{ext}`` (đúng
+      format cũ), đặt trong subfolder ngày hôm nay ``YYYYMMDD``.
+    - OK/NG do tín hiệu D300 quyết (1=OK→Passed, 2=NG→Failed) → chỉ ảnh
+      hưởng NHÃN tên file, KHÔNG chọn folder.
+    - Thiếu 1 bên → đẩy bên còn lại (log cảnh báo). Thiếu cả 2 → báo lỗi.
+    - QImage/QPainter chạy được ngoài GUI thread (chỉ thao tác dữ liệu ảnh,
+      không đụng widget) nên gộp ngay trên worker thread.
     """
 
-    image_ready = Signal(str)           # "folder/filename" vừa tìm thấy
+    image_ready = Signal(str)           # mô tả ảnh nguồn vừa tìm thấy
     upload_done = Signal(bool, str)     # ok, message
     error       = Signal(str)
     finished    = Signal()
 
     _IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
+    _JPG_EXTS = (".jpg", ".jpeg")
 
-    def __init__(self, root_dir: str, upload_dir: str = "",
+    def __init__(self, inside_dir: str, outside_dir: str, upload_dir: str = "",
                  sn: str = "", verdict_label: str = "",
                  parent: QObject | None = None):
         super().__init__(parent)
-        self.root_dir = root_dir
+        self.inside_dir = inside_dir
+        self.outside_dir = outside_dir
         self.upload_dir = upload_dir
         self.sn = safe_filename(sn, "UNKNOWN")
         self.verdict_label = safe_filename(verdict_label, "Unknown")
@@ -264,37 +273,87 @@ class OplImageWorker(QObject):
             return None
         return Path(best) if best else None
 
+    @classmethod
+    def _latest_image(cls, root_dir: str) -> "Path | None":
+        """Ảnh mới nhất trong folder con mới nhất của 1 cây. None nếu không có."""
+        if not root_dir:
+            return None
+        root = Path(root_dir)
+        if not root.exists():
+            return None
+        folder = cls._latest(root, want_dir=True)
+        if folder is None:
+            return None
+        return cls._latest(folder, want_dir=False, exts=cls._IMG_EXTS)
+
+    @staticmethod
+    def _merge_h(paths: list) -> "QImage | None":
+        """Ghép NGANG nhiều ảnh: inside trái → outside phải, căn giữa cao,
+        nền đen phần thừa. Bỏ ảnh load lỗi. None nếu không ảnh nào hợp lệ."""
+        imgs = []
+        for p in paths:
+            im = QImage(str(p))
+            if not im.isNull():
+                imgs.append(im)
+        if not imgs:
+            return None
+        if len(imgs) == 1:
+            return imgs[0]
+        total_w = sum(im.width() for im in imgs)
+        max_h = max(im.height() for im in imgs)
+        canvas = QImage(total_w, max_h, QImage.Format.Format_RGB32)
+        canvas.fill(QColor("black"))
+        p = QPainter(canvas)
+        x = 0
+        for im in imgs:
+            y = (max_h - im.height()) // 2
+            p.drawImage(x, y, im)
+            x += im.width()
+        p.end()
+        return canvas
+
     @Slot()
     def run(self):
         try:
-            root = Path(self.root_dir)
-            if not root.exists():
-                self.error.emit(f"Folder gốc không tồn tại: {root}")
+            inside_img = self._latest_image(self.inside_dir)
+            outside_img = self._latest_image(self.outside_dir)
+            if inside_img is None and outside_img is None:
+                self.error.emit("Không tìm thấy ảnh ở cả inside lẫn outside")
                 return
 
-            latest_folder = self._latest(root, want_dir=True)
-            if latest_folder is None:
-                self.error.emit(f"{root.name} không có subfolder nào")
-                return
+            # giữ thứ tự inside → outside; bỏ bên thiếu
+            ordered = [p for p in (inside_img, outside_img) if p is not None]
+            if inside_img is None:
+                self.image_ready.emit("THIẾU inside — chỉ đẩy outside: "
+                                      f"{outside_img.parent.name}/{outside_img.name}")
+            elif outside_img is None:
+                self.image_ready.emit("THIẾU outside — chỉ đẩy inside: "
+                                      f"{inside_img.parent.name}/{inside_img.name}")
+            else:
+                self.image_ready.emit(
+                    f"inside {inside_img.parent.name}/{inside_img.name} + "
+                    f"outside {outside_img.parent.name}/{outside_img.name}")
 
-            latest_img = self._latest(latest_folder, want_dir=False,
-                                      exts=self._IMG_EXTS)
-            if latest_img is None:
-                self.error.emit(f"Folder {latest_folder.name} không có ảnh")
+            merged = self._merge_h(ordered)
+            if merged is None or merged.isNull():
+                self.error.emit("Gộp ảnh thất bại (file ảnh lỗi/không đọc được)")
                 return
-            self.image_ready.emit(f"{latest_folder.name}/{latest_img.name}")
 
             if self.upload_dir:
                 try:
                     now = datetime.now()
                     today = now.strftime("%Y%m%d")
                     ts = now.strftime("%Y.%m.%d %H.%M.%S")
-                    new_name = f"{self.sn}_{ts}_{self.verdict_label}{latest_img.suffix}"
+                    ext = ordered[0].suffix or ".png"
+                    new_name = f"{self.sn}_{ts}_{self.verdict_label}{ext}"
                     dest_parent = Path(self.upload_dir) / today
                     dest_parent.mkdir(parents=True, exist_ok=True)
                     dest = dest_parent / new_name
-                    shutil.copy2(str(latest_img), str(dest))
-                    self.upload_done.emit(True, f"đã copy → {dest.name}")
+                    quality = 95 if ext.lower() in self._JPG_EXTS else -1
+                    if not merged.save(str(dest), quality=quality):
+                        self.upload_done.emit(False, f"lưu ảnh gộp lỗi → {dest.name}")
+                    else:
+                        self.upload_done.emit(True, f"đã gộp+đẩy → {dest.name}")
                 except Exception as exc:
                     self.upload_done.emit(False, f"upload lỗi: {exc}")
         except Exception as exc:
@@ -1031,7 +1090,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(_cleanup)
         thread.start()
 
-    def _trigger_opl_upload(self, sn: str, verdict_label: str, root_dir: str):
+    def _trigger_opl_upload(self, sn: str, verdict_label: str):
         if not getattr(config, "SAVE_IMAGE", True):
             self._log("Save image tắt — bỏ qua đẩy ảnh", "SYS")
             return
@@ -1045,10 +1104,13 @@ class MainWindow(QMainWindow):
                 self._log(f"Upload ảnh kẹt {stuck/60:.0f} phút — kiểm tra "
                           f"share {config.link_post_img}", "SYS", level="warn")
             return
-        self._log(f"Tìm ảnh {verdict_label} mới nhất cho {sn} trong {root_dir}…", "SYS")
+        inside_dir = getattr(config, "OPL_INSIDE_DIR", "")
+        outside_dir = getattr(config, "OPL_OUTSIDE_DIR", "")
+        self._log(f"Gộp ảnh inside+outside ({verdict_label}) cho {sn}…", "SYS")
 
         worker = OplImageWorker(
-            root_dir=root_dir,
+            inside_dir=inside_dir,
+            outside_dir=outside_dir,
             upload_dir=config.link_post_img,
             sn=sn,
             verdict_label=verdict_label,
@@ -1106,17 +1168,17 @@ class MainWindow(QMainWindow):
         label = result or ("PASS" if ok else "FAIL")
         tag, level = ("OK", "ok") if ok else ("NG", "err")
         self._log(f"AOI verdict: {pid or '—'} → {label}", tag, level=level)
-        # đẩy kết quả lên SFC + đẩy ảnh OPL
+        # đẩy kết quả lên SFC + gộp & đẩy ảnh OPL
         if result in ("PASS", "FAIL"):
+            # D300: 1=OK→Passed, 2=NG→Failed. Chỉ quyết NHÃN tên file ảnh,
+            # KHÔNG chọn folder nữa (ảnh luôn lấy từ inside + outside).
             if result == "PASS":
                 verdict_label = "Passed"
-                root_dir = config.OPL_OK_DIR
             else:
                 verdict_label = "Failed"
-                root_dir = config.OPL_NG_DIR
             verdict = "OK" if result == "PASS" else "NG"
             self._push_sfc_result(pid, result)
-            self._trigger_opl_upload(pid, verdict_label, root_dir)
+            self._trigger_opl_upload(pid, verdict_label)
             self._trigger_data_export(pid, verdict)
         # xử lý xong tín hiệu D300 → xoá SN, chờ lần quét kế tiếp
         self._current_sn = ""

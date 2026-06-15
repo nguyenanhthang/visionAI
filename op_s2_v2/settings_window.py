@@ -220,9 +220,9 @@ class SettingsDialog(QDialog):
             ("API_REQUEST_TIMEOUT", "Request timeout (s)", "int"),
         ],
         "Folder ảnh": [
-            ("OPL_OK_DIR",     "Folder ảnh OK",     "dir"),
-            ("OPL_NG_DIR",     "Folder ảnh NG",     "dir"),
-            ("link_post_img",  "Folder đẩy ảnh",    "dir"),
+            ("OPL_INSIDE_DIR",  "Folder ảnh inside",  "dir"),
+            ("OPL_OUTSIDE_DIR", "Folder ảnh outside", "dir"),
+            ("link_post_img",   "Folder đẩy ảnh",     "dir"),
         ],
         "Data .xls": [
             ("DATA_SRC_DIR",      "Folder .xls nguồn",      "dir"),

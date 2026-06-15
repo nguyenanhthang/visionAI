@@ -42,14 +42,15 @@ emp_link = 'http://10.222.48.213:8888/v2/platform/staff-detail?factoryCode=TSC_V
 token_link = 'http://10.222.48.213:8888/v2/platform/get/token?appid=e015ef3a23a842419a6a36373f9db9b8&appsecret=405a03d085a1406dbfb74ee941de2c6e&transid=10005999927000000062014101615303080000001'
 
 # ── OPL attachments (ảnh kiểm tra) ─────────────────────────
-# Ảnh được hệ thống AOI chia làm 2 cây:
-#   <OPL_OK_DIR>\<YYYY-MM-DD>\<image>.png  — sản phẩm OK
-#   <OPL_NG_DIR>\<YYYY-MM-DD>\<image>.png  — sản phẩm NG
-# Khi PLC reg 300 = 1 → lấy ảnh từ OK, = 2 → lấy từ NG.
-# Submit/auto-trigger sẽ chọn subfolder có mtime mới nhất rồi
-# lấy file ảnh có mtime mới nhất trong subfolder đó.
-OPL_OK_DIR = 'E:/Images/Graphics/OK'
-OPL_NG_DIR = 'E:/Images/Graphics/NG'
+# Máy AOI lưu 2 ảnh của 1 sản phẩm vào 2 cây riêng:
+#   <OPL_INSIDE_DIR>\<folder mới nhất>\<ảnh mới nhất>   — mặt trong
+#   <OPL_OUTSIDE_DIR>\<folder mới nhất>\<ảnh mới nhất>  — mặt ngoài
+# Mỗi tín hiệu D300: lấy ảnh mới nhất ở CẢ 2 cây (folder con + ảnh đều
+# theo mtime mới nhất) → GỘP NGANG (inside trái · outside phải) thành 1
+# ảnh → đẩy lên link_post_img. OK/NG do D300 (1=OK, 2=NG) chỉ quyết NHÃN
+# tên file (Passed/Failed), KHÔNG chọn folder.
+OPL_INSIDE_DIR  = 'E:/Images/Graphics/inside'
+OPL_OUTSIDE_DIR = 'E:/Images/Graphics/outside'
 
 # ── Data export (.xls log) ─────────────────────────────────
 # Mỗi tín hiệu PLC OK/NG: đọc dòng dữ liệu MỚI NHẤT (cột B→F = 5 giá trị)
