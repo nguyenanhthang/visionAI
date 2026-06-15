@@ -193,6 +193,11 @@ class SettingsDialog(QDialog):
 
     # (key, label, type) — type ∈ {"str","int","float","bool","dir","com"}
     SCHEMA = {
+        "Chức năng": [
+            ("SCAN_ENABLED", "Bắt buộc quét SN trước khi qua trạm", "bool"),
+            ("SAVE_EXCEL",   "Lưu dòng đo sang file .xls",          "bool"),
+            ("SAVE_IMAGE",   "Lưu / đẩy ảnh OPL",                   "bool"),
+        ],
         "Scanner": [
             ("SCANNER_PORT",     "COM port",            "com"),
             ("SCANNER_BAUDRATE", "Baudrate",            "int"),
