@@ -154,6 +154,46 @@ def latest_measures(path: Path, cols=SRC_MEASURE_COLS):
     return None
 
 
+def latest_row_all(path: Path):
+    """TẤT CẢ cột (bỏ cột 0 = Date Time) của dòng dữ liệu cuối còn dữ liệu.
+
+    Dùng cho data export "đủ cột": file nguồn đổi cấu trúc cột thế nào cũng
+    lấy hết, không hardcode. None nếu file rỗng.
+    """
+    for cells in reversed(read_source_rows(path)):
+        if any(v != "" for v in cells):
+            return list(cells[1:])   # bỏ cột Date Time
+    return None
+
+
+def read_source_header(path: Path) -> list:
+    """Tên các cột (bỏ cột 0 = Date Time) từ DÒNG ĐẦU file nguồn.
+
+    Đọc riêng dòng đầu — KHÔNG dùng tail-read (tail bỏ dòng đầu để tránh
+    dòng cụt). Nhờ vậy header export tự bám theo header file nguồn, đổi cột
+    không phải sửa code.
+    """
+    try:
+        import xlrd
+        try:
+            sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
+            if sheet.nrows:
+                return [_norm(sheet.cell_value(0, c)) for c in range(1, sheet.ncols)]
+        except Exception:
+            pass
+    except ImportError:
+        pass
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
+            first = f.readline().rstrip("\r\n")
+        if first:
+            parts = first.split("\t") if "\t" in first else first.split(",")
+            return [str(c).strip() for c in parts[1:]]
+    except Exception:
+        pass
+    return []
+
+
 def read_latest_measures(src_dir: str, date_fmt: str = "%Y%m%d",
                          cols=SRC_MEASURE_COLS):
     """Tìm file nguồn theo ngày hôm nay rồi lấy số đo của dòng mới nhất."""
@@ -419,13 +459,14 @@ class SfcPushWorker(QObject):
 class DataExportWorker(QObject):
     """Append 1 dòng đo sang file .xls log theo ngày khi có verdict PLC.
 
-    - Nguồn: ``<src_dir>/<ngày>.xls`` (hoặc ``.csv``) — lấy cột B→F
-      (5 giá trị) của DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ liệu).
+    - Nguồn: ``<src_dir>/<ngày>.xls`` (hoặc ``.csv``) — lấy TẤT CẢ cột đo
+      (bỏ cột 0 = Date Time) của DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ
+      liệu). Tên cột đọc thẳng từ header file nguồn → file đổi cấu trúc cột
+      (inside/outside, thêm/bớt cột) KHÔNG phải sửa code.
     - Đích:  ``<dst_dir>/<ngày>.xls`` — append dòng
-      ``[times, SN, Yellow, Orange, Black, Red, OK NG, result]``;
-      header ghi 1 lần ở đầu file.
+      ``[times, SN, <tất cả cột nguồn>, result]``; header ghi ở đầu file.
     - ``times`` = giờ nhận verdict, ``SN`` = mã sản phẩm đang quét,
-      ``result`` = "OK" / "NG".
+      ``result`` = "OK" / "NG" (từ tín hiệu D300).
 
     xlwt không append trực tiếp .xls → đọc lại toàn bộ file đích rồi
     ghi lại (header + dòng cũ + dòng mới) dưới ``_file_lock`` để 2 verdict
@@ -435,8 +476,7 @@ class DataExportWorker(QObject):
     done     = Signal(bool, str)   # ok, message
     finished = Signal()
 
-    HEADER = ["times", "SN", "Yellow", "Orange", "Black", "Red",
-              "OK NG", "result"]
+    _FIRST_COL = "times"             # ô [0][0] để nhận biết & bỏ header cũ
     _file_lock = threading.Lock()    # serialize ghi file đích
     WRITE_RETRIES = 5                # số lần thử ghi lại khi file bị khóa
     RETRY_DELAY   = 0.4              # giây giữa các lần thử
@@ -468,11 +508,19 @@ class DataExportWorker(QObject):
                 self.done.emit(False, f"File nguồn {day}.(xls/csv) không tồn tại")
                 return
 
-            measures = latest_measures(src)
+            measures = latest_row_all(src)   # TẤT CẢ cột (bỏ Date Time)
             if measures is None:
                 self.done.emit(False, f"{src.name} không có dòng dữ liệu")
                 return
 
+            # header export bám theo header file nguồn; canh đúng số cột dữ liệu
+            src_cols = read_source_header(src)
+            names = [
+                str(src_cols[i]).strip() or f"col{i + 1}"
+                if i < len(src_cols) else f"col{i + 1}"
+                for i in range(len(measures))
+            ]
+            header = [self._FIRST_COL, "SN", *names, "result"]
             row = [now.strftime("%Y-%m-%d %H:%M:%S"), self.sn, *measures, self.result]
 
             dst = Path(self.dst_dir) / f"{day}.xls"
@@ -486,7 +534,7 @@ class DataExportWorker(QObject):
                 pending_rows = self._read_pending(pending)
                 try:
                     old_rows = self._read_existing(xlrd, dst) if dst.exists() else []
-                    self._write_all_retry(xlwt, dst, old_rows + pending_rows + [row])
+                    self._write_all_retry(xlwt, dst, header, old_rows + pending_rows + [row])
                     self._clear_pending(pending)   # ghi xong → xoá đệm
                     ok_save = True
                 except PermissionError:
@@ -531,17 +579,17 @@ class DataExportWorker(QObject):
         out = []
         for r in range(sheet.nrows):
             vals = [_norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
-            if r == 0 and vals[:1] == [cls.HEADER[0]]:
+            if r == 0 and vals[:1] == [cls._FIRST_COL]:
                 continue  # bỏ header cũ — sẽ ghi lại
             if any(v != "" for v in vals):
                 out.append(vals)
         return out
 
     @classmethod
-    def _write_all(cls, xlwt, path: Path, rows: list[list]):
+    def _write_all(cls, xlwt, path: Path, header: list, rows: list[list]):
         wb = xlwt.Workbook(encoding="utf-8")
         ws = wb.add_sheet("data")
-        for c, h in enumerate(cls.HEADER):
+        for c, h in enumerate(header):
             ws.write(0, c, h)
         for ri, row in enumerate(rows, start=1):
             for c, val in enumerate(row):
@@ -554,14 +602,14 @@ class DataExportWorker(QObject):
         os.replace(str(tmp), str(path))  # atomic trên cùng ổ đĩa
 
     @classmethod
-    def _write_all_retry(cls, xlwt, path: Path, rows: list[list]):
+    def _write_all_retry(cls, xlwt, path: Path, header: list, rows: list[list]):
         """Như _write_all nhưng thử lại vài lần khi file bị khóa
         (vd Excel vừa nhả ra). Hết số lần thử mà vẫn khóa → ném
         PermissionError để tầng trên đệm lại."""
         last_err = None
         for _ in range(cls.WRITE_RETRIES):
             try:
-                cls._write_all(xlwt, path, rows)
+                cls._write_all(xlwt, path, header, rows)
                 return
             except PermissionError as e:
                 last_err = e
