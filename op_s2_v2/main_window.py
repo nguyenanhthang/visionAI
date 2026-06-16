@@ -56,7 +56,6 @@ def safe_filename(name: str, fallback: str = "UNKNOWN") -> str:
 
 
 # ── đọc số đo từ file nguồn (.xls/.csv) — dùng chung SFC + data export ──
-SRC_MEASURE_COLS = range(1, 6)   # cột B..F: Yellow, Orange, Black, Red, OK NG
 
 
 def _norm(v):
@@ -146,14 +145,6 @@ def read_source_rows(path: Path) -> list:
     return _last_text_rows(path)
 
 
-def latest_measures(path: Path, cols=SRC_MEASURE_COLS):
-    """Cột `cols` của dòng dữ liệu cuối còn dữ liệu. None nếu file rỗng."""
-    for cells in reversed(read_source_rows(path)):
-        if any(v != "" for v in cells):
-            return [cells[c] if c < len(cells) else "" for c in cols]
-    return None
-
-
 def latest_row_all(path: Path):
     """TẤT CẢ cột (bỏ cột 0 = Date Time) của dòng dữ liệu cuối còn dữ liệu.
 
@@ -194,11 +185,17 @@ def read_source_header(path: Path) -> list:
     return []
 
 
-def read_latest_measures(src_dir: str, date_fmt: str = "%Y%m%d",
-                         cols=SRC_MEASURE_COLS):
-    """Tìm file nguồn theo ngày hôm nay rồi lấy số đo của dòng mới nhất."""
+def read_latest_named(src_dir: str, date_fmt: str = "%Y%m%d"):
+    """(tên cột, giá trị) của DÒNG MỚI NHẤT trong file nguồn hôm nay.
+
+    Cả tên lẫn giá trị đều bỏ cột 0 (Date Time) nên khớp index 1-1. File
+    không có/rỗng → ([], []).
+    """
     src = find_source_file(src_dir, datetime.now().strftime(date_fmt or "%Y%m%d"))
-    return latest_measures(src, cols) if src else None
+    if not src:
+        return [], []
+    values = latest_row_all(src)
+    return read_source_header(src), (values if values is not None else [])
 
 
 def _fmt_mm(v) -> str:
@@ -210,17 +207,41 @@ def _fmt_mm(v) -> str:
         return f"{s}mm" if s else ""
 
 
-def format_timer(measures) -> str:
-    """Chuỗi thông số cho payload SFC từ [Yellow, Orange, Black, Red, …].
+def _is_num(v) -> bool:
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
 
-    Trả ``'Black: ..mm; Orange: ..mm; Red: ..mm; Yellow: ..mm'`` (đúng thứ
-    tự yêu cầu). measures thiếu/rỗng → ''.
+
+# 4 cột inside xếp trước theo đúng thứ tự MES yêu cầu
+_TIMER_HEAD = ("Black", "Orange", "Red", "Yellow")
+
+
+def format_timer(names, values) -> str:
+    """Chuỗi ``'Tên: 0.000mm; …'`` cho payload SFC từ dòng đo mới nhất.
+
+    - Lấy MỌI cột có giá trị SỐ (đo được) của dòng mới nhất → tự bỏ cột
+      chữ (Inside Result / Outside Result = OK/NG, SN…). Tên cột đọc thẳng
+      từ header file nguồn nên thêm/bớt cột đo KHÔNG phải sửa code.
+    - Nhóm inside Yellow/Orange/Black/Red xếp trước theo thứ tự
+      ``'Black; Orange; Red; Yellow'`` (giữ đúng format cũ MES đang nhận),
+      các cột đo outside còn lại nối theo thứ tự cột trong file.
+    - Không còn cột số nào → ''.
     """
-    if not measures or len(measures) < 4:
+    pairs = [(str(n).strip(), v) for n, v in zip(names, values) if _is_num(v)]
+    if not pairs:
         return ""
-    yellow, orange, black, red = measures[0], measures[1], measures[2], measures[3]
-    return (f"Black: {_fmt_mm(black)}; Orange: {_fmt_mm(orange)}; "
-            f"Red: {_fmt_mm(red)}; Yellow: {_fmt_mm(yellow)}")
+    by_name = {n: v for n, v in pairs}
+    ordered, used = [], set()
+    for nm in _TIMER_HEAD:                 # inside trước, đúng thứ tự
+        if nm in by_name and nm not in used:
+            ordered.append((nm, by_name[nm])); used.add(nm)
+    for n, v in pairs:                     # outside nối sau, theo thứ tự file
+        if n not in used:
+            ordered.append((n, v)); used.add(n)
+    return "; ".join(f"{n}: {_fmt_mm(v)}" for n, v in ordered)
 
 
 # ── tiny widgets ─────────────────────────────────────────────────
@@ -406,9 +427,10 @@ class SfcPushWorker(QObject):
     """POST kết quả verdict lên MES clipThroughStation.
 
     Payload: {sn, stationName, empNo, result}. Nếu có ``src_dir`` thì đọc
-    thêm số đo (Yellow/Orange/Black/Red) của dòng mới nhất trong file
+    TẤT CẢ số đo (inside + outside) của dòng mới nhất trong file
     ``<src_dir>/<ngày>.(xls|csv)`` rồi chèn field ``timer`` dạng
-    ``"Black: 0.522mm; Orange: 0.526mm; Red: 0.529mm; Yellow: 0.624mm"``.
+    ``"Black: 0.554mm; Orange: 0.555mm; Red: 0.553mm; Yellow: 0.537mm; "
+    "Yellow_1: 1.063mm; …; Red_2: 1.072mm"`` (cột chữ OK/NG bị bỏ).
     Response code=200 → ok, khác → log lỗi (vd 406 "下一制程为 EOL-S").
     """
 
@@ -432,7 +454,8 @@ class SfcPushWorker(QObject):
         # Chèn thông số đo đọc từ CSV/xls vào payload (field "timer")
         if self.src_dir:
             try:
-                timer = format_timer(read_latest_measures(self.src_dir, self.date_fmt))
+                names, values = read_latest_named(self.src_dir, self.date_fmt)
+                timer = format_timer(names, values)
                 if timer:
                     self.payload["timer"] = timer
             except Exception:
