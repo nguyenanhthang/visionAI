@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+crash.log
+build/
+dist/
+settings.json
