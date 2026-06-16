@@ -53,11 +53,11 @@ OPL_INSIDE_DIR  = 'E:/Images/Graphics/inside'
 OPL_OUTSIDE_DIR = 'E:/Images/Graphics/outside'
 
 # ── Data export (.xls log) ─────────────────────────────────
-# Mỗi tín hiệu PLC OK/NG: đọc dòng dữ liệu MỚI NHẤT (cột B→F = 5 giá trị)
-# của file  <DATA_SRC_DIR>\<ngày>.xls  (hoặc .csv) rồi append 1 dòng
-#   [times, SN, Yellow, Orange, Black, Red, OK NG, result]  (result = OK/NG)
-# sang  <DATA_EXPORT_DIR>\<ngày>.xls  (header tạo 1 lần).
+# Mỗi tín hiệu PLC OK/NG: đọc dòng dữ liệu MỚI NHẤT (tất cả cột đo, bỏ cột
+# Date Time) của file  <DATA_SRC_DIR>\<ngày>.xls  (hoặc .csv) rồi append 1
+# dòng  [times, SN, <tất cả cột nguồn>, result]  (result = OK/NG)
+# sang  <DATA_EXPORT_DIR>\<ngày>.xls  (header đọc thẳng từ file nguồn).
 # Để rỗng DATA_SRC_DIR hoặc DATA_EXPORT_DIR → tắt tính năng này.
-DATA_SRC_DIR      = 'E:/CSV'          # folder chứa file .xls nguồn (đặt tên theo ngày)
+DATA_SRC_DIR      = 'E:/CSV'          # folder chứa file nguồn (đặt tên theo ngày)
 DATA_EXPORT_DIR   = 'E:/AOI_DATA'          # folder lưu file .xls đích (đặt tên theo ngày)
-DATA_FILE_DATEFMT = '%Y-%m-%d'    # định dạng tên file theo ngày (vd 20260603.xls)
+DATA_FILE_DATEFMT = '%d%m%Y'    # định dạng tên file theo ngày (vd 16062026.csv = 16/06/2026)
