@@ -1,0 +1,46 @@
+# Default configuration for the image classification project.
+# Every key maps 1:1 onto a field of imgcls.config.Config and can be
+# overridden on the command line (e.g. --epochs 5 --backbone resnet50).
+
+# ----- data -----
+# Use a single folder of class sub-folders (auto-split into train/val)...
+dataset_dir: data/sample
+# ...or set explicit pre-split folders instead (these take priority):
+train_dir: null
+val_dir: null
+test_dir: null
+
+image_size: [180, 180]   # [height, width]
+batch_size: 32
+validation_split: 0.2    # used only when splitting `dataset_dir`
+seed: 1337
+
+# ----- model -----
+# backbone: simple_cnn | mobilenetv2 | resnet50 | efficientnetb0
+backbone: mobilenetv2
+dropout: 0.2
+weights: imagenet        # "imagenet" for transfer learning, or null for scratch
+trainable_base: false    # keep the backbone frozen during phase 1
+
+# ----- augmentation -----
+augment: true
+random_flip: true
+random_rotation: 0.10
+random_zoom: 0.10
+random_contrast: 0.10
+
+# ----- training -----
+epochs: 20
+learning_rate: 0.001
+early_stopping_patience: 6
+reduce_lr_patience: 3
+
+# Optional phase 2: unfreeze part of the backbone and train slowly.
+fine_tune: true
+fine_tune_epochs: 10
+fine_tune_at: 0.7        # fraction of backbone layers to keep frozen
+fine_tune_lr: 0.00001
+
+# ----- output -----
+output_dir: outputs
+run_name: run
