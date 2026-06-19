@@ -175,27 +175,84 @@ class OplImageWorker(QObject):
             self.finished.emit()
 
 
+def _fmt_mm(v) -> str:
+    """1 giá trị đo kèm đơn vị mm (3 số lẻ)."""
+    try:
+        return f"{float(v):.3f}mm"
+    except (TypeError, ValueError):
+        s = str(v).strip()
+        return f"{s}mm" if s else ""
+
+
+def format_timer(labels, measures) -> str:
+    """Chuỗi ``'L1-1: 0.000mm; L1-2: …'`` cho payload SFC.
+
+    Ghép ``label: giá_trị_mm`` theo thứ tự cột B→I (L1-1…L4-2); bỏ ô rỗng.
+    Không còn ô nào → ''.
+    """
+    parts = []
+    for lab, v in zip(labels, measures):
+        s = "" if v is None else str(v).strip()
+        if s == "":
+            continue
+        parts.append(f"{lab}: {_fmt_mm(v)}")
+    return "; ".join(parts)
+
+
 class SfcPushWorker(QObject):
     """POST kết quả verdict lên MES clipThroughStation.
 
-    Payload: {sn, stationName, empNo, result}. Response code=200 → ok,
-    khác → log lỗi (vd 406 "下一制程为 EOL-S").
+    Payload: {sn, stationName, empNo, result}. Nếu có ``src_dir`` thì đọc
+    8 số đo (L1-1…L4-2) của dòng MỚI NHẤT trong file ``<src_dir>/<ngày>.xls``
+    rồi chèn field ``timer`` dạng
+    ``"L1-1: 0.512mm; L1-2: 0.498mm; … ; L4-2: 0.499mm"``.
+    Response code=200 → ok, khác → log lỗi (vd 406 "下一制程为 EOL-S").
+
+    Đọc file NGAY trong worker thread (không phải GUI thread) để verdict
+    dồn dập không làm khựng UI — đúng điểm yếu op_v7 hay treo.
     """
 
     done     = Signal(bool, str)   # ok, message
     finished = Signal()
 
     def __init__(self, url: str, payload: dict, timeout: float = 5.0,
+                 src_dir: str = "", date_fmt: str = "%Y%m%d",
                  parent: QObject | None = None):
         super().__init__(parent)
         self.url = url
         self.payload = payload
         self.timeout = timeout
+        self.src_dir = src_dir
+        self.date_fmt = date_fmt or "%Y%m%d"
+
+    def _build_timer(self) -> str:
+        """Chuỗi timer từ dòng đo mới nhất của file nguồn hôm nay. '' nếu
+        không có file/dữ liệu — KHÔNG chặn việc push verdict."""
+        try:
+            import xlrd
+        except ImportError:
+            return ""
+        src = Path(self.src_dir) / f"{datetime.now().strftime(self.date_fmt)}.xls"
+        if not src.exists():
+            return ""
+        measures = DataExportWorker._read_latest_measures(xlrd, src)
+        if not measures:
+            return ""
+        labels = DataExportWorker.HEADER[2:2 + len(measures)]   # L1-1…L4-2
+        return format_timer(labels, measures)
 
     @Slot()
     def run(self):
         sn = self.payload.get("sn", "")
         result = self.payload.get("result", "")
+        # Chèn 8 số đo (L1-1…L4-2) của dòng mới nhất vào field "timer"
+        if self.src_dir:
+            try:
+                timer = self._build_timer()
+                if timer:
+                    self.payload["timer"] = timer
+            except Exception:
+                pass
         try:
             import requests
             r = requests.post(self.url, json=self.payload, timeout=self.timeout)
@@ -1072,7 +1129,9 @@ class MainWindow(QMainWindow):
             "result": result,
         }
         worker = SfcPushWorker(config.link_sfc, payload,
-                               timeout=config.API_REQUEST_TIMEOUT)
+                               timeout=config.API_REQUEST_TIMEOUT,
+                               src_dir=getattr(config, "DATA_SRC_DIR", ""),
+                               date_fmt=getattr(config, "DATA_FILE_DATEFMT", "%Y%m%d"))
         worker.done.connect(self._on_sfc_done)
         self._run_worker(worker)
 
