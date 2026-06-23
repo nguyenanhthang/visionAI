@@ -111,7 +111,7 @@ def main():
     # giữ GIL + khóa import-lock nhiều giây, worker khác đứng chờ
     # (crash.log op_s2 06:32 12/06). Nạp ở đây thì tốn lúc khởi động,
     # không tốn giữa ca.
-    for _m in ("xlrd", "xlwt", "requests"):
+    for _m in ("xlrd", "openpyxl", "requests"):
         try:
             __import__(_m)
         except Exception:

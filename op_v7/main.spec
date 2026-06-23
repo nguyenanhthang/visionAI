@@ -10,6 +10,8 @@ a = Analysis(
     hiddenimports=[
         'PySide6.QtSvg',
         'PySide6.QtNetwork',
+        'openpyxl',
+        'xlrd',
     ],
     hookspath=[],
     hooksconfig={},

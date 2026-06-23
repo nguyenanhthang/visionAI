@@ -14,7 +14,7 @@ Staff              = ''  # mã NV mặc định
 
 # ── Bật/tắt tính năng (toggle ở giao diện chính) ───────────
 SCAN_ENABLED = True    # bật quét SN sản phẩm (bắt buộc quét trước khi qua trạm)
-SAVE_EXCEL   = True    # bật lưu dòng đo sang file .xls
+SAVE_EXCEL   = True    # bật lưu dòng đo sang file .xlsx
 SAVE_IMAGE   = True    # bật lưu/đẩy ảnh OPL
 
 # Chặn tool accessibility (UIA/MSAA — remote desktop/AV/agent giám sát…)
@@ -56,12 +56,13 @@ token_link = 'http://10.222.48.213:8888/v2/platform/get/token?appid=e015ef3a23a8
 OPL_OK_DIR = 'D:\\anh\\OK'
 OPL_NG_DIR = 'D:\\anh\\NG'
 
-# ── Data export (.xls log) ─────────────────────────────────
+# ── Data export (.xlsx log) ────────────────────────────────
 # Mỗi tín hiệu PLC OK/NG: đọc dòng dữ liệu MỚI NHẤT (cột B→I = 8 giá trị)
-# của file  <DATA_SRC_DIR>\<ngày>.xls  rồi append 1 dòng
+# của file  <DATA_SRC_DIR>\<ngày>.xlsx (hoặc .xls) rồi append 1 dòng
 #   [times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2, result]  (result = OK/NG)
-# sang  <DATA_EXPORT_DIR>\<ngày>.xls  (header tạo 1 lần).
+# sang  <DATA_EXPORT_DIR>\<ngày>.xlsx  (header tạo 1 lần).
+# Nguồn đọc được cả .xls BIFF, .xlsx OOXML và file 'Excel' ruột là text.
 # Để rỗng DATA_SRC_DIR hoặc DATA_EXPORT_DIR → tắt tính năng này.
-DATA_SRC_DIR      = 'D:/data'          # folder chứa file .xls nguồn (đặt tên theo ngày)
-DATA_EXPORT_DIR   = 'D:/AOI_DATA'          # folder lưu file .xls đích (đặt tên theo ngày)
-DATA_FILE_DATEFMT = '%Y-%m-%d'    # định dạng tên file theo ngày (vd 20260603.xls)
+DATA_SRC_DIR      = 'D:/data'          # folder chứa file nguồn (đặt tên theo ngày)
+DATA_EXPORT_DIR   = 'D:/AOI_DATA'          # folder lưu file .xlsx đích (đặt tên theo ngày)
+DATA_FILE_DATEFMT = '%Y-%m-%d'    # định dạng tên file theo ngày (vd 2026-06-03.xlsx)

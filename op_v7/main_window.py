@@ -203,8 +203,8 @@ class SfcPushWorker(QObject):
     """POST kết quả verdict lên MES clipThroughStation.
 
     Payload: {sn, stationName, empNo, result}. Nếu có ``src_dir`` thì đọc
-    8 số đo (L1-1…L4-2) của dòng MỚI NHẤT trong file ``<src_dir>/<ngày>.xls``
-    rồi chèn field ``timer`` dạng
+    8 số đo (L1-1…L4-2) của dòng MỚI NHẤT trong file
+    ``<src_dir>/<ngày>.xlsx`` (hoặc ``.xls``) rồi chèn field ``timer`` dạng
     ``"L1-1: 0.512mm; L1-2: 0.498mm; … ; L4-2: 0.499mm"``.
     Response code=200 → ok, khác → log lỗi (vd 406 "下一制程为 EOL-S").
 
@@ -226,16 +226,13 @@ class SfcPushWorker(QObject):
         self.date_fmt = date_fmt or "%Y%m%d"
 
     def _build_timer(self) -> str:
-        """Chuỗi timer từ dòng đo mới nhất của file nguồn hôm nay. '' nếu
-        không có file/dữ liệu — KHÔNG chặn việc push verdict."""
-        try:
-            import xlrd
-        except ImportError:
+        """Chuỗi timer từ dòng đo mới nhất của file nguồn hôm nay (.xls hoặc
+        .xlsx). '' nếu không có file/dữ liệu — KHÔNG chặn việc push verdict."""
+        day = datetime.now().strftime(self.date_fmt)
+        src = DataExportWorker._find_source(self.src_dir, day)
+        if src is None:
             return ""
-        src = Path(self.src_dir) / f"{datetime.now().strftime(self.date_fmt)}.xls"
-        if not src.exists():
-            return ""
-        measures = DataExportWorker._read_latest_measures(xlrd, src)
+        measures = DataExportWorker._read_latest_measures(src)
         if not measures:
             return ""
         labels = DataExportWorker.HEADER[2:2 + len(measures)]   # L1-1…L4-2
@@ -273,19 +270,20 @@ class SfcPushWorker(QObject):
 
 
 class DataExportWorker(QObject):
-    """Append 1 dòng đo sang file .xls log theo ngày khi có verdict PLC.
+    """Append 1 dòng đo sang file .xlsx log theo ngày khi có verdict PLC.
 
-    - Nguồn: ``<src_dir>/<ngày>.xls`` — lấy cột B→I (8 giá trị) của
-      DÒNG DỮ LIỆU MỚI NHẤT (dòng cuối còn dữ liệu).
-    - Đích:  ``<dst_dir>/<ngày>.xls`` — append dòng
+    - Nguồn: ``<src_dir>/<ngày>.xlsx`` (hoặc ``.xls``) — lấy cột B→I (8 giá
+      trị) của DÒNG DỮ LIỆU MỚI NHẤT. Đọc được cả .xls BIFF, .xlsx OOXML và
+      file 'Excel' mà ruột là text tab-separated (tự nhận theo byte đầu).
+    - Đích:  ``<dst_dir>/<ngày>.xlsx`` — append dòng
       ``[times, SN, L1-1, L1-2, L2-1, L2-2, L3-1, L3-2, L4-1, L4-2, result]``;
       header ghi 1 lần ở đầu file.
     - ``times`` = giờ nhận verdict, ``SN`` = mã sản phẩm đang quét,
       ``result`` = "OK" / "NG".
 
-    xlwt không append trực tiếp .xls → đọc lại toàn bộ file đích rồi
-    ghi lại (header + dòng cũ + dòng mới) dưới ``_file_lock`` để 2 verdict
-    sát nhau không ghi đè lẫn nhau.
+    openpyxl không append trực tiếp → đọc lại toàn bộ file đích rồi ghi lại
+    (header + dòng cũ + dòng mới) dưới ``_file_lock`` để 2 verdict sát nhau
+    không ghi đè lẫn nhau.
     """
 
     done     = Signal(bool, str)   # ok, message
@@ -294,6 +292,7 @@ class DataExportWorker(QObject):
     HEADER = ["times", "SN", "L1-1", "L1-2", "L2-1", "L2-2",
               "L3-1", "L3-2", "L4-1", "L4-2", "result"]
     _SRC_COLS = range(1, 9)          # cột B..I (0-based: 1..8)
+    _SRC_EXTS = (".xlsx", ".xls")    # tìm file nguồn: ưu tiên .xlsx, rồi .xls
     _file_lock = threading.Lock()    # serialize ghi file đích
     WRITE_RETRIES = 5                # số lần thử ghi lại khi file bị khóa
     RETRY_DELAY   = 0.4              # giây giữa các lần thử
@@ -311,28 +310,27 @@ class DataExportWorker(QObject):
     @Slot()
     def run(self):
         try:
-            import xlrd
-            import xlwt
+            import openpyxl  # bắt buộc: ghi file đích .xlsx (đọc nguồn .xls/.xlsx)
         except ImportError:
-            self.done.emit(False, "Thiếu thư viện: pip install xlrd xlwt")
+            self.done.emit(False, "Thiếu thư viện: pip install openpyxl")
             self.finished.emit()
             return
         try:
             now = datetime.now()
             day = now.strftime(self.date_fmt)
-            src = Path(self.src_dir) / f"{day}.xls"
-            if not src.exists():
-                self.done.emit(False, f"File .xls nguồn không tồn tại: {src.name}")
+            src = self._find_source(self.src_dir, day)
+            if src is None:
+                self.done.emit(False, f"File nguồn {day}.(xlsx/xls) không tồn tại")
                 return
 
-            measures = self._read_latest_measures(xlrd, src)
+            measures = self._read_latest_measures(src)
             if measures is None:
                 self.done.emit(False, f"{src.name} không có dòng dữ liệu")
                 return
 
             row = [now.strftime("%Y-%m-%d %H:%M:%S"), self.sn, *measures, self.result]
 
-            dst = Path(self.dst_dir) / f"{day}.xls"
+            dst = Path(self.dst_dir) / f"{day}.xlsx"
             pending = Path(self.dst_dir) / f"{day}.pending.json"
 
             ok_save = False
@@ -342,8 +340,8 @@ class DataExportWorker(QObject):
                 # các dòng còn đệm từ lần trước (chưa ghi được) + dòng mới
                 pending_rows = self._read_pending(pending)
                 try:
-                    old_rows = self._read_existing(xlrd, dst) if dst.exists() else []
-                    self._write_all_retry(xlwt, dst, old_rows + pending_rows + [row])
+                    old_rows = self._read_existing(dst) if dst.exists() else []
+                    self._write_all_retry(dst, old_rows + pending_rows + [row])
                     self._clear_pending(pending)   # ghi xong → xoá đệm
                     ok_save = True
                 except PermissionError:
@@ -367,10 +365,10 @@ class DataExportWorker(QObject):
                 n = len(pending_rows) + 1
                 self.done.emit(
                     False,
-                    f"{day}.xls {reason} — đã đệm {n} dòng, tự lưu khi file rảnh",
+                    f"{day}.xlsx {reason} — đã đệm {n} dòng, tự lưu khi file rảnh",
                 )
         except Exception as exc:
-            self.done.emit(False, f"Export .xls lỗi: {exc}")
+            self.done.emit(False, f"Export .xlsx lỗi: {exc}")
         finally:
             self.finished.emit()
 
@@ -378,20 +376,49 @@ class DataExportWorker(QObject):
     _TAIL_BYTES = 262144   # file text chỉ đọc 256KB cuối — file nguồn phình cả ngày
 
     @classmethod
-    def _read_rows_any(cls, xlrd, path: Path) -> list[list]:
-        """Đọc file nguồn thành list dòng (mỗi dòng là list cột).
+    def _find_source(cls, src_dir: str, day: str):
+        """Path file nguồn hôm nay — thử .xlsx trước rồi .xls (đọc được cả
+        hai). None nếu không file nào tồn tại."""
+        if not src_dir:
+            return None
+        for ext in cls._SRC_EXTS:
+            p = Path(src_dir) / f"{day}{ext}"
+            if p.exists():
+                return p
+        return None
 
-        Máy AOI ghi file đuôi .xls nhưng nội dung thực ra là text
-        tab-separated → xlrd báo 'Expected BOF record'. Vì vậy thử
-        đọc .xls (BIFF) thật trước; nếu không phải, fallback đọc như
-        text tab-separated. Giá trị được chuẩn hoá qua _norm().
+    @classmethod
+    def _read_rows_any(cls, path: Path) -> list[list]:
+        """Đọc file nguồn thành list dòng, tự nhận DẠNG theo byte đầu:
 
-        Fallback text CHỈ đọc khúc đuôi file: file nguồn được máy đo
-        append liên tục cả ca, đọc nguyên file cho MỖI verdict nghĩa là
-        chi phí tăng tuyến tính theo giờ chạy (giữ GIL khi parse → GUI
-        khựng dần) — mà ta chỉ cần dòng cuối.
+        - OLE2 (D0 CF 11 E0) → .xls BIFF thật            → xlrd
+        - ZIP  (50 4B 03 04) → .xlsx / OOXML thật        → openpyxl (read-only)
+        - còn lại            → text tab-separated (máy AOI hay ghi file đuôi
+          .xls/.xlsx mà ruột là text)                    → đọc khúc đuôi 256KB
+
+        File Excel nhị phân mà parser hỏng/thiếu lib → [] (KHÔNG decode nhị
+        phân thành text rác). Giá trị chuẩn hoá qua _norm()/_norm_text().
         """
-        # 1) Thử đọc .xls (BIFF) thật bằng xlrd
+        try:
+            with open(path, "rb") as f:
+                head = f.read(8)
+        except OSError:
+            return []
+        if head.startswith(b"\xD0\xCF\x11\xE0"):        # .xls BIFF
+            rows = cls._read_xls_biff(path)
+            return rows if rows is not None else []
+        if head.startswith(b"PK\x03\x04"):              # .xlsx / OOXML
+            rows = cls._read_xlsx_tail(path)
+            return rows if rows is not None else []
+        return cls._read_text_tail(path)                # text tab-separated
+
+    @classmethod
+    def _read_xls_biff(cls, path: Path):
+        """.xls BIFF thật → list dòng. None nếu thiếu xlrd / không đọc được."""
+        try:
+            import xlrd
+        except ImportError:
+            return None
         try:
             sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
             return [
@@ -399,9 +426,42 @@ class DataExportWorker(QObject):
                 for r in range(sheet.nrows)
             ]
         except Exception:
-            pass  # không phải .xls thật → thử đọc text bên dưới
+            return None
 
-        # 2) Fallback: đọc khúc đuôi file text tab-separated
+    @classmethod
+    def _read_xlsx_tail(cls, path: Path):
+        """.xlsx thật → CHỈ giữ dòng dữ liệu cuối còn dữ liệu (read-only,
+        lazy → O(1) RAM dù file phình cả ca). None nếu thiếu openpyxl/lỗi.
+
+        .xlsx là ZIP nên không seek-đuôi như text được; đành duyệt hết nhưng
+        chỉ giữ dòng cuối — đủ cho _read_latest_measures."""
+        try:
+            import openpyxl
+        except ImportError:
+            return None
+        wb = None
+        try:
+            wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+            ws = wb.worksheets[0]
+            last = None
+            for row in ws.iter_rows(values_only=True):
+                cells = [cls._norm(v) for v in row]
+                if any(v != "" for v in cells):
+                    last = cells
+            return [last] if last is not None else []
+        except Exception:
+            return None
+        finally:
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+
+    @classmethod
+    def _read_text_tail(cls, path: Path) -> list[list]:
+        """File 'Excel' mà ruột là text tab-separated → đọc khúc đuôi 256KB
+        (file nguồn append cả ca; ta chỉ cần dòng cuối)."""
         try:
             size = path.stat().st_size
             with open(path, "rb") as f:
@@ -421,65 +481,71 @@ class DataExportWorker(QObject):
             return []
 
     @classmethod
-    def _read_latest_measures(cls, xlrd, path: Path):
+    def _read_latest_measures(cls, path: Path):
         """Cột B→I của dòng cuối còn dữ liệu. None nếu file rỗng."""
-        rows = cls._read_rows_any(xlrd, path)
+        rows = cls._read_rows_any(path)
         for cells in reversed(rows):
             if any(v != "" for v in cells):
                 return [cells[c] if c < len(cells) else "" for c in cls._SRC_COLS]
         return None
 
     @classmethod
-    def _read_existing(cls, xlrd, path: Path) -> list[list]:
-        """Đọc lại các dòng dữ liệu cũ của file ĐÍCH (bỏ header).
+    def _read_existing(cls, path: Path) -> list[list]:
+        """Đọc lại các dòng dữ liệu cũ của file ĐÍCH .xlsx (bỏ header).
 
-        File đích luôn do chính worker ghi bằng xlwt → là .xls thật.
-        Vì vậy KHÔNG dùng fallback text ở đây: nếu file tồn tại mà đọc
-        không được thì ném lỗi để run() báo và TUYỆT ĐỐI không ghi đè
-        (tránh mất toàn bộ dữ liệu cũ).
+        File đích luôn do chính worker ghi bằng openpyxl → .xlsx thật.
+        Vì vậy KHÔNG dùng fallback ở đây: nếu file tồn tại mà đọc không
+        được thì ném lỗi để run() đệm và TUYỆT ĐỐI không ghi đè (tránh
+        mất toàn bộ dữ liệu cũ).
         """
-        sheet = xlrd.open_workbook(str(path)).sheet_by_index(0)
-        out = []
-        for r in range(sheet.nrows):
-            vals = [cls._norm(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
-            if r == 0 and vals[:1] == [cls.HEADER[0]]:
-                continue  # bỏ header cũ — sẽ ghi lại
-            if any(v != "" for v in vals):
-                out.append(vals)
-        return out
+        import openpyxl
+        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+        try:
+            ws = wb.worksheets[0]
+            out = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                vals = [cls._norm(v) for v in row]
+                if i == 0 and vals[:1] == [cls.HEADER[0]]:
+                    continue  # bỏ header cũ — sẽ ghi lại
+                if any(v != "" for v in vals):
+                    out.append(vals)
+            return out
+        finally:
+            wb.close()
 
     @classmethod
-    def _write_all(cls, xlwt, path: Path, rows: list[list]):
-        wb = xlwt.Workbook(encoding="utf-8")
-        ws = wb.add_sheet("data")
-        for c, h in enumerate(cls.HEADER):
-            ws.write(0, c, h)
-        for ri, row in enumerate(rows, start=1):
-            for c, val in enumerate(row):
-                ws.write(ri, c, val)
+    def _write_all(cls, path: Path, rows: list[list]):
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "data"
+        ws.append(cls.HEADER)
+        for row in rows:
+            ws.append(list(row))
         # Ghi ra file tạm rồi thay thế: nếu ghi dở (mất điện, lỗi) thì
         # file đích cũ vẫn còn nguyên, không bị cụt.
         tmp = path.with_suffix(path.suffix + ".tmp")
         wb.save(str(tmp))
+        wb.close()
         import os
         os.replace(str(tmp), str(path))  # atomic trên cùng ổ đĩa
 
     @classmethod
-    def _write_all_retry(cls, xlwt, path: Path, rows: list[list]):
+    def _write_all_retry(cls, path: Path, rows: list[list]):
         """Như _write_all nhưng thử lại vài lần khi file bị khóa
         (vd Excel vừa nhả ra). Hết số lần thử mà vẫn khóa → ném
         PermissionError để tầng trên đệm lại."""
         last_err = None
         for _ in range(cls.WRITE_RETRIES):
             try:
-                cls._write_all(xlwt, path, rows)
+                cls._write_all(path, rows)
                 return
             except PermissionError as e:
                 last_err = e
                 time.sleep(cls.RETRY_DELAY)
         raise last_err if last_err else PermissionError(str(path))
 
-    # ── file đệm (.pending.json): các dòng chưa ghi được vào .xls ──
+    # ── file đệm (.pending.json): các dòng chưa ghi được vào .xlsx ──
     @staticmethod
     def _read_pending(path: Path) -> list[list]:
         """Đọc các dòng đang đệm (mỗi dòng 1 JSON array). Đệm hỏng → []."""
@@ -1063,7 +1129,7 @@ class MainWindow(QMainWindow):
     # ── Data export .xls (auto trigger sau mỗi PLC verdict) ───
     def _trigger_data_export(self, sn: str, result: str = ""):
         if not getattr(config, "SAVE_EXCEL", True):
-            self._log("Save Excel tắt — bỏ qua ghi .xls", "SYS")
+            self._log("Save Excel tắt — bỏ qua ghi .xlsx", "SYS")
             return
         src = getattr(config, "DATA_SRC_DIR", "")
         dst = getattr(config, "DATA_EXPORT_DIR", "")
