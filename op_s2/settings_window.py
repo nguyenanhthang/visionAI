@@ -193,6 +193,11 @@ class SettingsDialog(QDialog):
 
     # (key, label, type) — type ∈ {"str","int","float","bool","dir","com"}
     SCHEMA = {
+        "Chức năng": [
+            ("SCAN_ENABLED", "Bắt buộc quét SN trước khi qua trạm", "bool"),
+            ("SAVE_EXCEL",   "Lưu dòng đo sang file .xls",          "bool"),
+            ("SAVE_IMAGE",   "Lưu / đẩy ảnh OPL",                   "bool"),
+        ],
         "Scanner": [
             ("SCANNER_PORT",     "COM port",            "com"),
             ("SCANNER_BAUDRATE", "Baudrate",            "int"),
@@ -203,8 +208,9 @@ class SettingsDialog(QDialog):
         ],
         "PLC": [
             ("PLC_IP",                "PLC IP",                 "str"),
-            ("PLC_RESULT_ADDR",       "Reg đọc verdict (300)",  "int"),
-            ("PLC_SCAN_RESULT_ADDR",  "Reg ghi scan (250)",     "int"),
+            ("PLC_PORT",              "PLC port (FINS 9600)",   "int"),
+            ("PLC_RESULT_ADDR",       "DM đọc verdict (300)",   "int"),
+            ("PLC_SCAN_RESULT_ADDR",  "DM ghi scan (250)",      "int"),
             ("PLC_POLL_HZ",           "Poll Hz",                "int"),
             ("PLC_SIMULATED",         "Chạy giả lập",           "bool"),
         ],
