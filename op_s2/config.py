@@ -12,6 +12,11 @@ SCANNER_TIMEOUT    = 0.5     # giây - càng nhỏ stop càng nhanh
 PRODUCT_READ_SIZE  = 64      # số byte tối đa cho 1 lần đọc mã sản phẩm
 Staff              = ''  # mã NV mặc định
 
+# ── Bật/tắt tính năng (toggle trên main window + tab Chức năng) ──
+SCAN_ENABLED = True    # bật quét SN sản phẩm (bắt buộc quét trước khi qua trạm)
+SAVE_EXCEL   = True    # bật lưu dòng đo sang file .xls
+SAVE_IMAGE   = True    # bật lưu/đẩy ảnh OPL
+
 # Chặn tool accessibility (UIA/MSAA — remote desktop/AV/agent giám sát…)
 # attach vào app. Client treo từng làm GUI đơ cứng ngay trong lệnh ghi log
 # (crash.log op_v7 Timeout 11/06). App kiosk không cần screen-reader → chặn.

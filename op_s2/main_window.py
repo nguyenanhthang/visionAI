@@ -645,6 +645,26 @@ class MainWindow(QMainWindow):
         btn.setText(f"{label}: {'ON' if checked else 'OFF'}")
         self._log(f"{label} {'BẬT' if checked else 'TẮT'}", "SYS",
                   level=("ok" if checked else "warn"))
+        # lưu xuống config.py/settings.json — trước đây chỉ setattr runtime
+        # nên restart là quay về giá trị cũ (nhìn như toggle "không ăn")
+        try:
+            from settings_window import save_settings
+            save_settings({attr: checked})
+        except Exception as exc:
+            self._log(f"Không lưu được {attr}: {exc}", "SYS", level="warn")
+
+    def _sync_toggles(self):
+        """Đồng bộ 3 nút toggle theo config (sau khi lưu từ dialog Cài đặt)."""
+        for btn, attr, label in (
+            (self.scan_toggle,  "SCAN_ENABLED", "Quét SN"),
+            (self.excel_toggle, "SAVE_EXCEL",   "Lưu Excel"),
+            (self.image_toggle, "SAVE_IMAGE",   "Lưu ảnh"),
+        ):
+            on = bool(getattr(config, attr, True))
+            btn.blockSignals(True)      # tránh _on_toggle ghi file lần nữa
+            btn.setChecked(on)
+            btn.blockSignals(False)
+            btn.setText(f"{label}: {'ON' if on else 'OFF'}")
 
     # ── topbar ───────────────────────────────────────────────
     def _build_topbar(self) -> QWidget:
@@ -1153,6 +1173,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             # vài thứ apply được ngay
             self.station_lbl.setText(config.STATION_NAME)
+            self._sync_toggles()   # tab Chức năng đổi cờ → cập nhật 3 nút
             self._log("Đã lưu cài đặt", "SYS", level="ok")
 
     # ── log ──────────────────────────────────────────────────
