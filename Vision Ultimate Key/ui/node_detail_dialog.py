@@ -2369,11 +2369,18 @@ class NodeDetailDialog(QDialog):
                 self._sync_spinbox(name, val)
 
     def _get_input_image(self) -> Optional[np.ndarray]:
+        """Ảnh mà upstream thực sự đưa vào port `image` của node này.
+
+        Lấy theo ĐÚNG port nguồn đã nối (`conn.src_port`) — hardcode "image"
+        sẽ trả sai với tool có nhiều output ảnh (vd Crop ROI: `image` = ảnh
+        gốc pass-through, `roi_image` = vùng đã cắt)."""
         for conn in self._graph.connections:
             if conn.dst_id == self._node.node_id and conn.dst_port == "image":
                 src = self._graph.nodes.get(conn.src_id)
-                if src and "image" in src.outputs:
-                    return src.outputs["image"]
+                if src is not None:
+                    img = src.outputs.get(conn.src_port)
+                    if isinstance(img, np.ndarray):
+                        return img
         return None
 
     # ════════════════════════════════════════════════════════════════
@@ -2821,14 +2828,17 @@ class NodeDetailDialog(QDialog):
         """Reset Crop ROI về full ảnh nguồn — xoá _drawn_roi + set
         x=y=0, w/h = kích thước input image."""
         node = self._node
-        # Tìm input image: ưu tiên upstream output, fallback node.outputs
+        # Tìm input image: ưu tiên upstream output, fallback node.outputs.
+        # Đọc đúng port nguồn (`c.src_port`) — nối bằng `roi_image` mà đọc
+        # "image" sẽ reset ROI theo kích thước ảnh gốc, không phải ảnh vào.
         src_img = None
         if self._graph:
             for c in self._graph.connections:
                 if c.dst_id == node.node_id and c.dst_port == "image":
                     s = self._graph.nodes.get(c.src_id)
-                    if s and "image" in s.outputs:
-                        src_img = s.outputs["image"]; break
+                    if s is not None and isinstance(
+                            s.outputs.get(c.src_port), np.ndarray):
+                        src_img = s.outputs[c.src_port]; break
         if src_img is None:
             src_img = node.outputs.get("image")
         if src_img is None:
@@ -2884,7 +2894,11 @@ class NodeDetailDialog(QDialog):
     def _on_template_drawn(self, x, y, w, h):
         """Vẽ ROI → cắt template → lưu vào params."""
         node = self._node
-        img = node.outputs.get("image") or self._get_input_image()
+        # `or` không an toàn với numpy (bool(array) nhiều phần tử → ValueError)
+        # → chọn bằng is-None.
+        img = node.outputs.get("image")
+        if img is None:
+            img = self._get_input_image()
         if img is None:
             QMessageBox.warning(self, tr("Template"),
                                 tr("Cần ảnh để cắt template.\n"
