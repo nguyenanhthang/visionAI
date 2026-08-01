@@ -1545,14 +1545,20 @@ class ImageViewerPanel(QWidget):
         return overlay_diff(base, before, after)
 
     def _node_input_image(self, node):
-        """Output 'image' của upstream gần nhất của node (input của node)."""
+        """Ảnh upstream gần nhất đưa vào port 'image' của node.
+
+        Đọc theo ĐÚNG port nguồn đã nối (`c.src_port`) — hardcode "image" trả
+        sai frame 'before' khi upstream có nhiều output ảnh (vd Crop ROI nối
+        bằng `roi_image`), làm overlay_diff so lệch kích thước/nội dung."""
         if not self._graph:
             return None
         for c in self._graph.connections:
             if c.dst_id == node.node_id and c.dst_port == "image":
                 src = self._graph.nodes.get(c.src_id)
-                if src and "image" in src.outputs:
-                    return src.outputs["image"]
+                if src is not None:
+                    img = src.outputs.get(c.src_port)
+                    if isinstance(img, np.ndarray):
+                        return img
         return None
 
     def _get_source_image(self, node):
@@ -1578,12 +1584,15 @@ class ImageViewerPanel(QWidget):
                     upstream = self._graph.nodes.get(c.src_id)
                     break
             cur = upstream
-        # Fallback: upstream gần nhất nếu không tìm thấy Acquire root
+        # Fallback: upstream gần nhất nếu không tìm thấy Acquire root — lấy
+        # theo đúng port nguồn đã nối (vd Crop ROI nối bằng `roi_image`).
         for c in self._graph.connections:
             if c.dst_id == node.node_id and c.dst_port == "image":
                 src = self._graph.nodes.get(c.src_id)
-                if src and "image" in src.outputs:
-                    return src.outputs["image"]
+                if src is not None:
+                    img = src.outputs.get(c.src_port)
+                    if isinstance(img, np.ndarray):
+                        return img
         return None
 
     def _display_node(self, node_id: str):

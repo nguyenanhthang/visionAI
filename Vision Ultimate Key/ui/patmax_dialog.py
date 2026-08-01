@@ -2072,12 +2072,16 @@ class PatMaxDialog(QDialog):
         """Trả về RAW upstream image (KHÔNG dùng node.outputs vì đó là
         result_vis có sẵn marker baked-in, sẽ chồng với overlay)."""
         node = self._node
-        # Ưu tiên upstream — đây là ảnh input gốc
+        # Ưu tiên upstream — đây là ảnh input gốc.
+        # Đọc ĐÚNG port nguồn đã nối (`conn.src_port`), KHÔNG hardcode "image":
+        # vd Crop ROI xuất `image` = ảnh gốc pass-through và `roi_image` = vùng
+        # đã cắt. Nối `roi_image` → PatMax mà đọc "image" thì dialog hiện ảnh
+        # gốc, lệch hẳn với ảnh pipeline thực sự đưa vào proc_patmax.
         for conn in self._graph.connections:
             if conn.dst_id == node.node_id and conn.dst_port == "image":
                 src = self._graph.nodes.get(conn.src_id)
-                if src and "image" in src.outputs:
-                    img = src.outputs["image"]
+                if src is not None:
+                    img = src.outputs.get(conn.src_port)
                     if isinstance(img, np.ndarray):
                         return img
         # Không có upstream connect → fallback xuống output của chính node
